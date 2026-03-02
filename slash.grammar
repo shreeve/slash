@@ -426,7 +426,7 @@ command   = "!" command                     → (not 2)
           | SOURCE word                     → (source 2)
           | simple_cmd
 
-simple_cmd = cmd_word (argument | redirect)* [heredoc] → (cmd 1 args:2 heredoc:3)
+simple_cmd = cmd_word argument* → (cmd 1 ...2)
 
 cmd_word  = cmd_name
 
@@ -434,7 +434,7 @@ cmd_word  = cmd_name
 # ARGUMENTS
 # ==============================================================================
 
-argument  = word
+argument  = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | MINUS
           | proc_sub
           | subshell_capture
 
