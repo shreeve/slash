@@ -1310,7 +1310,7 @@ slash/
 │   ├── pipeline.zig      # pipeline construction and execution
 │   ├── redirect.zig      # file descriptor setup and redirection
 │   ├── expand.zig        # glob expansion, variable expansion
-│   ├── math.zig          # inline arithmetic
+│   │                     # (inline arithmetic handled by exec.zig)
 │   ├── builtin.zig       # builtin command implementations
 │   ├── history.zig       # SQLite history interface
 │   ├── frecency.zig      # SQLite directory frecency
