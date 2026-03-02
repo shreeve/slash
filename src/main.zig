@@ -16,7 +16,6 @@ const std = @import("std");
 const posix = std.posix;
 const build_options = @import("build_options");
 const eval_mod = @import("eval.zig");
-const lexer_mod = @import("lexer.zig");
 
 const parser = @import("parser.zig");
 const Lexer = parser.Lexer;
