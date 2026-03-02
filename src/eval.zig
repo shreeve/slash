@@ -150,41 +150,37 @@ pub const Eval = struct {
     fn evalCmd(self: *Eval, args: []const Sexp, source: []const u8) void {
         if (args.len == 0) return;
 
+        // Build argv by joining adjacent tokens (pre==0 means no whitespace gap)
         var argv_list: std.ArrayList([]const u8) = .empty;
         defer argv_list.deinit(self.allocator);
 
-        const cmd_name = self.sexpToStr(args[0], source) orelse return;
-        argv_list.append(self.allocator, cmd_name) catch return;
-
-        for (args[1..]) |arg| {
+        for (args) |arg| {
             switch (arg) {
-                .src => {
-                    if (self.sexpToStr(arg, source)) |s| {
-                        argv_list.append(self.allocator, s) catch {};
+                .src => |s| {
+                    const text = source[s.pos..][0..s.len];
+                    if (argv_list.items.len > 0) {
+                        const prev = argv_list.items[argv_list.items.len - 1];
+                        const prev_start = @intFromPtr(prev.ptr) - @intFromPtr(source.ptr);
+                        const prev_end = prev_start + prev.len;
+                        if (s.pos == prev_end) {
+                            // Contiguous in source — extend previous slice
+                            argv_list.items[argv_list.items.len - 1] = source[prev_start .. s.pos + s.len];
+                            continue;
+                        }
                     }
+                    argv_list.append(self.allocator, text) catch {};
                 },
                 .list => |items| {
                     if (items.len > 0) {
                         switch (items[0]) {
                             .tag => |t| {
                                 if (isRedirTag(t)) continue;
-                                if (self.sexpToStr(arg, source)) |s| {
-                                    argv_list.append(self.allocator, s) catch {};
-                                }
                             },
-                            else => {
-                                if (self.sexpToStr(arg, source)) |s| {
-                                    argv_list.append(self.allocator, s) catch {};
-                                }
-                            },
+                            else => {},
                         }
                     }
                 },
-                else => {
-                    if (self.sexpToStr(arg, source)) |s| {
-                        argv_list.append(self.allocator, s) catch {};
-                    }
-                },
+                else => {},
             }
         }
 
