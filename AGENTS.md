@@ -20,7 +20,7 @@ regex.zig                      (regex wrapper, powered by Oniguruma)
 - `src/exec.zig` — walks s-expressions, executes commands (struct: `Shell`)
 - Tag enum and keyword matchers are generated inline in parser.zig (no separate file needed)
 - `src/regex.zig` — regex wrapper (Oniguruma C API)
-- `onig/` — Oniguruma 6.9.9 C source (compiled by build.zig)
+- `regex/` — Oniguruma 6.9.9 C source (compiled by build.zig)
 - `SLASH.md` — language specification
 
 ## Build

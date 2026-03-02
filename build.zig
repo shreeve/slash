@@ -4,7 +4,7 @@ const std = @import("std");
 
 const version = "0.1.0";
 
-const onig_cflags = &[_][]const u8{
+const regex_cflags = &[_][]const u8{
     "-std=gnu99",
     "-DNDEBUG",
     "-DHAVE_CONFIG_H",
@@ -15,8 +15,8 @@ const onig_cflags = &[_][]const u8{
 // Oniguruma C sources (compiled individually to avoid static name collisions).
 // Data files (unicode_*_data.c, unicode_wb_data.c, unicode_egcb_data.c) are
 // #included by unicode.c and must NOT be listed separately.
-const onig_sources = &[_][]const u8{
-    "onig_init.c",  "regcomp.c",   "regenc.c",     "regerror.c",
+const regex_sources = &[_][]const u8{
+    "onig_init.c",   "regcomp.c",   "regenc.c",     "regerror.c",
     "regexec.c",    "regext.c",    "regparse.c",   "regsyntax.c",
     "regtrav.c",    "regversion.c", "st.c",
     "unicode.c",    "unicode_fold1_key.c", "unicode_fold2_key.c",
@@ -49,11 +49,11 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     main_mod.addOptions("build_options", options);
-    main_mod.addIncludePath(b.path("onig"));
+    main_mod.addIncludePath(b.path("regex"));
     main_mod.addCSourceFiles(.{
-        .root = b.path("onig"),
-        .files = onig_sources,
-        .flags = onig_cflags,
+        .root = b.path("regex"),
+        .files = regex_sources,
+        .flags = regex_cflags,
     });
 
     const exe = b.addExecutable(.{
@@ -87,11 +87,11 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     test_mod.addOptions("build_options", options);
-    test_mod.addIncludePath(b.path("onig"));
+    test_mod.addIncludePath(b.path("regex"));
     test_mod.addCSourceFiles(.{
-        .root = b.path("onig"),
-        .files = onig_sources,
-        .flags = onig_cflags,
+        .root = b.path("regex"),
+        .files = regex_sources,
+        .flags = regex_cflags,
     });
 
     const tests = b.addTest(.{ .root_module = test_mod });
