@@ -1,6 +1,5 @@
-mumps.grammar
 /.zig-cache
 bin/grammar
-/onig-6.9.9
 bin/slash
+mumps.grammar
 notes.txt
