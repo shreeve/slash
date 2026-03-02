@@ -173,11 +173,10 @@ cd projects/slash    # go there, record it
 ..                   # go up (no need to type 'cd ..')
 ...                  # go up two levels
 j slash              # fuzzy jump to most frecent match for 'slash'
-d                    # show numbered list of recent directories
-d 3                  # jump to directory #3 from the list
 ```
 
-The `d` command shows something like:
+**Quick directory jumping** — press `Esc-=` (default binding, configurable)
+and Slash shows the most recent directories below the prompt:
 
 ```
   1  ~/projects/slash       (moments ago)
@@ -187,8 +186,28 @@ The `d` command shows something like:
   5  /tmp                   (last week)
 ```
 
-Type the number, go there. This is backed by SQLite frecency data. It is fast,
-accurate, and requires zero configuration.
+Type the number — Slash jumps immediately. No Enter needed. Press Escape to
+cancel. This is backed by SQLite frecency data. Fast, accurate, zero
+configuration.
+
+**File-aware cd** — if you `cd` to a file, Slash goes to its parent
+directory instead of printing an error. Enabled by default.
+
+```
+cd ~/projects/slash/src/main.zig    # goes to ~/projects/slash/src/
+```
+
+Disable with `set file-aware-cd false`.
+
+**Quick navigation hotkeys** — also built-in defaults:
+
+```
+Esc-1              # up 1 directory
+Esc-2              # up 2 directories
+Esc-3              # up 3 directories
+Esc--              # previous directory (cd -)
+Esc-l              # ls -la
+```
 
 ---
 
@@ -256,10 +275,14 @@ command 2> err.txt         # stderr to file
 command > out.txt 2>&1     # stdout and stderr to file
 command &> out.txt         # stdout and stderr to file (shorthand)
 command < input.txt        # stdin from file
-command << EOF             # heredoc
-  line one
-  line two
-EOF
+command '''                # heredoc (literal)
+    line one
+    line two
+    '''
+command """                # heredoc (interpolated)
+    hello $name
+    """
+command <<< "hello"        # herestring
 ```
 
 ### Boolean Operators
@@ -279,6 +302,16 @@ not test -f foo            # identical
 cmd1 xor cmd2              # exactly one must succeed (word form only)
 ```
 
+### Semicolons
+
+Semicolons separate commands on one line. Both commands run regardless of
+exit code. Different from `&&` (conditional) and `&` (background).
+
+```
+mkdir build; cd build
+echo starting; make; echo done
+```
+
 ### Background Jobs
 
 ```
@@ -286,11 +319,30 @@ long-running-thing &       # run in background
 make & ./watch-logs        # two things at once
 ```
 
+### Subshell Grouping
+
+Parentheses run commands in a subshell. State changes (variables, `cd`)
+do not affect the parent.
+
+```
+(cd /tmp; tar xzf archive.tgz)    # parent stays in original directory
+(long-thing &) &> /dev/null       # fork, background, detach, silence
+```
+
+### Comments
+
+`#` starts a comment anywhere — in scripts and at the interactive prompt.
+
+```
+ls -la    # show everything
+# this whole line is a comment
+```
+
 ### Variables
 
-Simple assignment. No type declarations. No export keyword needed — uppercase
-variables are automatically exported to child processes by convention (the shell
-enforces this).
+Simple assignment. No type declarations. Uppercase variables are automatically
+exported to child processes — no `export` keyword. This is not a convention,
+the shell enforces it.
 
 ```
 name = "steve"
@@ -305,6 +357,13 @@ Variable expansion:
 echo $name
 echo "Hello $name"
 echo "Count: $count"
+```
+
+Remove a variable with `-`:
+
+```
+name = -                   # unset (bare - means remove)
+name = "-"                 # set to the string "-"
 ```
 
 ### Inline Math
@@ -376,6 +435,27 @@ if $x == 1 {
 Slash is smart about comparison types: if both sides are numeric, numeric
 comparison is used. Otherwise string comparison. No `-eq` vs `=` nonsense.
 
+**File tests** — use `test` with flags. No `[`, `[[`, or `]]` syntax.
+
+```
+if test -f $file { echo "it's a file" }
+if test -d $path { echo "it's a directory" }
+unless test -e $path { echo "doesn't exist" }
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-e` | Path exists |
+| `-f` | Is a regular file |
+| `-d` | Is a directory |
+| `-s` | Exists and is non-empty |
+| `-r` | Is readable |
+| `-w` | Is writable |
+| `-x` | Is executable |
+| `-L` | Is a symbolic link |
+
+`test` is a Slash builtin — fast, no external process.
+
 **Regex matching:**
 
 ```
@@ -436,6 +516,32 @@ for f in *.zig {
 }
 ```
 
+### Pattern Matching: try
+
+`try` matches a value against strings, regexes, or a catch-all. It is the
+clean replacement for shell `case` statements.
+
+```
+try $action
+    "start"    { npm run dev }
+    "build"    { npm run build }
+    "test"     { npm run test }
+    else       { echo "usage: react <start|build|test>" }
+```
+
+Regex patterns use `/pattern/` delimiters with optional flags:
+
+```
+try $file
+    /\.zig$/       { echo "zig source" }
+    /\.rs$/        { echo "rust source" }
+    /test/i        { echo "test file" }
+    else           { echo "other: $file" }
+```
+
+Both string and regex matches can be mixed. `else` is the fallback.
+One-line and multi-line forms both work, same as `if` and `for`.
+
 ### Process Substitution
 
 Feed command output as a file argument:
@@ -455,70 +561,162 @@ count = $(ls *.zig | wc -l)
 echo "On branch $branch with $count zig files"
 ```
 
-### Heredocs
+### Heredocs and Herestrings
+
+Slash replaces bash's `<<EOF` heredocs with triple-character delimiters.
+No arbitrary token names. No `<<`. The delimiter itself is the signal.
+
+**Three heredoc types:**
+
+| Delimiter | Interpolation | Syntax highlighting |
+|-----------|---------------|---------------------|
+| `'''`     | No            | No                  |
+| `"""`     | Yes           | No                  |
+| `` ```lang ``  | Yes      | Yes, for `lang`     |
+
+**Literal heredoc** (`'''`) — no variable expansion:
 
 ```
-cat << EOF
-line one
-line two
-EOF
-
-# Indented heredoc (strips leading whitespace)
-cat <<- EOF
-    line one
-    line two
-EOF
+cat '''
+    Hello $name
+    This stays literal
+    '''
 ```
 
-### Aliases
+Output is exactly `Hello $name` / `This stays literal` — no expansion.
 
-Aliases are command shortcuts. Unlike other shells, Slash aliases support
-positional arguments — no need to write a function just to pass an argument.
-
-```
-alias ll = "ls -la"
-alias g = "git $*"
-alias gco = "git checkout $*"
-alias mkcd = "mkdir -p $1 && cd $1"
-alias ports = "lsof -i :$1"
-```
-
-`$1`, `$2`, etc. reference individual arguments. `$*` means all arguments.
-`$#` is the argument count. If no argument variables appear in the alias
-body, `$*` is implicitly appended — so `alias g = "git"` and
-`alias g = "git $*"` are identical.
-
-Aliases are simple one-liners. For multi-line logic, use a command (see
-User Commands below).
-
-### User Commands
-
-User commands are named sequences of shell statements that run in the current
-shell context. They are not functions — there are no return values, no local
-scope, no closures, no recursion. They are commands: give them a name, give
-them arguments, they run.
+**Interpolated heredoc** (`"""`) — variables expand:
 
 ```
-cmd mkcd(dir)
-    mkdir -p $dir
-    cd $dir
+name = "Steve"
+cat """
+    Hello $name
+    Welcome to Slash
+    """
+```
 
-cmd gco(branch)
-    git checkout $branch
+Output: `Hello Steve` / `Welcome to Slash`.
 
+**Syntax-highlighted heredoc** (`` ```lang ``) — interpolated, with
+highlighting for the named language:
+
+```
+mysql $database ```sql
+    SELECT * FROM users
+    WHERE name = '$name'
+    ORDER BY created_at DESC;
+    ```
+```
+
+The shell highlights the heredoc body as SQL while you type. Useful for
+embedded code in any language the highlighter supports.
+
+**Indentation control** — the closing delimiter's indentation defines the
+left margin. All content lines are dedented by that amount.
+
+```
+    cat '''
+            line one
+          line two
+        '''
+```
+
+The closing `'''` is at column 8. So `line one` (12 spaces) keeps 4
+leading spaces, and `line two` (10 spaces) keeps 2. You see the
+indentation visually, and the closing delimiter tells the parser where
+the left edge is.
+
+**Piping** — the pipe can go on the opening line or after the closing
+delimiter. Both forms are equivalent:
+
+```
+cat ''' | wc
+    hello world
+    '''
+
+cat '''
+    hello world
+    ''' | wc
+```
+
+**Stacking** — multiple heredocs on one command line are matched in order:
+
+```
+diff <(cat ''') <(cat ''')
+    file one
+    '''
+    file two
+    '''
+```
+
+First `'''` matches the first block, second `'''` matches the second.
+
+**Closing rule:** a line whose first non-whitespace characters are the
+closing delimiter ends the heredoc. Anything after the delimiter on that
+line continues the command. The leading whitespace before the delimiter
+defines the margin.
+
+**Herestring** (`<<<`) — feed a single string as stdin:
+
+```
+wc -w <<< "one two three"
+grep "pattern" <<< $variable
+tr a-z A-Z <<< "hello"
+```
+
+Variables are always interpolated in herestrings.
+### User Commands (`cmd`)
+
+User commands are the single mechanism for defining named commands in Slash.
+There are no aliases, no functions — just `cmd`. One concept that handles
+everything from simple shortcuts to multi-line logic.
+
+Commands are not functions. There are no return values, no local scope, no
+closures, no recursion. They are commands: give them a name, give them
+arguments, they run in the current shell context.
+
+**One-line form** — for simple shortcuts and one-liners:
+
+```
+cmd ll ls -la
+cmd g git $*
+cmd gco git checkout $*
+cmd o open ${* ?? "."}
+cmd mkcd(dir) mkdir -p $dir && cd $dir
+cmd foo(one, two) ls $one $two $* 'caboose'
+cmd ns (sudo lsof -nP -iTCP -sTCP:LISTEN || true) | sed -n '1p' | sort -sn
+```
+
+**Multi-line form** — for commands with logic:
+
+```
 cmd serve(port)
-    if $port == ""
-        port = 8080
+    port = $port ?? 8080
     python3 -m http.server $port
 
 cmd deploy(env)
+    if $env == ""
+        echo "usage: deploy <env>"
+        exit 1
     echo "Deploying to $env with args: $*"
     ssh $env "deploy $*"
 ```
 
-Named parameters capture positional arguments. `$*` inside a command body
-refers to all arguments not captured by named parameters. `$#` is the count
-of remaining arguments.
+**No quoting wrapper.** The body is everything after the name and optional
+parameters. In multi-line form, the body is indentation-delimited. Single
+quotes, double quotes, pipes — they are all just part of the command. No
+escaping gymnastics. This is why aliases are unnecessary: `cmd` eliminates
+the quoting problem entirely.
+
+**Parsing rule:** `cmd name(params)` with `(` touching the name means a
+parameter list. `cmd name body...` with a space means the body starts
+immediately. This is unambiguous.
+
+**Named parameters** capture positional arguments. `$*` inside a command
+body refers to all arguments not captured by named parameters. `$#` is the
+count of remaining arguments. If no `$*` or positional variables appear in
+a one-liner body, `$*` is implicitly appended — so `cmd g git` and
+`cmd g git $*` are identical.
 
 Commands run in the shell's own process — `cd`, variable assignments, and
 other state changes take effect in the current session. This is what makes
@@ -531,19 +729,75 @@ with everything: pipes, redirects, background, conditionals.
 mkcd myproject
 serve 3000 &
 deploy staging --force
-type mkcd                    # "mkcd is a command"
+type mkcd                    # "mkcd is a user command"
 ```
 
-The hierarchy for name resolution: **builtins > user commands > aliases > PATH**.
+**Managing commands** — `cmd` handles definition, inspection, deletion,
+and listing. No extra keywords needed.
+
+```
+cmd foo echo hello           # define
+cmd foo                      # show definition
+cmd foo -                    # delete
+cmd                          # list all user commands
+```
+
+**Command-not-found hook** — define `cmd ???` to handle unknown commands.
+Slash calls it with the command name and arguments when nothing matches:
+
+```
+cmd ???(name)
+    if test -f ./$name.rip
+        rip ./$name.rip $*
+        exit $?
+    echo "slash: command not found: $name"
+    exit 127
+```
+
+Three characters, visually says "unknown." If not defined, Slash prints the
+default error message.
+
+The hierarchy for name resolution: **builtins > user commands > PATH > `???`**.
+
+### Auto-cd
+
+If the input is a valid directory path but not a command, Slash `cd`s to it
+automatically. No `cd` needed.
+
+```
+/tmp                       # same as: cd /tmp
+~/projects                 # same as: cd ~/projects
+..                         # already a builtin, but auto-cd handles paths too
+```
+
+Enabled by default. Disable with `set auto-cd false`.
+
+### Default Values (`??`)
+
+The `??` operator provides a default when a variable is unset or empty.
+No distinction between "unset" and "empty" — `??` covers both.
+
+**In assignments:**
+
+```
+port = $1 ?? 8080
+name = $USER ?? "anonymous"
+```
+
+**Inline in command arguments:**
+
+```
+cmd code code -g ${* ?? "."}
+cmd o open ${* ?? "."}
+cmd hc head -c${1 ?? 12} $2
+```
 
 ### Positional Arguments and Shift
-
-Positional arguments are available in both aliases and user commands:
 
 | Variable | Meaning |
 |----------|---------|
 | `$1`, `$2`, ... `$9`, `${10}` | Individual positional arguments |
-| `$*` | All arguments (aliases) or remaining arguments (commands) |
+| `$*` | All arguments, or remaining arguments after named params |
 | `$#` | Argument count |
 
 `shift` discards `$1` and slides everything down — `$2` becomes `$1`, `$3`
@@ -561,6 +815,27 @@ cmd flags
 
 No `unshift`, `pop`, or `push`. Those are array operations. If you need
 array manipulation, use a real language.
+
+### Exiting a Command
+
+`exit` is context-sensitive — it always means "leave the innermost context":
+
+| Where | Effect |
+|-------|--------|
+| Inside a `cmd` body | Exits the command, returns to caller |
+| Inside a sourced script | Exits the script, returns to caller |
+| At the interactive prompt | Exits the shell |
+
+Optional numeric argument sets the exit code (defaults to 0):
+
+```
+cmd mkcd(dir)
+    if $dir == ""
+        echo "usage: mkcd <dir>"
+        exit 1
+    mkdir -p $dir
+    cd $dir
+```
 
 ---
 
@@ -801,23 +1076,21 @@ be builtins because they affect Slash's own state.
 
 | Command   | Description                                          |
 |-----------|------------------------------------------------------|
-| `cd`      | Change directory, record in frecency DB              |
-| `..`      | Go up one directory (alias for `cd ..`)              |
+| `cd`      | Change directory (file-aware), record in frecency DB |
+| `..`      | Go up one directory (shorthand for `cd ..`)          |
 | `...`     | Go up two directories                                |
-| `d`       | Show/jump to recent directories (frecency list)      |
+| `dirs`    | Show recent directories (also available via hotkey)   |
 | `j`       | Fuzzy jump to frecency-ranked directory match        |
 | `fg`      | Bring background job to foreground                   |
 | `bg`      | Resume stopped job in background                     |
 | `jobs`    | List all jobs                                        |
-| `exit`    | Exit Slash                                           |
-| `export`  | Mark variable for export to child processes          |
-| `unset`   | Remove a variable                                    |
+| `exit`    | Exit current context (command, script, or shell)     |
 | `source`  | Execute a Slash script in the current shell context  |
 | `exec`    | Replace Slash process with a command                 |
-| `set`     | Set shell options                                    |
+| `set`     | Set, show, reset, or list shell options              |
 | `history` | Search/display command history                       |
 | `which`   | Show the resolved path of a command                  |
-| `type`    | Show whether a name is a builtin, command, alias, or file |
+| `type`    | Show whether a name is a builtin, command, or file   |
 | `true`    | Exit 0                                               |
 | `false`   | Exit 1                                               |
 | `echo`    | Print arguments                                      |
@@ -826,9 +1099,9 @@ be builtins because they affect Slash's own state.
 | `wait`    | Wait for background jobs to complete                 |
 | `kill`    | Send a signal to a process or job                    |
 | `pwd`     | Print working directory                              |
-| `alias`   | Define a command alias (supports arguments)           |
-| `unalias` | Remove an alias                                      |
-| `cmd`     | Define a user command                                |
+| `test`    | File and path tests (`-f`, `-d`, `-e`, `-s`, etc.)  |
+| `cmd`     | Define, show, delete, or list user commands          |
+| `key`     | Define a key binding (action or command)             |
 | `shift`   | Discard `$1`, shift positional arguments down        |
 
 ---
@@ -837,7 +1110,7 @@ be builtins because they affect Slash's own state.
 
 Tab completion is fast, accurate, and context-aware.
 
-- **Command position:** complete against PATH, builtins, and aliases
+- **Command position:** complete against PATH, builtins, and user commands
 - **Argument position:** complete against files and directories by default
 - **Flag position:** complete against known flags for common commands (git,
   zig, cargo, npm, etc.) — completions are defined in a completions directory
@@ -851,6 +1124,74 @@ are never wrong about context.
 Completion definitions for external commands live in
 `~/.config/slash/completions/`. They are simple Slash scripts that register
 completion functions. A standard library of completions ships with Slash.
+
+---
+
+## Key Bindings
+
+Key bindings use the `key` keyword with human-readable combo names. No
+`\e[3~` escape sequences, no `${terminfo[...]}` indirection.
+
+**Syntax:** `key <combo> <action-or-command>`
+
+If the value is a bare word, it is a readline action. If it is a quoted
+string, it is executed as a command.
+
+**Default bindings** — these ship with Slash and work out of the box:
+
+```
+# Navigation
+key esc-=       dirs             # interactive directory picker
+key esc-1       ".."             # up 1 directory
+key esc-2       "..."            # up 2 directories
+key esc-3       "...."           # up 3 directories
+key esc-4       "....."          # up 4 directories
+key esc-5       "......"         # up 5 directories
+key esc--       "cd -"           # previous directory
+key esc-l       "ls -la"         # quick directory listing
+
+# History
+key ctrl-r      history-search   # incremental history search
+key up          history-prefix-up
+key down        history-prefix-down
+key esc-p       history-prefix-up
+key esc-n       history-prefix-down
+
+# Editing
+key home        beginning-of-line
+key end         end-of-line
+key ctrl-b      backward-word
+key ctrl-f      forward-word
+key backspace   delete-backward
+key delete      delete-forward
+key ctrl-w      kill-word-backward
+key ctrl-x-e    edit-in-editor   # open current line in $EDITOR
+key shift-tab   complete-prev
+```
+
+**Key combo notation:**
+
+| Notation | Meaning |
+|----------|---------|
+| `ctrl-x` | Control + x |
+| `esc-x` | Escape then x (or Alt+x) |
+| `ctrl-x-e` | Control+x followed by e |
+| `up`, `down`, `home`, `end` | Arrow and navigation keys |
+| `pageup`, `pagedown` | Page keys |
+| `shift-tab` | Shift + Tab |
+| `backspace`, `delete` | Delete keys |
+
+**Custom bindings** in `slashrc`:
+
+```
+key esc-g       "git status"
+key esc-t       "tree -C -L 2"
+key ctrl-x-d    dirs
+```
+
+The `dirs` action is interactive: it displays the recent directory list
+below the prompt, waits for a digit, and jumps immediately. No Enter
+needed. Press Escape or any non-digit to cancel.
 
 ---
 
@@ -884,6 +1225,15 @@ completes in any Slash session, it is immediately available in all others.
 **Deduplication:** consecutive identical commands are stored once. `ls` typed
 ten times in a row is one history entry.
 
+**Privacy:** commands starting with a space are not recorded in history.
+Useful for sensitive commands. Enabled by default.
+
+```
+ mysql -p secretpassword          # leading space = not recorded
+```
+
+Disable with `set history-ignore-space false`.
+
 ---
 
 ## Directory Frecency
@@ -903,16 +1253,16 @@ CREATE TABLE dirs (
 
 Frecency score: `visits / (1 + seconds_since_last_visit / 86400.0)`
 
-The `d` command shows the top 10 directories by frecency score. The `j`
-command does a fuzzy match against directory path components and picks the
-highest-scoring match.
+The `dirs` action (bound to `Esc-=` by default) shows the top 10 directories
+by frecency score. The `j` command does a fuzzy match against directory path
+components and picks the highest-scoring match.
 
 ---
 
 ## Configuration
 
 Slash configuration lives in `~/.config/slash/slashrc`. It is a Slash script that
-runs at startup. It can set variables, define aliases, and set shell options.
+runs at startup. It can set variables, define commands, and set shell options.
 
 ```
 # ~/.config/slash/slashrc
@@ -921,22 +1271,22 @@ runs at startup. It can set variables, define aliases, and set shell options.
 EDITOR = "vim"
 PAGER = "less"
 
-# Aliases (with argument support)
-alias ll = "ls -la"
-alias g = "git $*"
-alias gco = "git checkout $*"
-alias mkcd = "mkdir -p $1 && cd $1"
+# Commands
+cmd ll ls -la
+cmd g git $*
+cmd gco git checkout $*
+cmd o open ${* ?? "."}
+cmd mkcd(dir) mkdir -p $dir && cd $dir
 
-# User commands
 cmd serve(port)
-    if $port == ""
-        port = 8080
+    port = $port ?? 8080
     python3 -m http.server $port
 
-# Options
-set history-limit 10000
-set prompt-git true
-set prompt-duration true
+# Options (set/show/reset follow the cmd pattern)
+set history-limit 10000    # set an option
+set prompt-git true        # set prompt-git              # show current value
+set prompt-git -           # reset to default
+set                        # list all options
 ```
 
 No plugin manager. No framework. No oh-my-slash. If you want something, write
@@ -1025,11 +1375,17 @@ Wire the job control core into a pipeline executor:
 
 - Implement the full builtin set
 - Walk s-expressions recursively and dispatch to builtins or external commands
-- Implement if/unless, for, while/until with correct exit code semantics
+- Implement if/unless, for, while/until, try with correct exit code semantics
+- Implement `cmd` definitions (one-line and multi-line), `cmd ???` hook
+- Implement semicolons, subshell grouping, auto-cd
+- Implement `??` default values, `set` option management
 
-**Phase 5 — Readline and Highlighting**
+**Phase 5 — Readline, Key Bindings, and Highlighting**
 
 - Implement line editing (or integrate a minimal readline)
+- Implement `key` binding system with human-readable combo notation
+- Implement default key bindings (navigation, history, editing)
+- Implement `dirs` interactive directory picker (triggered by hotkey)
 - Implement live syntax highlighting using the parser
 - Implement multi-line editing with `\` continuation at the prompt
 - Implement indentation-based blocks in script mode
@@ -1039,7 +1395,7 @@ Wire the job control core into a pipeline executor:
 - Implement history storage and retrieval
 - Implement `Ctrl+R` incremental search
 - Implement directory frecency tracking
-- Implement `d` (numbered list) and `j` (fuzzy jump)
+- Implement directory frecency ranking and `j` (fuzzy jump)
 
 **Phase 7 — Prompt**
 
