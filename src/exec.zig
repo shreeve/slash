@@ -1,12 +1,11 @@
-//! Slash Evaluator
+//! Slash Executor
 //!
 //! Walks s-expressions produced by the parser and executes them.
-//! This is a tree-walking evaluator — no bytecode, no compilation.
 //!
 //! Pipeline:
-//!   source text → lexer → parser → s-expressions → Eval (this)
+//!   source text → lexer → parser → s-expressions → Shell (this)
 //!
-//! The evaluator handles:
+//! Handles:
 //!   - Command execution (fork/execvpe)
 //!   - Pipelines (pipe + fork)
 //!   - Redirections (dup2)
@@ -24,11 +23,7 @@ const Sexp = parser.Sexp;
 const Tag = parser.Tag;
 const Parser = parser.Parser;
 
-// =============================================================================
-// EVALUATOR STATE
-// =============================================================================
-
-pub const Eval = struct {
+pub const Shell = struct {
     allocator: Allocator,
 
     /// Shell variables ($name → value)
@@ -40,7 +35,7 @@ pub const Eval = struct {
     /// User-defined commands (cmd name body)
     user_cmds: std.StringHashMap(Sexp),
 
-    pub fn init(alloc: Allocator) Eval {
+    pub fn init(alloc: Allocator) Shell {
         return .{
             .allocator = alloc,
             .vars = std.StringHashMap([]const u8).init(alloc),
@@ -48,7 +43,7 @@ pub const Eval = struct {
         };
     }
 
-    pub fn deinit(self: *Eval) void {
+    pub fn deinit(self: *Shell) void {
         self.vars.deinit();
         self.user_cmds.deinit();
     }
@@ -58,7 +53,7 @@ pub const Eval = struct {
     // =========================================================================
 
     /// Execute a single line of input (interactive / -c mode).
-    pub fn execLine(self: *Eval, source: []const u8) void {
+    pub fn execLine(self: *Shell, source: []const u8) void {
         var p = Parser.init(self.allocator, source);
         defer p.deinit();
         const sexp = p.parseOneline() catch |err| {
@@ -70,7 +65,7 @@ pub const Eval = struct {
     }
 
     /// Execute a full script (program mode).
-    pub fn execSource(self: *Eval, source: []const u8) void {
+    pub fn execSource(self: *Shell, source: []const u8) void {
         var p = Parser.init(self.allocator, source);
         defer p.deinit();
         const sexp = p.parseProgram() catch |err| {
@@ -85,7 +80,7 @@ pub const Eval = struct {
     // S-EXPRESSION EVALUATOR
     // =========================================================================
 
-    fn eval(self: *Eval, sexp: Sexp, source: []const u8) void {
+    fn eval(self: *Shell, sexp: Sexp, source: []const u8) void {
         switch (sexp) {
             .nil => {},
             .tag => {},
@@ -102,7 +97,7 @@ pub const Eval = struct {
         }
     }
 
-    fn dispatch(self: *Eval, tag: Tag, args: []const Sexp, source: []const u8) void {
+    fn dispatch(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8) void {
         switch (tag) {
             .program => self.evalProgram(args, source),
             .cmd => self.evalCmd(args, source),
@@ -135,19 +130,19 @@ pub const Eval = struct {
     // NODE EVALUATORS
     // =========================================================================
 
-    fn evalProgram(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalProgram(self: *Shell, args: []const Sexp, source: []const u8) void {
         for (args) |child| {
             self.eval(child, source);
         }
     }
 
-    fn evalBlock(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalBlock(self: *Shell, args: []const Sexp, source: []const u8) void {
         for (args) |child| {
             self.eval(child, source);
         }
     }
 
-    fn evalCmd(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalCmd(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len == 0) return;
 
         // Build argv by joining adjacent tokens (pre==0 means no whitespace gap)
@@ -192,7 +187,7 @@ pub const Eval = struct {
         self.forkExec(argv);
     }
 
-    fn evalPipe(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalPipe(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) {
             if (args.len == 1) self.eval(args[0], source);
             return;
@@ -239,21 +234,21 @@ pub const Eval = struct {
         self.last_exit = statusToExit(result.status);
     }
 
-    fn evalAnd(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalAnd(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len >= 1) self.eval(args[0], source);
         if (self.last_exit == 0 and args.len >= 2) self.eval(args[1], source);
     }
 
-    fn evalOr(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalOr(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len >= 1) self.eval(args[0], source);
         if (self.last_exit != 0 and args.len >= 2) self.eval(args[1], source);
     }
 
-    fn evalSeq(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalSeq(self: *Shell, args: []const Sexp, source: []const u8) void {
         for (args) |child| self.eval(child, source);
     }
 
-    fn evalBg(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalBg(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len == 0) return;
 
         const pid = posix.fork() catch {
@@ -272,12 +267,12 @@ pub const Eval = struct {
         if (args.len >= 2) self.eval(args[1], source);
     }
 
-    fn evalNot(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalNot(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len >= 1) self.eval(args[0], source);
         self.last_exit = if (self.last_exit == 0) 1 else 0;
     }
 
-    fn evalSubshell(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalSubshell(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len == 0) return;
 
         const pid = posix.fork() catch {
@@ -295,7 +290,7 @@ pub const Eval = struct {
         self.last_exit = statusToExit(result.status);
     }
 
-    fn evalAssign(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalAssign(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
         const name = self.sexpToStr(args[0], source) orelse return;
         const value = self.sexpToStr(args[1], source) orelse return;
@@ -303,14 +298,14 @@ pub const Eval = struct {
         self.last_exit = 0;
     }
 
-    fn evalUnset(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalUnset(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
         const name = self.sexpToStr(args[0], source) orelse return;
         _ = self.vars.remove(name);
         self.last_exit = 0;
     }
 
-    fn evalIf(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalIf(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
         self.eval(args[0], source);
         if (self.last_exit == 0) {
@@ -320,7 +315,7 @@ pub const Eval = struct {
         }
     }
 
-    fn evalFor(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalFor(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 3) return;
 
         const var_name = self.sexpToStr(args[0], source) orelse return;
@@ -333,7 +328,7 @@ pub const Eval = struct {
         }
     }
 
-    fn evalWhile(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalWhile(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
         while (true) {
             self.eval(args[0], source);
@@ -342,7 +337,7 @@ pub const Eval = struct {
         }
     }
 
-    fn evalExit(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalExit(self: *Shell, args: []const Sexp, source: []const u8) void {
         var code: u8 = 0;
         if (args.len >= 1) {
             const s = self.sexpToStr(args[0], source) orelse "0";
@@ -351,7 +346,7 @@ pub const Eval = struct {
         posix.exit(code);
     }
 
-    fn evalSource(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalSource(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
         const path = self.sexpToStr(args[0], source) orelse return;
         const content = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch |err| {
@@ -363,14 +358,14 @@ pub const Eval = struct {
         self.execSource(content);
     }
 
-    fn evalCmdDef(self: *Eval, args: []const Sexp, source: []const u8) void {
+    fn evalCmdDef(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
         const name = self.sexpToStr(args[0], source) orelse return;
         _ = self.user_cmds.put(name, args[args.len - 1]) catch {};
         self.last_exit = 0;
     }
 
-    fn evalCmdList(self: *Eval) void {
+    fn evalCmdList(self: *Shell) void {
         var it = self.user_cmds.iterator();
         while (it.next()) |entry| {
             std.debug.print("cmd {s}\n", .{entry.key_ptr.*});
@@ -382,7 +377,7 @@ pub const Eval = struct {
     // BUILTINS
     // =========================================================================
 
-    fn tryBuiltin(self: *Eval, argv: []const []const u8, source: []const u8) bool {
+    fn tryBuiltin(self: *Shell, argv: []const []const u8, source: []const u8) bool {
         _ = source;
         const name = argv[0];
 
@@ -406,7 +401,7 @@ pub const Eval = struct {
         return false;
     }
 
-    fn builtinCd(self: *Eval, argv: []const []const u8) void {
+    fn builtinCd(self: *Shell, argv: []const []const u8) void {
         const target = if (argv.len > 1)
             argv[1]
         else
@@ -420,7 +415,7 @@ pub const Eval = struct {
         self.last_exit = 0;
     }
 
-    fn builtinEcho(self: *Eval, argv: []const []const u8) void {
+    fn builtinEcho(self: *Shell, argv: []const []const u8) void {
         const stdout = std.fs.File.stdout();
         for (argv[1..], 0..) |arg, i| {
             if (i > 0) stdout.writeAll(" ") catch {};
@@ -430,7 +425,7 @@ pub const Eval = struct {
         self.last_exit = 0;
     }
 
-    fn builtinType(self: *Eval, argv: []const []const u8) void {
+    fn builtinType(self: *Shell, argv: []const []const u8) void {
         for (argv[1..]) |name| {
             if (self.user_cmds.contains(name)) {
                 std.debug.print("{s} is a user command\n", .{name});
@@ -455,7 +450,7 @@ pub const Eval = struct {
     // EXTERNAL COMMAND EXECUTION
     // =========================================================================
 
-    fn forkExec(self: *Eval, argv: []const []const u8) void {
+    fn forkExec(self: *Shell, argv: []const []const u8) void {
         const pid = posix.fork() catch {
             std.debug.print("slash: fork failed\n", .{});
             self.last_exit = 1;
@@ -479,7 +474,7 @@ pub const Eval = struct {
     // HELPERS
     // =========================================================================
 
-    fn sexpToStr(self: *Eval, sexp: Sexp, source: []const u8) ?[]const u8 {
+    fn sexpToStr(self: *Shell, sexp: Sexp, source: []const u8) ?[]const u8 {
         _ = self;
         return switch (sexp) {
             .src => |s| source[s.pos..][0..s.len],

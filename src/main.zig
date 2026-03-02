@@ -15,7 +15,7 @@
 const std = @import("std");
 const posix = std.posix;
 const build_options = @import("build_options");
-const eval_mod = @import("eval.zig");
+const exec = @import("exec.zig");
 
 const parser = @import("parser.zig");
 const Lexer = parser.Lexer;
@@ -83,7 +83,7 @@ pub fn main() !void {
             dumpSexp(alloc, cmd, .oneline);
             return;
         }
-        var ev = eval_mod.Eval.init(alloc);
+        var ev = exec.Shell.init(alloc);
         defer ev.deinit();
         ev.execLine(cmd);
         return;
@@ -105,7 +105,7 @@ pub fn main() !void {
             dumpSexp(alloc, source, .program);
             return;
         }
-        var ev = eval_mod.Eval.init(alloc);
+        var ev = exec.Shell.init(alloc);
         defer ev.deinit();
         ev.execSource(source);
         return;
@@ -117,7 +117,7 @@ pub fn main() !void {
         return;
     }
 
-    var ev = eval_mod.Eval.init(alloc);
+    var ev = exec.Shell.init(alloc);
     defer ev.deinit();
     try runRepl(alloc, &ev);
 }
@@ -126,7 +126,7 @@ pub fn main() !void {
 // REPL
 // =============================================================================
 
-fn runRepl(alloc: std.mem.Allocator, ev: *eval_mod.Eval) !void {
+fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
     const stdin = std.fs.File.stdin();
     const stdout = std.fs.File.stdout();
 
