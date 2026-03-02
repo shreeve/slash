@@ -9,7 +9,7 @@ slash.grammar → grammar.zig → parser.zig (lexer + parser)
 slash.zig                      (language support: tags, keywords)
 exec.zig                       (s-expression executor: fork/exec/pipe)
 main.zig                       (CLI, REPL)
-onig.zig                       (Oniguruma regex wrapper)
+regex.zig                      (regex wrapper, powered by Oniguruma)
 ```
 
 ## Key Files
@@ -19,7 +19,7 @@ onig.zig                       (Oniguruma regex wrapper)
 - `src/parser.zig` — **generated, do not edit** — regenerate with `./bin/grammar slash.grammar src/parser.zig`
 - `src/exec.zig` — walks s-expressions, executes commands (struct: `Shell`)
 - `src/slash.zig` — Tag enum, keyword matchers (referenced by generated parser)
-- `src/onig.zig` — thin Zig wrapper over Oniguruma C API
+- `src/regex.zig` — regex wrapper (Oniguruma C API)
 - `onig/` — Oniguruma 6.9.9 C source (compiled by build.zig)
 - `SLASH.md` — language specification
 

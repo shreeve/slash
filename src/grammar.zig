@@ -1025,7 +1025,7 @@ const LexerGenerator = struct {
     fn generateMatchRules(self: *LexerGenerator) !void {
         const num_rules = self.spec.rules.items.len;
 
-        try self.write("    const onig = @import(\"onig.zig\");\n\n");
+        try self.write("    const regex = @import(\"regex.zig\");\n\n");
 
         // Emit action struct and unified rule table
         try self.write(
@@ -1170,15 +1170,15 @@ const LexerGenerator = struct {
         try self.write("    };\n\n");
 
         // Compiled regex storage
-        try self.print("    var compiled: [{d}]?onig.Regex = .{{null}} ** {d};\n", .{ num_rules, num_rules });
+        try self.print("    var compiled: [{d}]?regex.Regex = .{{null}} ** {d};\n", .{ num_rules, num_rules });
         try self.write(
             \\    var initialized: bool = false;
             \\
             \\    fn ensureInit() void {
             \\        if (initialized) return;
-            \\        onig.init();
+            \\        regex.init();
             \\        for (rules, 0..) |rule, i| {
-            \\            compiled[i] = onig.Regex.compile(rule.pat) catch null;
+            \\            compiled[i] = regex.Regex.compile(rule.pat) catch null;
             \\        }
             \\        initialized = true;
             \\    }
@@ -1207,8 +1207,8 @@ const LexerGenerator = struct {
             \\            var best_len: usize = 0;
             \\            var best_rule: usize = {d};
             \\            for (dispatch[self.source[self.pos]]) |ri| {{
-            \\                if (compiled[ri]) |regex| {{
-            \\                    if (regex.matchAt(self.source, self.pos)) |len| {{
+            \\                if (compiled[ri]) |re| {{
+            \\                    if (re.matchAt(self.source, self.pos)) |len| {{
             \\                        if (len > best_len) {{
             \\                            best_len = len;
             \\                            best_rule = ri;

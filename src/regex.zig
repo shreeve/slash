@@ -1,8 +1,8 @@
-//! Oniguruma Regex Wrapper
+//! Regex — Zig wrapper over Oniguruma
 //!
-//! Thin Zig interface over the Oniguruma C API. Used by:
+//! Used by:
 //!   - Generated lexer (pattern matching in next())
-//!   - Evaluator (=~, !~, try pattern arms)
+//!   - Executor (=~, !~, try pattern arms)
 
 const std = @import("std");
 const c = @cImport({

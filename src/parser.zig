@@ -158,7 +158,7 @@ pub const Lexer = struct {
         return self.matchRules();
     }
 
-    const onig = @import("onig.zig");
+    const regex = @import("regex.zig");
 
     const Act = struct { v: u8, k: enum { set, inc, dec }, n: i32 };
     const Rule = struct {
@@ -325,14 +325,14 @@ pub const Lexer = struct {
         break :blk d;
     };
 
-    var compiled: [58]?onig.Regex = .{null} ** 58;
+    var compiled: [58]?regex.Regex = .{null} ** 58;
     var initialized: bool = false;
 
     fn ensureInit() void {
         if (initialized) return;
-        onig.init();
+        regex.init();
         for (rules, 0..) |rule, i| {
-            compiled[i] = onig.Regex.compile(rule.pat) catch null;
+            compiled[i] = regex.Regex.compile(rule.pat) catch null;
         }
         initialized = true;
     }
@@ -353,8 +353,8 @@ pub const Lexer = struct {
             var best_len: usize = 0;
             var best_rule: usize = 58;
             for (dispatch[self.source[self.pos]]) |ri| {
-                if (compiled[ri]) |regex| {
-                    if (regex.matchAt(self.source, self.pos)) |len| {
+                if (compiled[ri]) |re| {
+                    if (re.matchAt(self.source, self.pos)) |len| {
                         if (len > best_len) {
                             best_len = len;
                             best_rule = ri;
