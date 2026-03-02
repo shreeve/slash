@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const MAX_ARGS: usize = 32;
-const slash = @import("slash.zig");
 
 // SIMD helpers (fallback if simd.zig not available)
 const simd = struct {
@@ -388,9 +387,122 @@ pub const Lexer = struct {
 };
 
 // =============================================================================
-// Tag Enum (re-exported from language module)
+// Tag Enum
 // =============================================================================
-pub const Tag = slash.Tag;
+
+pub const Tag = enum(u8) {
+    @"!1",
+    @"program",
+    @"and",
+    @"or",
+    @"seq",
+    @"bg",
+    @"pipe_err",
+    @"pipe",
+    @"not",
+    @"subshell",
+    @"test",
+    @"exit",
+    @"break",
+    @"continue",
+    @"shift",
+    @"source",
+    @"cmd",
+    @"procsub_in",
+    @"procsub_out",
+    @"capture",
+    @"redir_out",
+    @"redir_append",
+    @"redir_in",
+    @"redir_err",
+    @"redir_err_app",
+    @"redir_both",
+    @"redir_dup",
+    @"herestring",
+    @"heredoc_literal",
+    @"heredoc_interp",
+    @"heredoc_lang",
+    @"unset",
+    @"assign",
+    @"if",
+    @"unless",
+    @"else",
+    @"eq",
+    @"ne",
+    @"lt",
+    @"gt",
+    @"le",
+    @"ge",
+    @"match",
+    @"nomatch",
+    @"for",
+    @"while",
+    @"until",
+    @"try",
+    @"arm",
+    @"arm_else",
+    @"block",
+    @"cmd_def",
+    @"cmd_del",
+    @"cmd_show",
+    @"cmd_list",
+    @"!2",
+    @"key",
+    @"key_del",
+    @"set_reset",
+    @"set",
+    @"set_show",
+    @"set_list",
+    @"default",
+    @"neg",
+    _,
+};
+
+// =============================================================================
+// Keyword Matching (generated from @as directives)
+// =============================================================================
+const if_id = enum(u16) { IF = 0 };
+fn if_as(name: []const u8) ?if_id { return if (std.mem.eql(u8, name, "if")) .IF else null; }
+const unless_id = enum(u16) { UNLESS = 0 };
+fn unless_as(name: []const u8) ?unless_id { return if (std.mem.eql(u8, name, "unless")) .UNLESS else null; }
+const else_id = enum(u16) { ELSE = 0 };
+fn else_as(name: []const u8) ?else_id { return if (std.mem.eql(u8, name, "else")) .ELSE else null; }
+const for_id = enum(u16) { FOR = 0 };
+fn for_as(name: []const u8) ?for_id { return if (std.mem.eql(u8, name, "for")) .FOR else null; }
+const in_id = enum(u16) { IN = 0 };
+fn in_as(name: []const u8) ?in_id { return if (std.mem.eql(u8, name, "in")) .IN else null; }
+const while_id = enum(u16) { WHILE = 0 };
+fn while_as(name: []const u8) ?while_id { return if (std.mem.eql(u8, name, "while")) .WHILE else null; }
+const until_id = enum(u16) { UNTIL = 0 };
+fn until_as(name: []const u8) ?until_id { return if (std.mem.eql(u8, name, "until")) .UNTIL else null; }
+const try_id = enum(u16) { TRY = 0 };
+fn try_as(name: []const u8) ?try_id { return if (std.mem.eql(u8, name, "try")) .TRY else null; }
+const and_id = enum(u16) { AND = 0 };
+fn and_as(name: []const u8) ?and_id { return if (std.mem.eql(u8, name, "and")) .AND else null; }
+const or_id = enum(u16) { OR = 0 };
+fn or_as(name: []const u8) ?or_id { return if (std.mem.eql(u8, name, "or")) .OR else null; }
+const not_id = enum(u16) { NOT = 0 };
+fn not_as(name: []const u8) ?not_id { return if (std.mem.eql(u8, name, "not")) .NOT else null; }
+const xor_id = enum(u16) { XOR = 0 };
+fn xor_as(name: []const u8) ?xor_id { return if (std.mem.eql(u8, name, "xor")) .XOR else null; }
+const cmd_id = enum(u16) { CMD = 0 };
+fn cmd_as(name: []const u8) ?cmd_id { return if (std.mem.eql(u8, name, "cmd")) .CMD else null; }
+const key_id = enum(u16) { KEY = 0 };
+fn key_as(name: []const u8) ?key_id { return if (std.mem.eql(u8, name, "key")) .KEY else null; }
+const set_id = enum(u16) { SET = 0 };
+fn set_as(name: []const u8) ?set_id { return if (std.mem.eql(u8, name, "set")) .SET else null; }
+const test_id = enum(u16) { TEST = 0 };
+fn test_as(name: []const u8) ?test_id { return if (std.mem.eql(u8, name, "test")) .TEST else null; }
+const source_id = enum(u16) { SOURCE = 0 };
+fn source_as(name: []const u8) ?source_id { return if (std.mem.eql(u8, name, "source")) .SOURCE else null; }
+const exit_id = enum(u16) { EXIT = 0 };
+fn exit_as(name: []const u8) ?exit_id { return if (std.mem.eql(u8, name, "exit")) .EXIT else null; }
+const break_id = enum(u16) { BREAK = 0 };
+fn break_as(name: []const u8) ?break_id { return if (std.mem.eql(u8, name, "break")) .BREAK else null; }
+const continue_id = enum(u16) { CONTINUE = 0 };
+fn continue_as(name: []const u8) ?continue_id { return if (std.mem.eql(u8, name, "continue")) .CONTINUE else null; }
+const shift_id = enum(u16) { SHIFT = 0 };
+fn shift_as(name: []const u8) ?shift_id { return if (std.mem.eql(u8, name, "shift")) .SHIFT else null; }
 
 // =============================================================================
 // S-Expression (AST Node) - 5 Clean Variants
@@ -857,7 +969,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.if_as(text)) |id| {
+        if (if_as(text)) |id| {
             const sym = if_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -870,7 +982,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.unless_as(text)) |id| {
+        if (unless_as(text)) |id| {
             const sym = unless_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -883,7 +995,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.else_as(text)) |id| {
+        if (else_as(text)) |id| {
             const sym = else_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -896,7 +1008,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.for_as(text)) |id| {
+        if (for_as(text)) |id| {
             const sym = for_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -909,7 +1021,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.in_as(text)) |id| {
+        if (in_as(text)) |id| {
             const sym = in_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -922,7 +1034,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.while_as(text)) |id| {
+        if (while_as(text)) |id| {
             const sym = while_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -935,7 +1047,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.until_as(text)) |id| {
+        if (until_as(text)) |id| {
             const sym = until_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -948,7 +1060,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.try_as(text)) |id| {
+        if (try_as(text)) |id| {
             const sym = try_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -961,7 +1073,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.and_as(text)) |id| {
+        if (and_as(text)) |id| {
             const sym = and_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -974,7 +1086,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.or_as(text)) |id| {
+        if (or_as(text)) |id| {
             const sym = or_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -987,7 +1099,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.not_as(text)) |id| {
+        if (not_as(text)) |id| {
             const sym = not_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1000,7 +1112,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.xor_as(text)) |id| {
+        if (xor_as(text)) |id| {
             const sym = xor_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1013,7 +1125,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.cmd_as(text)) |id| {
+        if (cmd_as(text)) |id| {
             const sym = cmd_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1026,7 +1138,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.key_as(text)) |id| {
+        if (key_as(text)) |id| {
             const sym = key_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1039,7 +1151,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.set_as(text)) |id| {
+        if (set_as(text)) |id| {
             const sym = set_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1052,7 +1164,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.test_as(text)) |id| {
+        if (test_as(text)) |id| {
             const sym = test_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1065,7 +1177,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.source_as(text)) |id| {
+        if (source_as(text)) |id| {
             const sym = source_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1078,7 +1190,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.exit_as(text)) |id| {
+        if (exit_as(text)) |id| {
             const sym = exit_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1091,7 +1203,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.break_as(text)) |id| {
+        if (break_as(text)) |id| {
             const sym = break_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1104,7 +1216,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.continue_as(text)) |id| {
+        if (continue_as(text)) |id| {
             const sym = continue_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1117,7 +1229,7 @@ pub const Parser = struct {
         // If IDENT is valid in this state, prefer it over keyword conversion
         // This prevents identifiers from being misinterpreted as keywords
         if (getAction(state, SYM_IDENT) != 0) return null;
-        if (slash.shift_as(text)) |id| {
+        if (shift_as(text)) |id| {
             const sym = shift_to_symbol[@intFromEnum(id)];
             if (sym != 0 and getAction(state, sym) != 0) return sym;
         }
@@ -1141,195 +1253,178 @@ const SYM_oneline: u16 = 6;
 const SYM_oneline_START: u16 = 135;
 const SYM_IDENT: u16 = 41;
 
-// Mapping from slash.if_id to grammar symbol IDs (computed at comptime)
+// Mapping from if_id to grammar symbol IDs (computed at comptime)
 const if_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other if_id values to IF symbol via enum introspection
-    for (@typeInfo(slash.if_id).@"enum".fields) |field| {
+    for (@typeInfo(if_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 88;
     }
     break :blk arr;
 };
 
-// Mapping from slash.unless_id to grammar symbol IDs (computed at comptime)
+// Mapping from unless_id to grammar symbol IDs (computed at comptime)
 const unless_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other unless_id values to UNLESS symbol via enum introspection
-    for (@typeInfo(slash.unless_id).@"enum".fields) |field| {
+    for (@typeInfo(unless_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 89;
     }
     break :blk arr;
 };
 
-// Mapping from slash.else_id to grammar symbol IDs (computed at comptime)
+// Mapping from else_id to grammar symbol IDs (computed at comptime)
 const else_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other else_id values to ELSE symbol via enum introspection
-    for (@typeInfo(slash.else_id).@"enum".fields) |field| {
+    for (@typeInfo(else_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 90;
     }
     break :blk arr;
 };
 
-// Mapping from slash.for_id to grammar symbol IDs (computed at comptime)
+// Mapping from for_id to grammar symbol IDs (computed at comptime)
 const for_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other for_id values to FOR symbol via enum introspection
-    for (@typeInfo(slash.for_id).@"enum".fields) |field| {
+    for (@typeInfo(for_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 100;
     }
     break :blk arr;
 };
 
-// Mapping from slash.in_id to grammar symbol IDs (computed at comptime)
+// Mapping from in_id to grammar symbol IDs (computed at comptime)
 const in_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other in_id values to IN symbol via enum introspection
-    for (@typeInfo(slash.in_id).@"enum".fields) |field| {
+    for (@typeInfo(in_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 101;
     }
     break :blk arr;
 };
 
-// Mapping from slash.while_id to grammar symbol IDs (computed at comptime)
+// Mapping from while_id to grammar symbol IDs (computed at comptime)
 const while_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other while_id values to WHILE symbol via enum introspection
-    for (@typeInfo(slash.while_id).@"enum".fields) |field| {
+    for (@typeInfo(while_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 102;
     }
     break :blk arr;
 };
 
-// Mapping from slash.until_id to grammar symbol IDs (computed at comptime)
+// Mapping from until_id to grammar symbol IDs (computed at comptime)
 const until_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other until_id values to UNTIL symbol via enum introspection
-    for (@typeInfo(slash.until_id).@"enum".fields) |field| {
+    for (@typeInfo(until_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 103;
     }
     break :blk arr;
 };
 
-// Mapping from slash.try_id to grammar symbol IDs (computed at comptime)
+// Mapping from try_id to grammar symbol IDs (computed at comptime)
 const try_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other try_id values to TRY symbol via enum introspection
-    for (@typeInfo(slash.try_id).@"enum".fields) |field| {
+    for (@typeInfo(try_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 106;
     }
     break :blk arr;
 };
 
-// Mapping from slash.and_id to grammar symbol IDs (computed at comptime)
+// Mapping from and_id to grammar symbol IDs (computed at comptime)
 const and_to_symbol = blk: {
     const arr: [512]u16 = .{0} ** 512;
     break :blk arr;
 };
 
-// Mapping from slash.or_id to grammar symbol IDs (computed at comptime)
+// Mapping from or_id to grammar symbol IDs (computed at comptime)
 const or_to_symbol = blk: {
     const arr: [512]u16 = .{0} ** 512;
     break :blk arr;
 };
 
-// Mapping from slash.not_id to grammar symbol IDs (computed at comptime)
+// Mapping from not_id to grammar symbol IDs (computed at comptime)
 const not_to_symbol = blk: {
     const arr: [512]u16 = .{0} ** 512;
     break :blk arr;
 };
 
-// Mapping from slash.xor_id to grammar symbol IDs (computed at comptime)
+// Mapping from xor_id to grammar symbol IDs (computed at comptime)
 const xor_to_symbol = blk: {
     const arr: [512]u16 = .{0} ** 512;
     break :blk arr;
 };
 
-// Mapping from slash.cmd_id to grammar symbol IDs (computed at comptime)
+// Mapping from cmd_id to grammar symbol IDs (computed at comptime)
 const cmd_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other cmd_id values to CMD symbol via enum introspection
-    for (@typeInfo(slash.cmd_id).@"enum".fields) |field| {
+    for (@typeInfo(cmd_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 115;
     }
     break :blk arr;
 };
 
-// Mapping from slash.key_id to grammar symbol IDs (computed at comptime)
+// Mapping from key_id to grammar symbol IDs (computed at comptime)
 const key_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other key_id values to KEY symbol via enum introspection
-    for (@typeInfo(slash.key_id).@"enum".fields) |field| {
+    for (@typeInfo(key_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 119;
     }
     break :blk arr;
 };
 
-// Mapping from slash.set_id to grammar symbol IDs (computed at comptime)
+// Mapping from set_id to grammar symbol IDs (computed at comptime)
 const set_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other set_id values to SET symbol via enum introspection
-    for (@typeInfo(slash.set_id).@"enum".fields) |field| {
+    for (@typeInfo(set_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 120;
     }
     break :blk arr;
 };
 
-// Mapping from slash.test_id to grammar symbol IDs (computed at comptime)
+// Mapping from test_id to grammar symbol IDs (computed at comptime)
 const test_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other test_id values to TEST symbol via enum introspection
-    for (@typeInfo(slash.test_id).@"enum".fields) |field| {
+    for (@typeInfo(test_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 60;
     }
     break :blk arr;
 };
 
-// Mapping from slash.source_id to grammar symbol IDs (computed at comptime)
+// Mapping from source_id to grammar symbol IDs (computed at comptime)
 const source_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other source_id values to SOURCE symbol via enum introspection
-    for (@typeInfo(slash.source_id).@"enum".fields) |field| {
+    for (@typeInfo(source_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 66;
     }
     break :blk arr;
 };
 
-// Mapping from slash.exit_id to grammar symbol IDs (computed at comptime)
+// Mapping from exit_id to grammar symbol IDs (computed at comptime)
 const exit_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other exit_id values to EXIT symbol via enum introspection
-    for (@typeInfo(slash.exit_id).@"enum".fields) |field| {
+    for (@typeInfo(exit_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 61;
     }
     break :blk arr;
 };
 
-// Mapping from slash.break_id to grammar symbol IDs (computed at comptime)
+// Mapping from break_id to grammar symbol IDs (computed at comptime)
 const break_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other break_id values to BREAK symbol via enum introspection
-    for (@typeInfo(slash.break_id).@"enum".fields) |field| {
+    for (@typeInfo(break_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 63;
     }
     break :blk arr;
 };
 
-// Mapping from slash.continue_id to grammar symbol IDs (computed at comptime)
+// Mapping from continue_id to grammar symbol IDs (computed at comptime)
 const continue_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other continue_id values to CONTINUE symbol via enum introspection
-    for (@typeInfo(slash.continue_id).@"enum".fields) |field| {
+    for (@typeInfo(continue_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 64;
     }
     break :blk arr;
 };
 
-// Mapping from slash.shift_id to grammar symbol IDs (computed at comptime)
+// Mapping from shift_id to grammar symbol IDs (computed at comptime)
 const shift_to_symbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    // Map all other shift_id values to SHIFT symbol via enum introspection
-    for (@typeInfo(slash.shift_id).@"enum".fields) |field| {
+    for (@typeInfo(shift_id).@"enum".fields) |field| {
         if (arr[field.value] == 0) arr[field.value] = 65;
     }
     break :blk arr;

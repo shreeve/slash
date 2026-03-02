@@ -6,7 +6,7 @@ A modern shell written in Zig. Grammar-driven lexer and LALR parser.
 
 ```
 slash.grammar → grammar.zig → parser.zig (lexer + parser)
-slash.zig                      (language support: tags, keywords)
+                               (tags + keywords generated inline in parser.zig)
 exec.zig                       (s-expression executor: fork/exec/pipe)
 main.zig                       (CLI, REPL)
 regex.zig                      (regex wrapper, powered by Oniguruma)
@@ -18,7 +18,7 @@ regex.zig                      (regex wrapper, powered by Oniguruma)
 - `src/grammar.zig` — generic grammar tool, generates parser.zig from any .grammar file
 - `src/parser.zig` — **generated, do not edit** — regenerate with `./bin/grammar slash.grammar src/parser.zig`
 - `src/exec.zig` — walks s-expressions, executes commands (struct: `Shell`)
-- `src/slash.zig` — Tag enum, keyword matchers (referenced by generated parser)
+- Tag enum and keyword matchers are generated inline in parser.zig (no separate file needed)
 - `src/regex.zig` — regex wrapper (Oniguruma C API)
 - `onig/` — Oniguruma 6.9.9 C source (compiled by build.zig)
 - `SLASH.md` — language specification

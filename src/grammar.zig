@@ -3543,10 +3543,7 @@ const ParserGenerator = struct {
             \\
         );
 
-        // Import @lang module (for Tag re-export and @as directives)
-        if (self.lang) |name| {
-            try writer.print("const {s} = @import(\"{s}.zig\");\n", .{ name, name });
-        }
+        // @lang module no longer imported — Tag and keyword matchers generated inline
 
         // Inject @code imports blocks
         for (self.code_blocks.items) |block| {
@@ -3573,32 +3570,46 @@ const ParserGenerator = struct {
         // Write lexer code (body only)
         try writer.writeAll(lexer_body);
 
-        // Generate Tag enum (re-export from language module if @lang specified)
-        if (self.lang) |name| {
+        // Generate Tag enum inline (auto-extracted from grammar actions)
+        try writer.writeAll(
+            \\
+            \\// =============================================================================
+            \\// Tag Enum
+            \\// =============================================================================
+            \\
+            \\pub const Tag = enum(u8) {
+            \\
+        );
+        for (self.tag_list.items) |tag| {
+            try writer.writeAll("    @\"");
+            try writer.writeAll(tag);
+            try writer.writeAll("\",\n");
+        }
+        try writer.writeAll("    _,\n};\n");
+
+        // Generate keyword _id enums and _as functions from @as directives
+        if (self.as_directives.items.len > 0) {
             try writer.writeAll(
                 \\
                 \\// =============================================================================
-                \\// Tag Enum (re-exported from language module)
+                \\// Keyword Matching (generated from @as directives)
                 \\// =============================================================================
                 \\
             );
-            try writer.print("pub const Tag = {s}.Tag;\n", .{name});
-        } else {
-            try writer.writeAll(
-                \\
-                \\// =============================================================================
-                \\// Tag Enum (auto-extracted from grammar actions)
-                \\// =============================================================================
-                \\
-                \\pub const Tag = enum {
-                \\
-            );
-            for (self.tag_list.items) |tag| {
-                try writer.writeAll("    @\"");
-                try writer.writeAll(tag);
-                try writer.writeAll("\",\n");
+            // Track which rules we've already emitted (multiple @as may share the same rule)
+            var emitted_rules = std.StringHashMap(void).init(self.allocator);
+            defer emitted_rules.deinit();
+            for (self.as_directives.items) |directive| {
+                if (emitted_rules.contains(directive.rule)) continue;
+                try emitted_rules.put(directive.rule, {});
+                // Emit _id enum
+                try writer.print("const {s}_id = enum(u16) {{ ", .{directive.rule});
+                var upper_buf: [64]u8 = undefined;
+                const upper = std.ascii.upperString(upper_buf[0..directive.rule.len], directive.rule);
+                try writer.print("{s} = 0 }};\n", .{upper});
+                // Emit _as function (exact match)
+                try writer.print("fn {s}_as(name: []const u8) ?{s}_id {{ return if (std.mem.eql(u8, name, \"{s}\")) .{s} else null; }}\n", .{ directive.rule, directive.rule, directive.rule, upper });
             }
-            try writer.writeAll("};\n");
         }
 
         // Generate Sexp type (5 clean variants)
@@ -4037,7 +4048,6 @@ const ParserGenerator = struct {
             );
 
             // Generate try_ident_as_* functions for each @as directive
-            const lang_name = self.lang orelse "lang";
             for (self.as_directives.items) |directive| {
                 if (!std.mem.eql(u8, directive.token, "ident")) continue;
 
@@ -4052,8 +4062,7 @@ const ParserGenerator = struct {
                         \\    fn try_ident_as_{s}(self: *Parser, token: Token, text: []const u8) ?u16 {{
                         \\        _ = token;
                         \\        const state = self.state_stack.getLast();
-                        \\        // For function keywords: prefer keyword over IDENT
-                        \\        if ({s}.{s}_as(text)) |id| {{
+                        \\        if ({s}_as(text)) |id| {{
                         \\            const sym = {s}_to_symbol[@intFromEnum(id)];
                         \\            if (sym != 0 and getAction(state, sym) != 0) {{
                         \\                self.last_matched_id = @intFromEnum(id);
@@ -4063,7 +4072,7 @@ const ParserGenerator = struct {
                         \\        return null;
                         \\    }}
                         \\
-                    , .{ directive.rule, lang_name, directive.rule, directive.rule });
+                    , .{ directive.rule, directive.rule, directive.rule });
                 } else {
                     // Command keywords: prefer IDENT over keyword (prevents SET var from becoming SET cmd)
                     try writer.print(
@@ -4074,14 +4083,14 @@ const ParserGenerator = struct {
                         \\        // If IDENT is valid in this state, prefer it over keyword conversion
                         \\        // This prevents identifiers from being misinterpreted as keywords
                         \\        if (getAction(state, SYM_IDENT) != 0) return null;
-                        \\        if ({s}.{s}_as(text)) |id| {{
+                        \\        if ({s}_as(text)) |id| {{
                         \\            const sym = {s}_to_symbol[@intFromEnum(id)];
                         \\            if (sym != 0 and getAction(state, sym) != 0) return sym;
                         \\        }}
                         \\        return null;
                         \\    }}
                         \\
-                    , .{ directive.rule, lang_name, directive.rule, directive.rule });
+                    , .{ directive.rule, directive.rule, directive.rule });
                 }
             }
         } else {
@@ -4152,7 +4161,6 @@ const ParserGenerator = struct {
         }
 
         // Generate *_to_symbol mapping arrays for @as directives
-        const lang_name = self.lang orelse "lang";
         for (self.as_directives.items) |directive| {
 
             // Collect terminals that have matching rules (case-insensitive)
@@ -4191,10 +4199,10 @@ const ParserGenerator = struct {
 
             try writer.print(
                 \\
-                \\// Mapping from {s}.{s}_id to grammar symbol IDs (computed at comptime)
+                \\// Mapping from {s}_id to grammar symbol IDs (computed at comptime)
                 \\const {s}_to_symbol = blk: {{
                 \\
-            , .{ lang_name, directive.rule, directive.rule });
+            , .{ directive.rule, directive.rule });
 
             if (needs_var) {
                 try writer.writeAll("    var arr: [512]u16 = .{0} ** 512;\n");
@@ -4206,19 +4214,18 @@ const ParserGenerator = struct {
             // Skip for "isv" and "ssvn" - their names (JOB, LOCK, etc.) conflict with command names
             if (!std.mem.eql(u8, directive.rule, "isv") and !std.mem.eql(u8, directive.rule, "ssvn")) {
                 for (specific_terminals.items) |term| {
-                    try writer.print("    if (@hasField({s}.{s}_id, \"{s}\")) arr[@intFromEnum({s}.{s}_id.{s})] = {d};\n", .{ lang_name, directive.rule, term.name, lang_name, directive.rule, term.name, term.id });
+                    try writer.print("    if (@hasField({s}_id, \"{s}\")) arr[@intFromEnum({s}_id.{s})] = {d};\n", .{ directive.rule, term.name, directive.rule, term.name, term.id });
                 }
             }
 
             // If fallback symbol exists (e.g., FN for fn directive), emit comptime loop
             if (fallback_id) |fid| {
                 try writer.print(
-                    \\    // Map all other {s}_id values to {s} symbol via enum introspection
-                    \\    for (@typeInfo({s}.{s}_id).@"enum".fields) |field| {{
+                    \\    for (@typeInfo({s}_id).@"enum".fields) |field| {{
                     \\        if (arr[field.value] == 0) arr[field.value] = {d};
                     \\    }}
                     \\
-                , .{ directive.rule, fallback_name, lang_name, directive.rule, fid });
+                , .{ directive.rule, fid });
             }
 
             try writer.print(
