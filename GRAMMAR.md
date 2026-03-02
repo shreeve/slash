@@ -8,8 +8,8 @@ is defined in `slash.grammar` and processed by `src/grammar.zig` to generate
 slash.grammar  →  grammar.zig  →  src/parser.zig
 ```
 
-The generated parser produces s-expressions that the evaluator (`eval.zig`)
-walks and compiles to shell instructions.
+The generated parser produces s-expressions that the executor (`exec.zig`)
+walks and executes as shell commands.
 
 ---
 
@@ -160,7 +160,7 @@ sequences (`\n`, `\t`, `\\`, `\"`, etc.).
 **Heredoc delimiters.** `'''` opens/closes a literal heredoc. `"""` opens/closes
 an interpolated heredoc. `` ```lang `` opens a syntax-highlighted heredoc
 (the language tag is captured in the token text). `` ``` `` closes it. Heredoc
-body collection and margin stripping are handled by the evaluator, not the
+body collection and margin stripping are handled by the executor, not the
 lexer.
 
 **Herestrings.** `<<<` feeds a single string as stdin to a command.
@@ -480,7 +480,7 @@ or shell) with an optional numeric exit code (default 0).
 
 ## 4. S-Expression Output
 
-The parser produces s-expressions that the evaluator walks. Every construct
+The parser produces s-expressions that the executor walks. Every construct
 maps to a tagged list:
 
 | Input | S-Expression |
@@ -514,7 +514,7 @@ debugging and development.
 ## 5. Compilation Pipeline
 
 ```
-source text → lexer → tokens → parser → s-expressions → evaluator → execution
+source text → lexer → tokens → parser → s-expressions → executor → execution
 ```
 
 1. **Lexer** tokenizes input with context-sensitive state
@@ -531,4 +531,4 @@ source text → lexer → tokens → parser → s-expressions → evaluator → 
    - `subshell` → fork and execute in child
 
 No AST node types, no visitor pattern. S-expressions are lists.
-The evaluator is a recursive function that switches on the head tag.
+The executor is a recursive function that switches on the head tag.
