@@ -1,0 +1,52 @@
+# Slash
+
+A modern shell written in Zig. Grammar-driven lexer and LALR parser.
+
+## Architecture
+
+```
+slash.grammar → grammar.zig → parser.zig (lexer + parser)
+slash.zig                      (language support: tags, keywords)
+exec.zig                       (s-expression executor: fork/exec/pipe)
+main.zig                       (CLI, REPL)
+onig.zig                       (Oniguruma regex wrapper)
+```
+
+## Key Files
+
+- `slash.grammar` — lexer rules + parser rules (single source of truth)
+- `src/grammar.zig` — generic grammar tool, generates parser.zig from any .grammar file
+- `src/parser.zig` — **generated, do not edit** — regenerate with `./bin/grammar slash.grammar src/parser.zig`
+- `src/exec.zig` — walks s-expressions, executes commands (struct: `Shell`)
+- `src/slash.zig` — Tag enum, keyword matchers (referenced by generated parser)
+- `src/onig.zig` — thin Zig wrapper over Oniguruma C API
+- `onig/` — Oniguruma 6.9.9 C source (compiled by build.zig)
+- `SLASH.md` — language specification
+
+## Build
+
+```
+zig build              # build bin/slash
+zig build grammar      # build bin/grammar
+zig build run          # build and run slash
+```
+
+## Regenerate Parser
+
+```
+zig build grammar
+./bin/grammar slash.grammar src/parser.zig
+zig build
+```
+
+## Zig Version
+
+Zig 0.15.2. See `docs/ZIG-0.15.2.md` for API changes (Writergate, ArrayList .empty pattern, etc).
+
+## Conventions
+
+- Do not edit `src/parser.zig` — it is generated
+- Lexer patterns are Oniguruma regex, compiled at init, matched via first-char dispatch table
+- S-expressions are the interface between parser and executor — no AST
+- `std.debug.print` for all user-facing output (Zig 0.15 Writer API is buffer-based)
+- Commit messages: imperative, 1-2 sentences focused on "why"
