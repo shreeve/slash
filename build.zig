@@ -4,6 +4,70 @@ const std = @import("std");
 
 const version = "0.1.0";
 
+const onig_cflags = &[_][]const u8{
+    "-std=gnu99",
+    "-DNDEBUG",
+    "-DHAVE_CONFIG_H",
+    "-DONIG_EXTERN=extern",
+    "-fno-sanitize=undefined",
+};
+
+const onig_sources = &[_][]const u8{
+    "ascii.c",
+    "big5.c",
+    "cp1251.c",
+    "euc_jp.c",
+    "euc_jp_prop.c",
+    "euc_kr.c",
+    "euc_tw.c",
+    "gb18030.c",
+    "iso8859_1.c",
+    "iso8859_2.c",
+    "iso8859_3.c",
+    "iso8859_4.c",
+    "iso8859_5.c",
+    "iso8859_6.c",
+    "iso8859_7.c",
+    "iso8859_8.c",
+    "iso8859_9.c",
+    "iso8859_10.c",
+    "iso8859_11.c",
+    "iso8859_13.c",
+    "iso8859_14.c",
+    "iso8859_15.c",
+    "iso8859_16.c",
+    "koi8.c",
+    "koi8_r.c",
+    "onig_init.c",
+    "regcomp.c",
+    "regenc.c",
+    "regerror.c",
+    "regexec.c",
+    "regext.c",
+    "regparse.c",
+    "regsyntax.c",
+    "regtrav.c",
+    "regversion.c",
+    "sjis.c",
+    "sjis_prop.c",
+    "st.c",
+    "unicode.c",
+    "unicode_egcb_data.c",
+    "unicode_fold_data.c",
+    "unicode_fold1_key.c",
+    "unicode_fold2_key.c",
+    "unicode_fold3_key.c",
+    "unicode_property_data.c",
+    "unicode_property_data_posix.c",
+    "unicode_unfold_key.c",
+    "unicode_wb_data.c",
+    "utf8.c",
+    "utf16_be.c",
+    "utf16_le.c",
+    "utf32_be.c",
+    "utf32_le.c",
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -12,15 +76,22 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "version", version);
 
     // =========================================================================
-    // Main executable
+    // Main executable (with Oniguruma)
     // =========================================================================
 
     const main_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     main_mod.addOptions("build_options", options);
+    main_mod.addIncludePath(b.path("onig"));
+    main_mod.addCSourceFiles(.{
+        .root = b.path("onig"),
+        .files = onig_sources,
+        .flags = onig_cflags,
+    });
 
     const exe = b.addExecutable(.{
         .name = "slash",
@@ -33,7 +104,6 @@ pub fn build(b: *std.Build) void {
     });
     b.getInstallStep().dependOn(&install_exe.step);
 
-    // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
@@ -51,8 +121,15 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_mod.addOptions("build_options", options);
+    test_mod.addIncludePath(b.path("onig"));
+    test_mod.addCSourceFiles(.{
+        .root = b.path("onig"),
+        .files = onig_sources,
+        .flags = onig_cflags,
+    });
 
     const tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(tests);
