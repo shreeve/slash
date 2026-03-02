@@ -784,6 +784,51 @@ fn isRegexSpecial(c: u8) bool {
     };
 }
 
+/// Determine which first bytes a regex can match. Sets flags[ch] = true for each.
+fn firstCharsOfRegex(regex: []const u8, flags: *[256]bool) void {
+    if (regex.len == 0) return;
+    switch (regex[0]) {
+        '\\' => {
+            if (regex.len > 1) switch (regex[1]) {
+                'n' => flags['\n'] = true,
+                'r' => flags['\r'] = true,
+                't' => flags['\t'] = true,
+                else => flags[regex[1]] = true,
+            };
+        },
+        '[' => {
+            var i: usize = 1;
+            var neg = false;
+            if (i < regex.len and regex[i] == '^') { neg = true; i += 1; }
+            if (neg) for (0..256) |c| { flags[c] = true; };
+            while (i < regex.len and regex[i] != ']') {
+                if (regex[i] == '\\' and i + 1 < regex.len) {
+                    const ch: u8 = switch (regex[i + 1]) { 'n' => '\n', 'r' => '\r', 't' => '\t', else => regex[i + 1] };
+                    if (neg) { flags[ch] = false; } else { flags[ch] = true; }
+                    i += 2;
+                } else if (i + 2 < regex.len and regex[i + 1] == '-') {
+                    var ch: usize = regex[i];
+                    while (ch <= regex[i + 2]) : (ch += 1) {
+                        if (neg) { flags[ch] = false; } else { flags[ch] = true; }
+                    }
+                    i += 3;
+                } else {
+                    if (neg) { flags[regex[i]] = false; } else { flags[regex[i]] = true; }
+                    i += 1;
+                }
+            }
+        },
+        '.' => for (0..256) |c| { flags[c] = true; },
+        '(' => {
+            var i: usize = 1;
+            if (i < regex.len and regex[i] == '?') i += 1;
+            if (i < regex.len and regex[i] == ':') i += 1;
+            if (i < regex.len) firstCharsOfRegex(regex[i..], flags);
+        },
+        else => flags[regex[0]] = true,
+    }
+}
+
 // =============================================================================
 // Lexer Code Generator
 // =============================================================================
@@ -1073,6 +1118,57 @@ const LexerGenerator = struct {
 
         try self.write("    };\n\n");
 
+        // Build static first-char dispatch table at generation time
+        // For each byte 0-255, list which rule indices can match starting with that byte
+        var dispatch: [256]std.ArrayList(u16) = undefined;
+        for (0..256) |i| dispatch[i] = .empty;
+        defer for (&dispatch) |*d| d.deinit(self.allocator);
+
+        for (regex_strs.items, 0..) |rs, ri| {
+            // Skip the fallback rule (lone ".") — handled by the else case in matchRules
+            if (rs.str.len == 1 and rs.str[0] == '.') continue;
+            var flags: [256]bool = [_]bool{false} ** 256;
+            firstCharsOfRegex(rs.str, &flags);
+            for (0..256) |ch| {
+                if (flags[ch]) try dispatch[ch].append(self.allocator, @intCast(ri));
+            }
+        }
+
+        // Emit dispatch table — only non-empty entries, character-annotated
+        try self.write("    const dispatch = blk: {\n");
+        try self.write("        var d: [256][]const u16 = .{&.{}} ** 256;\n");
+        for (0..256) |ch| {
+            const indices = dispatch[ch].items;
+            if (indices.len == 0) continue;
+            try self.write("        d[");
+            const byte: u8 = @intCast(ch);
+            if (byte == '\n') {
+                try self.write("'\\n'");
+            } else if (byte == '\r') {
+                try self.write("'\\r'");
+            } else if (byte == '\t') {
+                try self.write("'\\t'");
+            } else if (byte >= ' ' and byte <= '~') {
+                if (byte == '\\') {
+                    try self.write("'\\\\'");
+                } else if (byte == '\'') {
+                    try self.write("'\\''");
+                } else {
+                    try self.print("'{c}' ", .{byte});
+                }
+            } else {
+                try self.print("{d}   ", .{ch});
+            }
+            try self.write("] = &.{");
+            for (indices, 0..) |idx, j| {
+                if (j > 0) try self.write(", ");
+                try self.print("{d}", .{idx});
+            }
+            try self.write("};\n");
+        }
+        try self.write("        break :blk d;\n");
+        try self.write("    };\n\n");
+
         // Compiled regex storage
         try self.print("    var compiled: [{d}]?onig.Regex = .{{null}} ** {d};\n", .{ num_rules, num_rules });
         try self.write(
@@ -1110,8 +1206,8 @@ const LexerGenerator = struct {
         try self.print(
             \\            var best_len: usize = 0;
             \\            var best_rule: usize = {d};
-            \\            for (compiled, 0..) |maybe_regex, ri| {{
-            \\                if (maybe_regex) |regex| {{
+            \\            for (dispatch[self.source[self.pos]]) |ri| {{
+            \\                if (compiled[ri]) |regex| {{
             \\                    if (regex.matchAt(self.source, self.pos)) |len| {{
             \\                        if (len > best_len) {{
             \\                            best_len = len;
