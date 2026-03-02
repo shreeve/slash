@@ -158,681 +158,135 @@ pub const Lexer = struct {
         return self.matchRules();
     }
 
-    inline fn isDigit(c: u8) bool { return c >= '0' and c <= '9'; }
-    inline fn isLetter(c: u8) bool { return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_'; }
-    inline fn isWhitespace(c: u8) bool { return c == ' ' or c == '\t'; }
-    inline fn isIdentChar(c: u8) bool { return isLetter(c) or isDigit(c) or c == '-'; }
-    inline fn isIdentStartChar(c: u8) bool { return isLetter(c) or c == '.' or c == '/' or c == '~'; }
-    inline fn isPathChar(c: u8) bool { return isLetter(c) or isDigit(c) or c == '.' or c == '/' or c == '-'; }
+    const onig = @import("onig.zig");
+
+    const Act = struct { v: u8, k: enum { set, inc, dec }, n: i32 };
+    const Rule = struct {
+        pat: []const u8,
+        tok: TokenCat,
+        skip: bool = false,
+        acts: []const Act = &.{},
+    };
+
+    const rules = [_]Rule{
+        .{ .pat = "#[^\\n]*"                               , .tok = .comment },
+        .{ .pat = "\\\\\\n"                                , .tok = .skip },
+        .{ .pat = "\\r\\n"                                 , .tok = .newline, .acts = &.{.{ .v = 0, .k = .set, .n = 1 }} },
+        .{ .pat = "\\n"                                    , .tok = .newline, .acts = &.{.{ .v = 0, .k = .set, .n = 1 }} },
+        .{ .pat = "\\r"                                    , .tok = .newline, .acts = &.{.{ .v = 0, .k = .set, .n = 1 }} },
+        .{ .pat = "\"([^\"\\\\$\\n]|\\\\.|\\$[^\"\\\\])*\"", .tok = .string_dq },
+        .{ .pat = "'([^'\\n]|'')*'"                        , .tok = .string_sq },
+        .{ .pat = "'''"                                    , .tok = .heredoc_sq },
+        .{ .pat = "\"\"\""                                 , .tok = .heredoc_dq },
+        .{ .pat = "```[a-zA-Z][a-zA-Z0-9]*"                , .tok = .heredoc_bt },
+        .{ .pat = "```"                                    , .tok = .heredoc_end },
+        .{ .pat = "<<<"                                    , .tok = .herestring },
+        .{ .pat = "[0-9]*\\.[0-9]+"                        , .tok = .real },
+        .{ .pat = "[0-9]+"                                 , .tok = .integer },
+        .{ .pat = "\\$\\{[^}\\n]+\\}"                      , .tok = .var_braced },
+        .{ .pat = "\\$[a-zA-Z_][a-zA-Z0-9_]*"              , .tok = .variable },
+        .{ .pat = "\\$[0-9]"                               , .tok = .variable },
+        .{ .pat = "\\$[?$!#*]"                             , .tok = .variable },
+        .{ .pat = "<\\("                                   , .tok = .proc_sub_in },
+        .{ .pat = ">\\("                                   , .tok = .proc_sub_out },
+        .{ .pat = "\\|&"                                   , .tok = .pipe_err },
+        .{ .pat = "&&"                                     , .tok = .and_sym },
+        .{ .pat = "\\|\\|"                                 , .tok = .or_sym },
+        .{ .pat = "=="                                     , .tok = .eq },
+        .{ .pat = "!="                                     , .tok = .ne },
+        .{ .pat = "<="                                     , .tok = .le },
+        .{ .pat = ">="                                     , .tok = .ge },
+        .{ .pat = "=~"                                     , .tok = .match },
+        .{ .pat = "!~"                                     , .tok = .nomatch },
+        .{ .pat = "\\*\\*"                                 , .tok = .power },
+        .{ .pat = "\\?\\?"                                 , .tok = .default_op },
+        .{ .pat = ">>"                                     , .tok = .redir_append },
+        .{ .pat = "&>"                                     , .tok = .redir_both },
+        .{ .pat = "2>>"                                    , .tok = .redir_err_app },
+        .{ .pat = "2>"                                     , .tok = .redir_err },
+        .{ .pat = "2>&1"                                   , .tok = .redir_dup },
+        .{ .pat = "\\|"                                    , .tok = .pipe },
+        .{ .pat = ">"                                      , .tok = .redir_out },
+        .{ .pat = "<"                                      , .tok = .redir_in },
+        .{ .pat = "!"                                      , .tok = .not_sym },
+        .{ .pat = "&"                                      , .tok = .bg },
+        .{ .pat = ";"                                      , .tok = .semi },
+        .{ .pat = "\\+"                                    , .tok = .plus },
+        .{ .pat = "-"                                      , .tok = .minus },
+        .{ .pat = "\\*"                                    , .tok = .star },
+        .{ .pat = "/"                                      , .tok = .slash },
+        .{ .pat = "%"                                      , .tok = .percent },
+        .{ .pat = "="                                      , .tok = .assign },
+        .{ .pat = "\\("                                    , .tok = .lparen, .acts = &.{.{ .v = 2, .k = .inc, .n = 0 }} },
+        .{ .pat = "\\)"                                    , .tok = .rparen, .acts = &.{.{ .v = 2, .k = .dec, .n = 0 }} },
+        .{ .pat = "\\{"                                    , .tok = .lbrace, .acts = &.{.{ .v = 3, .k = .inc, .n = 0 }} },
+        .{ .pat = "\\}"                                    , .tok = .rbrace, .acts = &.{.{ .v = 3, .k = .dec, .n = 0 }} },
+        .{ .pat = ","                                      , .tok = .comma },
+        .{ .pat = "\\\\"                                   , .tok = .backslash },
+        .{ .pat = "\\$"                                    , .tok = .dollar },
+        .{ .pat = "[a-zA-Z_][a-zA-Z0-9_-]*"                , .tok = .ident },
+        .{ .pat = "[a-zA-Z_./~][a-zA-Z0-9_./-]*"           , .tok = .ident },
+        .{ .pat = "."                                      , .tok = .err },
+    };
+
+    var compiled: [58]?onig.Regex = .{null} ** 58;
+    var initialized: bool = false;
+
+    fn ensureInit() void {
+        if (initialized) return;
+        onig.init();
+        for (rules, 0..) |rule, i| {
+            compiled[i] = onig.Regex.compile(rule.pat) catch null;
+        }
+        initialized = true;
+    }
 
     fn matchRules(self: *Lexer) Token {
+        ensureInit();
         while (true) {
-            // Skip horizontal whitespace
             const ws_start = self.pos;
-            while (self.pos < self.source.len and isWhitespace(self.source[self.pos])) {
+            while (self.pos < self.source.len and (self.source[self.pos] == ' ' or self.source[self.pos] == '\t'))
                 self.pos += 1;
-            }
             const ws_count: u8 = @intCast(@min(self.pos - ws_start, 255));
 
-            // EOF
             if (self.pos >= self.source.len)
                 return Token{ .cat = .eof, .pre = ws_count, .pos = @intCast(self.pos), .len = 0 };
 
             const start: u32 = @intCast(self.pos);
-            const c = self.source[self.pos];
             self.beg = 0;
-
-            switch (c) {
-                '\n' => {
-                    self.pos += 1; self.beg = 1; return Token{ .cat = .newline, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '\r' => {
-                    self.pos += 1; self.beg = 1; return Token{ .cat = .newline, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '!' => {
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '=') { self.pos += 2; return Token{ .cat = .ne, .pre = ws_count, .pos = start, .len = 2 }; }
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '~') { self.pos += 2; return Token{ .cat = .nomatch, .pre = ws_count, .pos = start, .len = 2 }; }
-                    self.pos += 1; return Token{ .cat = .not_sym, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '"' => {
-                    if (self.pos + 3 <= self.source.len and self.source[self.pos + 1] == '"' and self.source[self.pos + 2] == '"') { self.pos += 3; return Token{ .cat = .heredoc_dq, .pre = ws_count, .pos = start, .len = 3 }; }
-                    self.pos += 1;
-                    return Token{ .cat = .string_dq, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '#' => {
-                    self.pos += 1;
-                    const remaining = self.source[self.pos..];
-                    const offset = simd.findByte(remaining, 10);
-                    self.pos += @intCast(offset);
-                    return Token{ .cat = .comment, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '$' => {
-                    self.pos += 1;
-                    return Token{ .cat = .var_braced, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '%' => {
-                    self.pos += 1; return Token{ .cat = .percent, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '&' => {
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '&') { self.pos += 2; return Token{ .cat = .and_sym, .pre = ws_count, .pos = start, .len = 2 }; }
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '>') { self.pos += 2; return Token{ .cat = .redir_both, .pre = ws_count, .pos = start, .len = 2 }; }
-                    self.pos += 1; return Token{ .cat = .bg, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '\'' => {
-                    if (self.pos + 3 <= self.source.len and self.source[self.pos + 1] == '\'' and self.source[self.pos + 2] == '\'') { self.pos += 3; return Token{ .cat = .heredoc_sq, .pre = ws_count, .pos = start, .len = 3 }; }
-                    self.pos += 1;
-                    return Token{ .cat = .string_sq, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '(' => {
-                    self.pos += 1; self.paren += 1; return Token{ .cat = .lparen, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                ')' => {
-                    self.pos += 1; self.paren -= 1; return Token{ .cat = .rparen, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '*' => {
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '*') { self.pos += 2; return Token{ .cat = .power, .pre = ws_count, .pos = start, .len = 2 }; }
-                    self.pos += 1; return Token{ .cat = .star, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '+' => {
-                    self.pos += 1; return Token{ .cat = .plus, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                ',' => {
-                    self.pos += 1; return Token{ .cat = .comma, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '-' => {
-                    self.pos += 1; return Token{ .cat = .minus, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '/' => {
-                    self.pos += 1; return Token{ .cat = .slash, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '2' => {
-                    if (self.pos + 4 <= self.source.len and self.source[self.pos + 1] == '>' and self.source[self.pos + 2] == '&' and self.source[self.pos + 3] == '1') { self.pos += 4; return Token{ .cat = .redir_dup, .pre = ws_count, .pos = start, .len = 4 }; }
-                    if (self.pos + 3 <= self.source.len and self.source[self.pos + 1] == '>' and self.source[self.pos + 2] == '>') { self.pos += 3; return Token{ .cat = .redir_err_app, .pre = ws_count, .pos = start, .len = 3 }; }
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '>') { self.pos += 2; return Token{ .cat = .redir_err, .pre = ws_count, .pos = start, .len = 2 }; }
-                    self.pos += 1; return Token{ .cat = .err, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                ';' => {
-                    self.pos += 1; return Token{ .cat = .semi, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '<' => {
-                    if (self.pos + 3 <= self.source.len and self.source[self.pos + 1] == '<' and self.source[self.pos + 2] == '<') { self.pos += 3; return Token{ .cat = .herestring, .pre = ws_count, .pos = start, .len = 3 }; }
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '(') { self.pos += 2; return Token{ .cat = .proc_sub_in, .pre = ws_count, .pos = start, .len = 2 }; }
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '=') { self.pos += 2; return Token{ .cat = .le, .pre = ws_count, .pos = start, .len = 2 }; }
-                    self.pos += 1; return Token{ .cat = .redir_in, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '=' => {
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '=') { self.pos += 2; return Token{ .cat = .eq, .pre = ws_count, .pos = start, .len = 2 }; }
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '~') { self.pos += 2; return Token{ .cat = .match, .pre = ws_count, .pos = start, .len = 2 }; }
-                    self.pos += 1; return Token{ .cat = .assign, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '>' => {
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '(') { self.pos += 2; return Token{ .cat = .proc_sub_out, .pre = ws_count, .pos = start, .len = 2 }; }
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '=') { self.pos += 2; return Token{ .cat = .ge, .pre = ws_count, .pos = start, .len = 2 }; }
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '>') { self.pos += 2; return Token{ .cat = .redir_append, .pre = ws_count, .pos = start, .len = 2 }; }
-                    self.pos += 1; return Token{ .cat = .redir_out, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '?' => {
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '?') { self.pos += 2; return Token{ .cat = .default_op, .pre = ws_count, .pos = start, .len = 2 }; }
-                    self.pos += 1; return Token{ .cat = .err, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '\\' => {
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '\n') { self.pos += 2; return Token{ .cat = .skip, .pre = ws_count, .pos = start, .len = 2 }; }
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '\n') { self.pos += 2; self.beg = 1; return Token{ .cat = .newline, .pre = ws_count, .pos = start, .len = 2 }; }
-                    self.pos += 1; return Token{ .cat = .backslash, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '`' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z'))) break;
-                        self.pos += 1;
+            var best_len: usize = 0;
+            var best_rule: usize = 58;
+            for (compiled, 0..) |maybe_regex, ri| {
+                if (maybe_regex) |regex| {
+                    if (regex.matchAt(self.source, self.pos)) |len| {
+                        if (len > best_len) {
+                            best_len = len;
+                            best_rule = ri;
+                        }
                     }
-                    return Token{ .cat = .heredoc_bt, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '{' => {
-                    self.pos += 1; self.brace += 1; return Token{ .cat = .lbrace, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '|' => {
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '&') { self.pos += 2; return Token{ .cat = .pipe_err, .pre = ws_count, .pos = start, .len = 2 }; }
-                    if (self.pos + 2 <= self.source.len and self.source[self.pos + 1] == '|') { self.pos += 2; return Token{ .cat = .or_sym, .pre = ws_count, .pos = start, .len = 2 }; }
-                    self.pos += 1; return Token{ .cat = .pipe, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '}' => {
-                    self.pos += 1; self.brace -= 1; return Token{ .cat = .rbrace, .pre = ws_count, .pos = start, .len = 1 };
-                },
-                '0' => {
-                    self.pos += 1;
-                    return Token{ .cat = .real, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '1' => {
-                    self.pos += 1;
-                    return Token{ .cat = .real, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '3' => {
-                    self.pos += 1;
-                    return Token{ .cat = .real, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '4' => {
-                    self.pos += 1;
-                    return Token{ .cat = .real, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '5' => {
-                    self.pos += 1;
-                    return Token{ .cat = .real, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '6' => {
-                    self.pos += 1;
-                    return Token{ .cat = .real, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '7' => {
-                    self.pos += 1;
-                    return Token{ .cat = .real, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '8' => {
-                    self.pos += 1;
-                    return Token{ .cat = .real, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '9' => {
-                    self.pos += 1;
-                    return Token{ .cat = .real, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'A' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'B' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'C' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'D' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'E' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'F' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'G' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'H' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'I' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'J' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'K' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'L' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'M' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'N' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'O' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'P' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'Q' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'R' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'S' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'T' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'U' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'V' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'W' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'X' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'Y' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'Z' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '_' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'a' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'b' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'c' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'd' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'e' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'f' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'g' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'h' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'i' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'j' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'k' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'l' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'm' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'n' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'o' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'p' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'q' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'r' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                's' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                't' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'u' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'v' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'w' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'x' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'y' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                'z' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '.' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '.' or sc == '/' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                '~' => {
-                    self.pos += 1;
-                    while (self.pos < self.source.len) {
-                        const sc = self.source[self.pos];
-                        if (!((sc >= 'a' and sc <= 'z') or (sc >= 'A' and sc <= 'Z') or (sc >= '0' and sc <= '9') or sc == '_' or sc == '.' or sc == '/' or sc == '-')) break;
-                        self.pos += 1;
-                    }
-                    return Token{ .cat = .ident, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) };
-                },
-                else => { self.pos += 1; return Token{ .cat = .err, .pre = ws_count, .pos = start, .len = 1 }; },
+                }
             }
+
+            if (best_rule < 58) {
+                self.pos += @intCast(best_len);
+                const rule = rules[best_rule];
+
+                for (rule.acts) |act| {
+                    const states = [_]*i32{&self.beg, &self.heredoc, &self.paren, &self.brace};
+                    switch (act.k) {
+                        .set => states[act.v].* = act.n,
+                        .inc => states[act.v].* += 1,
+                        .dec => states[act.v].* -= 1,
+                    }
+                }
+
+                if (rule.skip) continue;
+
+                return Token{ .cat = rule.tok, .pre = ws_count, .pos = start, .len = @intCast(best_len) };
+            }
+
+            self.pos += 1;
+            return Token{ .cat = .err, .pre = ws_count, .pos = start, .len = 1 };
         }
     }
 };

@@ -636,202 +636,30 @@ const LexerParser = struct {
 };
 
 // =============================================================================
-// Pattern Compiler — parses @lexer pattern strings into structured data
+// Lexer Rule Helpers — used by both LexerGenerator and ParserGenerator
 // =============================================================================
 
-const PatternInfo = struct {
-    kind: Kind,
-    first_chars: [256]bool = [_]bool{false} ** 256,
-    literal: []const u8 = "",
-    char_class_body: []const u8 = "",
-    rest_pattern: []const u8 = "",
-
-    const Kind = enum {
-        single_char,
-        multi_char_literal,
-        char_then_rest,
-        char_class_start,
-        fallback,
-    };
-};
-
-fn classifyPattern(pattern: []const u8) PatternInfo {
-    var info = PatternInfo{ .kind = .fallback };
-
-    if (pattern.len == 0) return info;
-
-    // Fallback: lone dot
-    if (pattern.len == 1 and pattern[0] == '.') {
-        info.kind = .fallback;
-        for (0..256) |i| info.first_chars[i] = true;
-        return info;
-    }
-
-    // Single-char literal: 'x' (possibly with escape)
-    if (pattern[0] == '\'' and pattern.len >= 3) {
-        const c = extractCharFromQuoted(pattern);
-        if (c) |ch| {
-            const end = findClosingQuote(pattern, '\'');
-            if (end != null) {
-                const after = if (end.? < pattern.len) std.mem.trim(u8, pattern[end.?..], " \t") else "";
-                if (after.len == 0) {
-                    info.kind = .single_char;
-                    info.first_chars[ch] = true;
-                    info.literal = pattern[0..end.?];
-                    return info;
-                } else {
-                    info.kind = .char_then_rest;
-                    info.first_chars[ch] = true;
-                    info.literal = pattern[0..end.?];
-                    info.rest_pattern = after;
-                    return info;
-                }
-            }
-        }
-    }
-
-    // Multi-char string literal: "xyz" (possibly with continuation)
-    if (pattern[0] == '"') {
-        if (findClosingQuote(pattern, '"')) |end| {
-            const after = if (end < pattern.len) std.mem.trim(u8, pattern[end..], " \t") else "";
-            const literal = extractStringLiteral(pattern[1 .. end - 1]);
-            if (literal.len > 0) {
-                info.first_chars[literal[0]] = true;
-                info.literal = pattern[0..end];
-                if (after.len == 0) {
-                    info.kind = if (literal.len == 1) .single_char else .multi_char_literal;
-                } else {
-                    info.kind = .char_then_rest;
-                    info.rest_pattern = after;
-                }
-                return info;
-            }
-        }
-    }
-
-    // Character class start: [a-zA-Z_]...
-    if (pattern[0] == '[') {
-        if (std.mem.indexOfScalar(u8, pattern, ']')) |close| {
-            info.kind = .char_class_start;
-            info.char_class_body = pattern[0 .. close + 1];
-            info.rest_pattern = if (close + 1 < pattern.len) std.mem.trim(u8, pattern[close + 1 ..], " \t") else "";
-            fillCharClassFlags(&info.first_chars, pattern[1..close], pattern[1] == '^');
-            return info;
-        }
-    }
-
-    return info;
-}
-
-fn extractCharFromQuoted(pattern: []const u8) ?u8 {
-    if (pattern.len < 3) return null;
-    if (pattern[1] == '\\' and pattern.len >= 4) {
-        return switch (pattern[2]) {
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            '\\' => '\\',
-            '\'' => '\'',
-            '"' => '"',
-            else => pattern[2],
-        };
-    }
-    return pattern[1];
-}
-
-fn findClosingQuote(pattern: []const u8, quote: u8) ?usize {
-    var i: usize = 1;
-    while (i < pattern.len) : (i += 1) {
-        if (pattern[i] == '\\' and i + 1 < pattern.len) {
-            i += 1;
-            continue;
-        }
-        if (pattern[i] == quote) return i + 1;
-    }
-    return null;
-}
-
-fn extractStringLiteral(raw: []const u8) []const u8 {
-    // For code generation, we return the raw content — the generator
-    // will handle escape interpretation when emitting Zig char literals.
-    return raw;
-}
-
-fn fillCharClassFlags(flags: *[256]bool, body: []const u8, negated: bool) void {
-    if (negated) {
-        for (0..256) |i| flags[i] = true;
-        flags[0] = false; // never match null
-        flags['\n'] = false; // default: char classes don't match newline
-    }
-    var i: usize = if (body.len > 0 and body[0] == '^') @as(usize, 1) else 0;
-    while (i < body.len) {
-        const c = body[i];
-        if (i + 2 < body.len and body[i + 1] == '-') {
-            const lo = c;
-            const hi = body[i + 2];
-            var ch: usize = lo;
-            while (ch <= hi) : (ch += 1) {
-                if (negated) flags[ch] = false else flags[ch] = true;
-            }
-            i += 3;
-        } else if (c == '\\' and i + 1 < body.len) {
-            const escaped: u8 = switch (body[i + 1]) {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '\\' => '\\',
-                else => body[i + 1],
-            };
-            if (negated) flags[escaped] = false else flags[escaped] = true;
-            i += 2;
-        } else {
-            if (negated) flags[c] = false else flags[c] = true;
-            i += 1;
-        }
-    }
-}
-
-/// Decode a literal pattern to get the actual characters.
-/// Handles escape sequences in both 'x' and "xy" forms.
-fn decodeLiteral(alloc: Allocator, pattern: []const u8) ![]const u8 {
-    if (pattern.len < 2) return "";
-    const inner = pattern[1 .. pattern.len - 1];
-    var result: std.ArrayList(u8) = .empty;
-    defer result.deinit(alloc);
-    var i: usize = 0;
-    while (i < inner.len) {
-        if (inner[i] == '\\' and i + 1 < inner.len) {
-            try result.append(alloc, switch (inner[i + 1]) {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '\\' => '\\',
-                '\'' => '\'',
-                '"' => '"',
-                else => inner[i + 1],
-            });
-            i += 2;
-        } else {
-            try result.append(alloc, inner[i]);
-            i += 1;
-        }
-    }
-    return try result.toOwnedSlice(alloc);
-}
-
 /// Find the lexer token name for a single character by searching @lexer rules.
-fn findTokenForChar(spec: *const LexerSpec, c: u8) ?[]const u8 {
+fn findTokenForChar(spec: *const LexerSpec, ch: u8) ?[]const u8 {
     for (spec.rules.items) |rule| {
-        // Match single-char literal: 'x'
+        if (rule.is_skip) continue;
         if (rule.pattern.len >= 3 and rule.pattern[0] == '\'') {
-            const ch = extractCharFromQuoted(rule.pattern);
-            if (ch != null and ch.? == c and !rule.is_skip) {
-                // Check this is a simple single-char rule (no continuation)
-                const end = findClosingQuote(rule.pattern, '\'');
-                if (end) |e| {
-                    const after = if (e < rule.pattern.len) std.mem.trim(u8, rule.pattern[e..], " \t") else "";
-                    if (after.len == 0) return rule.token;
+            const c: u8 = if (rule.pattern[1] == '\\' and rule.pattern.len >= 4)
+                switch (rule.pattern[2]) {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '\\' => '\\',
+                    '\'' => '\'',
+                    else => rule.pattern[2],
                 }
+            else
+                rule.pattern[1];
+            // Ensure it's a simple single-char rule (closing quote right after)
+            const close = if (rule.pattern[1] == '\\') @as(usize, 4) else @as(usize, 3);
+            if (c == ch and close <= rule.pattern.len) {
+                const after = std.mem.trim(u8, rule.pattern[close..], " \t");
+                if (after.len == 0) return rule.token;
             }
         }
     }
@@ -841,16 +669,119 @@ fn findTokenForChar(spec: *const LexerSpec, c: u8) ?[]const u8 {
 /// Find the lexer token name for a multi-char literal string.
 fn findTokenForLiteral(spec: *const LexerSpec, literal: []const u8) ?[]const u8 {
     for (spec.rules.items) |rule| {
+        if (rule.is_skip) continue;
         if (rule.pattern.len >= 3 and rule.pattern[0] == '"') {
-            if (findClosingQuote(rule.pattern, '"')) |end| {
-                const inner = rule.pattern[1 .. end - 1];
-                if (std.mem.eql(u8, inner, literal) and !rule.is_skip) {
-                    return rule.token;
+            // Find closing quote
+            var i: usize = 1;
+            while (i < rule.pattern.len) : (i += 1) {
+                if (rule.pattern[i] == '\\' and i + 1 < rule.pattern.len) {
+                    i += 1;
+                    continue;
                 }
+                if (rule.pattern[i] == '"') break;
+            }
+            if (i < rule.pattern.len) {
+                const inner = rule.pattern[1..i];
+                if (std.mem.eql(u8, inner, literal)) return rule.token;
             }
         }
     }
     return null;
+}
+
+/// Convert a @lexer pattern to an Oniguruma regex string.
+/// Translates grammar pattern syntax: 'x' -> x, "xy" -> xy, [...] -> [...], etc.
+fn patternToRegex(alloc: Allocator, pattern: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < pattern.len) {
+        const c = pattern[i];
+        switch (c) {
+            '\'' => {
+                // Single-char literal: 'x' or '\n'
+                i += 1;
+                while (i < pattern.len and pattern[i] != '\'') {
+                    if (pattern[i] == '\\' and i + 1 < pattern.len) {
+                        try out.append(alloc, '\\');
+                        try out.append(alloc, pattern[i + 1]);
+                        i += 2;
+                    } else {
+                        if (isRegexSpecial(pattern[i]))
+                            try out.append(alloc, '\\');
+                        try out.append(alloc, pattern[i]);
+                        i += 1;
+                    }
+                }
+                if (i < pattern.len) i += 1;
+            },
+            '"' => {
+                // String literal: "xyz"
+                i += 1;
+                while (i < pattern.len and pattern[i] != '"') {
+                    if (pattern[i] == '\\' and i + 1 < pattern.len) {
+                        try out.append(alloc, '\\');
+                        try out.append(alloc, pattern[i + 1]);
+                        i += 2;
+                    } else {
+                        if (isRegexSpecial(pattern[i]))
+                            try out.append(alloc, '\\');
+                        try out.append(alloc, pattern[i]);
+                        i += 1;
+                    }
+                }
+                if (i < pattern.len) i += 1;
+            },
+            '[' => {
+                // Character class — pass through verbatim until ']'
+                try out.append(alloc, '[');
+                i += 1;
+                // Handle negation
+                if (i < pattern.len and pattern[i] == '^') {
+                    try out.append(alloc, '^');
+                    i += 1;
+                }
+                // Handle ']' as first char in class (literal])
+                if (i < pattern.len and pattern[i] == ']') {
+                    try out.append(alloc, ']');
+                    i += 1;
+                }
+                while (i < pattern.len and pattern[i] != ']') {
+                    if (pattern[i] == '\\' and i + 1 < pattern.len) {
+                        try out.append(alloc, '\\');
+                        try out.append(alloc, pattern[i + 1]);
+                        i += 2;
+                    } else {
+                        try out.append(alloc, pattern[i]);
+                        i += 1;
+                    }
+                }
+                if (i < pattern.len) {
+                    try out.append(alloc, ']');
+                    i += 1;
+                }
+            },
+            ' ', '\t' => {
+                i += 1;
+            },
+            else => {
+                // Pass through: *, +, ?, (, ), |, .
+                try out.append(alloc, c);
+                i += 1;
+            },
+        }
+    }
+    return try out.toOwnedSlice(alloc);
+}
+
+/// Check if a pattern is a pure literal (only quoted chars, no regex).
+/// Returns the decoded characters if so.
+fn isRegexSpecial(c: u8) bool {
+    return switch (c) {
+        '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '^', '$', '\\' => true,
+        else => false,
+    };
 }
 
 // =============================================================================
@@ -882,56 +813,6 @@ const LexerGenerator = struct {
         const s = try std.fmt.allocPrint(self.allocator, fmt, args);
         defer self.allocator.free(s);
         try self.output.appendSlice(self.allocator, s);
-    }
-
-    /// Find rules for a single-character pattern, returning guarded and default rules
-    fn findCharRules(self: *LexerGenerator, char: u8) struct {
-        pre_guarded: ?[]const u8, // token when pre (truthy or > 0)
-        default: ?[]const u8, // token when no guard
-    } {
-        var result: @TypeOf(findCharRules(self, char)) = .{ .pre_guarded = null, .default = null };
-        const pattern = &[_]u8{ '\'', char, '\'' };
-
-        for (self.spec.rules.items) |rule| {
-            // Match single-char pattern like '!'
-            if (rule.pattern.len == 3 and std.mem.eql(u8, rule.pattern, pattern)) {
-                // Check for pre guard (truthy or > 0)
-                var has_pre_guard = false;
-                for (rule.guards) |guard| {
-                    if (std.mem.eql(u8, guard.variable, "pre") and
-                        (guard.op == .truthy or (guard.op == .gt and guard.value == 0)))
-                    {
-                        has_pre_guard = true;
-                        break;
-                    }
-                }
-                if (has_pre_guard) {
-                    result.pre_guarded = rule.token;
-                } else if (rule.guards.len == 0) {
-                    result.default = rule.token;
-                }
-            }
-        }
-        return result;
-    }
-
-    /// Generate switch case for a character, handling pre guards if present
-    fn generateCharCase(self: *LexerGenerator, char: u8, default_token: []const u8) !void {
-        const rules = self.findCharRules(char);
-
-        if (rules.pre_guarded) |guarded_token| {
-            // Has pre > 0 guard - generate conditional
-            try self.print(
-                \\            '{c}' => Token{{ .cat = if (ws_count > 0) .{s} else .{s}, .pre = ws_count, .pos = start, .len = 1 }},
-                \\
-            , .{ char, guarded_token, rules.default orelse default_token });
-        } else {
-            // No pre guard - simple token
-            try self.print(
-                \\            '{c}' => Token{{ .cat = .{s}, .pre = ws_count, .pos = start, .len = 1 }},
-                \\
-            , .{ char, rules.default orelse default_token });
-        }
     }
 
     fn generate(self: *LexerGenerator) ![]const u8 {
@@ -1096,361 +977,183 @@ const LexerGenerator = struct {
         try self.write("};\n");
     }
 
-    const RuleInfo = struct {
-        rule: LexerRule,
-        info: PatternInfo,
-        literal_chars: []const u8,
-    };
-
     fn generateMatchRules(self: *LexerGenerator) !void {
+        const num_rules = self.spec.rules.items.len;
 
-        var classified: std.ArrayList(RuleInfo) = .empty;
-        defer classified.deinit(self.allocator);
+        try self.write("    const onig = @import(\"onig.zig\");\n\n");
 
-        for (self.spec.rules.items) |rule| {
-            const info = classifyPattern(rule.pattern);
-            const lit = decodeLiteral(self.allocator, info.literal) catch "";
-            try classified.append(self.allocator, .{ .rule = rule, .info = info, .literal_chars = lit });
-        }
-
-        // Build groups: map from first-char to list of rule indices (longest first)
-        const CharGroup = struct { indices: std.ArrayList(usize) };
-        var char_groups: [256]?CharGroup = [_]?CharGroup{null} ** 256;
-        var class_rules: std.ArrayList(usize) = .empty;
-        defer class_rules.deinit(self.allocator);
-        var fallback_rule: ?usize = null;
-
-        for (classified.items, 0..) |item, idx| {
-            switch (item.info.kind) {
-                .fallback => fallback_rule = idx,
-                .char_class_start => try class_rules.append(self.allocator, idx),
-                else => {
-                    for (0..256) |ch| {
-                        if (item.info.first_chars[ch]) {
-                            if (char_groups[ch] == null) {
-                                char_groups[ch] = .{ .indices = .empty };
-                            }
-                            try char_groups[ch].?.indices.append(self.allocator, idx);
-                        }
-                    }
-                },
-            }
-        }
-        defer for (&char_groups) |*g| if (g.*) |*grp| grp.indices.deinit(self.allocator);
-
-        // Sort each group by literal length descending (longest match first)
-        for (&char_groups) |*g| {
-            if (g.*) |*grp| {
-                std.mem.sort(usize, grp.indices.items, @as([]const RuleInfo, classified.items), struct {
-                    fn lessThan(ctx: []const RuleInfo, a: usize, b: usize) bool {
-                        return ctx[a].literal_chars.len > ctx[b].literal_chars.len;
-                    }
-                }.lessThan);
-            }
-        }
-
-        // Emit character classification helpers
+        // Emit action struct and unified rule table
         try self.write(
-            \\    inline fn isDigit(c: u8) bool { return c >= '0' and c <= '9'; }
-            \\    inline fn isLetter(c: u8) bool { return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_'; }
-            \\    inline fn isWhitespace(c: u8) bool { return c == ' ' or c == '\t'; }
-            \\    inline fn isIdentChar(c: u8) bool { return isLetter(c) or isDigit(c) or c == '-'; }
-            \\    inline fn isIdentStartChar(c: u8) bool { return isLetter(c) or c == '.' or c == '/' or c == '~'; }
-            \\    inline fn isPathChar(c: u8) bool { return isLetter(c) or isDigit(c) or c == '.' or c == '/' or c == '-'; }
+            \\    const Act = struct { v: u8, k: enum { set, inc, dec }, n: i32 };
+            \\    const Rule = struct {
+            \\        pat: []const u8,
+            \\        tok: TokenCat,
+            \\        skip: bool = false,
+            \\        acts: []const Act = &.{},
+            \\    };
+            \\
+            \\    const rules = [_]Rule{
+            \\
+        );
+
+        // Pre-compute escaped regex strings and find max length for alignment
+        const RegexStr = struct { str: []const u8, rule: LexerRule };
+        var regex_strs: std.ArrayList(RegexStr) = .empty;
+        defer {
+            for (regex_strs.items) |rs| self.allocator.free(rs.str);
+            regex_strs.deinit(self.allocator);
+        }
+
+        var max_pat_len: usize = 0;
+        for (self.spec.rules.items) |rule| {
+            const regex = patternToRegex(self.allocator, rule.pattern) catch "";
+            // Calculate escaped display length (each \ and " adds 1)
+            var display_len: usize = 2; // quotes
+            for (regex) |ch| {
+                display_len += switch (ch) {
+                    '"', '\\' => @as(usize, 2),
+                    '\n', '\r', '\t' => 2,
+                    else => 1,
+                };
+            }
+            if (display_len > max_pat_len) max_pat_len = display_len;
+            try regex_strs.append(self.allocator, .{ .str = regex, .rule = rule });
+        }
+
+        for (regex_strs.items) |rs| {
+            const rule = rs.rule;
+            const regex = rs.str;
+
+            // Build the escaped pattern string and track its length
+            try self.write("        .{ .pat = \"");
+            var pat_len: usize = 2;
+            for (regex) |ch| {
+                switch (ch) {
+                    '"' => { try self.write("\\\""); pat_len += 2; },
+                    '\\' => { try self.write("\\\\"); pat_len += 2; },
+                    '\n' => { try self.write("\\n"); pat_len += 2; },
+                    '\r' => { try self.write("\\r"); pat_len += 2; },
+                    '\t' => { try self.write("\\t"); pat_len += 2; },
+                    else => { try self.print("{c}", .{ch}); pat_len += 1; },
+                }
+            }
+            try self.write("\"");
+
+            // Pad to align .tok column
+            const pad = if (max_pat_len > pat_len) max_pat_len - pat_len else 0;
+            for (0..pad) |_| try self.write(" ");
+
+            // Token
+            try self.print(", .tok = .{s}", .{if (rule.is_skip) "skip" else rule.token});
+
+            // Only emit .skip and .acts when non-default
+            if (rule.is_skip) {
+                try self.write(", .skip = true");
+            }
+
+            if (rule.actions.len > 0) {
+                try self.write(", .acts = &.{");
+                for (rule.actions, 0..) |action, ai| {
+                    if (ai > 0) try self.write(", ");
+                    const var_idx: u8 = for (self.spec.states.items, 0..) |state, si| {
+                        if (std.mem.eql(u8, state.name, action.variable orelse "")) break @as(u8, @intCast(si));
+                    } else 0;
+                    switch (action.kind) {
+                        .set => try self.print(".{{ .v = {d}, .k = .set, .n = {d} }}", .{ var_idx, action.value orelse 0 }),
+                        .inc => try self.print(".{{ .v = {d}, .k = .inc, .n = 0 }}", .{var_idx}),
+                        .dec => try self.print(".{{ .v = {d}, .k = .dec, .n = 0 }}", .{var_idx}),
+                        else => try self.write(".{ .v = 0, .k = .set, .n = 0 }"),
+                    }
+                }
+                try self.write("}");
+            }
+
+            try self.write(" },\n");
+        }
+
+        try self.write("    };\n\n");
+
+        // Compiled regex storage
+        try self.print("    var compiled: [{d}]?onig.Regex = .{{null}} ** {d};\n", .{ num_rules, num_rules });
+        try self.write(
+            \\    var initialized: bool = false;
+            \\
+            \\    fn ensureInit() void {
+            \\        if (initialized) return;
+            \\        onig.init();
+            \\        for (rules, 0..) |rule, i| {
+            \\            compiled[i] = onig.Regex.compile(rule.pat) catch null;
+            \\        }
+            \\        initialized = true;
+            \\    }
             \\
             \\    fn matchRules(self: *Lexer) Token {
+            \\        ensureInit();
             \\        while (true) {
-            \\            // Skip horizontal whitespace
             \\            const ws_start = self.pos;
-            \\            while (self.pos < self.source.len and isWhitespace(self.source[self.pos])) {
+            \\            while (self.pos < self.source.len and (self.source[self.pos] == ' ' or self.source[self.pos] == '\t'))
             \\                self.pos += 1;
-            \\            }
             \\            const ws_count: u8 = @intCast(@min(self.pos - ws_start, 255));
             \\
-            \\            // EOF
             \\            if (self.pos >= self.source.len)
             \\                return Token{ .cat = .eof, .pre = ws_count, .pos = @intCast(self.pos), .len = 0 };
             \\
             \\            const start: u32 = @intCast(self.pos);
-            \\            const c = self.source[self.pos];
             \\
         );
 
-        // Apply default actions
+        // Default actions
         for (self.spec.defaults.items) |def| {
             try self.print("            self.{s} = {d};\n", .{ def.variable, def.value });
         }
 
-        try self.write(
+        try self.print(
+            \\            var best_len: usize = 0;
+            \\            var best_rule: usize = {d};
+            \\            for (compiled, 0..) |maybe_regex, ri| {{
+            \\                if (maybe_regex) |regex| {{
+            \\                    if (regex.matchAt(self.source, self.pos)) |len| {{
+            \\                        if (len > best_len) {{
+            \\                            best_len = len;
+            \\                            best_rule = ri;
+            \\                        }}
+            \\                    }}
+            \\                }}
+            \\            }}
             \\
-            \\            switch (c) {
+            \\            if (best_rule < {d}) {{
+            \\                self.pos += @intCast(best_len);
+            \\                const rule = rules[best_rule];
             \\
-        );
+            \\                for (rule.acts) |act| {{
+            \\                    const states = [_]*i32{{
+        , .{ num_rules, num_rules });
 
-        // Emit switch arms for each character that has rules
-        var emitted_chars: [256]bool = [_]bool{false} ** 256;
-        for (0..256) |ch_idx| {
-            const ch: u8 = @intCast(ch_idx);
-            if (char_groups[ch] == null) continue;
-            if (emitted_chars[ch]) continue;
-
-            const grp = char_groups[ch].?;
-            try self.emitSwitchArm(ch, grp.indices.items, classified.items);
-            emitted_chars[ch] = true;
-        }
-
-        // Emit character-class rules as range checks before the else arm
-        // These go into specific character ranges
-        for (class_rules.items) |idx| {
-            const item = classified.items[idx];
-            // Character class rules are handled by emitting checks for each char in the class
-            // that doesn't already have a dedicated switch arm
-            for (0..256) |ch_idx| {
-                const ch: u8 = @intCast(ch_idx);
-                if (item.info.first_chars[ch] and !emitted_chars[ch]) {
-                    try self.print("                '{c}' => ", .{self.escapeChar(ch)});
-                    try self.emitClassRuleBody(item, classified.items);
-                    try self.write(",\n");
-                    emitted_chars[ch] = true;
-                }
-            }
-        }
-
-        // Emit fallback (else arm)
-        if (fallback_rule) |idx| {
-            const item = classified.items[idx];
-            try self.print(
-                \\                else => {{ self.pos += 1; return Token{{ .cat = .{s}, .pre = ws_count, .pos = start, .len = 1 }}; }},
-                \\
-            , .{item.rule.token});
-        } else {
-            try self.write(
-                \\                else => { self.pos += 1; return Token{ .cat = .err, .pre = ws_count, .pos = start, .len = 1 }; },
-                \\
-            );
+        for (self.spec.states.items, 0..) |state, si| {
+            if (si > 0) try self.write(", ");
+            try self.print("&self.{s}", .{state.name});
         }
 
         try self.write(
+            \\};
+            \\                    switch (act.k) {
+            \\                        .set => states[act.v].* = act.n,
+            \\                        .inc => states[act.v].* += 1,
+            \\                        .dec => states[act.v].* -= 1,
+            \\                    }
+            \\                }
+            \\
+            \\                if (rule.skip) continue;
+            \\
+            \\                return Token{ .cat = rule.tok, .pre = ws_count, .pos = start, .len = @intCast(best_len) };
             \\            }
+            \\
+            \\            self.pos += 1;
+            \\            return Token{ .cat = .err, .pre = ws_count, .pos = start, .len = 1 };
             \\        }
             \\    }
             \\
         );
-    }
-
-    fn escapeChar(self: *LexerGenerator, c: u8) u8 {
-        _ = self;
-        return c;
-    }
-
-    fn emitActions(self: *LexerGenerator, rule: LexerRule) !void {
-        for (rule.actions) |action| {
-            switch (action.kind) {
-                .set => try self.print(" self.{s} = {d};", .{ action.variable.?, action.value.? }),
-                .inc => try self.print(" self.{s} += 1;", .{action.variable.?}),
-                .dec => try self.print(" self.{s} -= 1;", .{action.variable.?}),
-                else => {},
-            }
-        }
-    }
-
-    fn emitSwitchArm(self: *LexerGenerator, ch: u8, indices: []const usize, items: []const RuleInfo) !void {
-        // Format the character for the switch arm
-        try self.write("                ");
-        try self.emitCharLiteral(ch);
-        try self.write(" => {\n");
-
-        // Emit rules for this character, longest first
-        var need_fallback = false;
-        for (indices) |idx| {
-            const item = items[idx];
-            const rule = item.rule;
-            const lit = item.literal_chars;
-
-            if (rule.is_skip) {
-                // Skip rules: advance past the literal and continue
-                try self.print("                    if (self.pos + {d} <= self.source.len", .{lit.len});
-                if (lit.len > 1) {
-                    for (lit[1..], 1..) |lc, offset| {
-                        try self.print(" and self.source[self.pos + {d}] == ", .{offset});
-                        try self.emitCharValue(lc);
-                    }
-                }
-                try self.print(") {{ self.pos += {d};", .{lit.len});
-                try self.emitActions(rule);
-                try self.write(" continue; }\n");
-                need_fallback = true;
-                continue;
-            }
-
-            if (item.info.kind == .char_then_rest and item.info.rest_pattern.len > 0) {
-                // Complex rule: first char + scanning rest
-                try self.write("                    self.pos += 1;\n");
-                try self.emitRestPattern(item.info.rest_pattern, rule);
-                try self.print("                    return Token{{ .cat = .{s}, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) }};\n", .{rule.token});
-                try self.write("                },\n");
-                return;
-            }
-
-            if (lit.len > 1) {
-                // Multi-char literal: peek chain
-                try self.print("                    if (self.pos + {d} <= self.source.len", .{lit.len});
-                for (lit[1..], 1..) |lc, offset| {
-                    try self.print(" and self.source[self.pos + {d}] == ", .{offset});
-                    try self.emitCharValue(lc);
-                }
-                try self.print(") {{ self.pos += {d};", .{lit.len});
-                try self.emitActions(rule);
-                try self.print(" return Token{{ .cat = .{s}, .pre = ws_count, .pos = start, .len = {d} }}; }}\n", .{ rule.token, lit.len });
-                need_fallback = true;
-            } else {
-                // Single-char: this is the fallback for this switch arm
-                if (need_fallback) {
-                    try self.write("                    self.pos += 1;");
-                    try self.emitActions(rule);
-                    try self.print(" return Token{{ .cat = .{s}, .pre = ws_count, .pos = start, .len = 1 }};\n", .{rule.token});
-                } else {
-                    try self.write("                    self.pos += 1;");
-                    try self.emitActions(rule);
-                    try self.print(" return Token{{ .cat = .{s}, .pre = ws_count, .pos = start, .len = 1 }};\n", .{rule.token});
-                }
-                try self.write("                },\n");
-                return;
-            }
-        }
-
-        // If all rules were multi-char with no single-char fallback, emit error fallback
-        try self.write("                    self.pos += 1; return Token{ .cat = .err, .pre = ws_count, .pos = start, .len = 1 };\n");
-        try self.write("                },\n");
-    }
-
-    fn emitClassRuleBody(self: *LexerGenerator, item: RuleInfo, all_items: []const RuleInfo) !void {
-        _ = all_items;
-        const rule = item.rule;
-        // Character class start — scan while chars match the class
-        try self.write("{\n");
-        try self.write("                    self.pos += 1;\n");
-
-        // If there's a rest pattern with repetition, generate a scanning loop
-        if (item.info.rest_pattern.len > 0) {
-            try self.emitRestPattern(item.info.rest_pattern, rule);
-        }
-
-        try self.emitActions(rule);
-        try self.print("                    return Token{{ .cat = .{s}, .pre = ws_count, .pos = start, .len = @intCast(self.pos - start) }};\n", .{rule.token});
-        try self.write("                }");
-    }
-
-    fn emitRestPattern(self: *LexerGenerator, rest: []const u8, rule: LexerRule) !void {
-        // Handle common rest patterns
-        // [^\n]* — scan to newline (comment-like)
-        if (std.mem.startsWith(u8, rest, "[^") and std.mem.indexOf(u8, rest, "]*") != null) {
-            // SIMD-accelerated scan to character
-            if (rule.is_simd) {
-                if (rule.simd_char) |sc| {
-                    try self.write("                    const remaining = self.source[self.pos..];\n");
-                    try self.print("                    const offset = simd.findByte(remaining, {d});\n", .{sc});
-                    try self.write("                    self.pos += @intCast(offset);\n");
-                    return;
-                }
-            }
-            // Scalar fallback: scan until the excluded char
-            try self.write("                    while (self.pos < self.source.len) {\n");
-            try self.write("                        const sc = self.source[self.pos];\n");
-            // Extract the excluded chars from [^...]
-            if (std.mem.indexOf(u8, rest, "]")) |close| {
-                const excluded = rest[2..close];
-                try self.write("                        if (");
-                var first = true;
-                var i: usize = 0;
-                while (i < excluded.len) {
-                    if (!first) try self.write(" or ");
-                    if (excluded[i] == '\\' and i + 1 < excluded.len) {
-                        try self.print("sc == {d}", .{switch (excluded[i + 1]) {
-                            'n' => @as(u8, '\n'),
-                            'r' => @as(u8, '\r'),
-                            't' => @as(u8, '\t'),
-                            else => excluded[i + 1],
-                        }});
-                        i += 2;
-                    } else {
-                        try self.print("sc == '{c}'", .{excluded[i]});
-                        i += 1;
-                    }
-                    first = false;
-                }
-                try self.write(") break;\n");
-            }
-            try self.write("                        self.pos += 1;\n");
-            try self.write("                    }\n");
-            return;
-        }
-
-        // [a-zA-Z0-9_-]* or [a-zA-Z0-9_]* — identifier continuation
-        if (std.mem.startsWith(u8, rest, "[") and
-            (std.mem.indexOf(u8, rest, "]*") != null or std.mem.indexOf(u8, rest, "]+") != null))
-        {
-            try self.write("                    while (self.pos < self.source.len) {\n");
-            try self.write("                        const sc = self.source[self.pos];\n");
-            try self.write("                        if (!(");
-            // Build char class check
-            if (std.mem.indexOf(u8, rest, "]")) |close| {
-                const body = rest[1..close];
-                try self.emitCharClassCheck("sc", body);
-            }
-            try self.write(")) break;\n");
-            try self.write("                        self.pos += 1;\n");
-            try self.write("                    }\n");
-            return;
-        }
-
-        // Literal chars continuation (e.g., pattern part after first char like '{' in '$' '{')
-        if (rest.len >= 3 and (rest[0] == '\'' or rest[0] == '"')) {
-            // Just literal chars to match
-            return;
-        }
-    }
-
-    fn emitCharClassCheck(self: *LexerGenerator, varname: []const u8, body: []const u8) !void {
-        var i: usize = 0;
-        var first = true;
-        while (i < body.len) {
-            if (i + 2 < body.len and body[i + 1] == '-') {
-                if (!first) try self.write(" or ");
-                try self.print("({s} >= '{c}' and {s} <= '{c}')", .{ varname, body[i], varname, body[i + 2] });
-                i += 3;
-                first = false;
-            } else if (body[i] == '_' or body[i] == '-' or body[i] == '.' or body[i] == '/' or body[i] == '~') {
-                if (!first) try self.write(" or ");
-                try self.print("{s} == '{c}'", .{ varname, body[i] });
-                i += 1;
-                first = false;
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    fn emitCharLiteral(self: *LexerGenerator, c: u8) !void {
-        switch (c) {
-            '\n' => try self.write("'\\n'"),
-            '\r' => try self.write("'\\r'"),
-            '\t' => try self.write("'\\t'"),
-            '\\' => try self.write("'\\\\'"),
-            '\'' => try self.write("'\\''"),
-            else => try self.print("'{c}'", .{c}),
-        }
-    }
-
-    fn emitCharValue(self: *LexerGenerator, c: u8) !void {
-        switch (c) {
-            '\n' => try self.write("'\\n'"),
-            '\r' => try self.write("'\\r'"),
-            '\t' => try self.write("'\\t'"),
-            '\\' => try self.write("'\\\\'"),
-            '\'' => try self.write("'\\''"),
-            else => try self.print("'{c}'", .{c}),
-        }
     }
 };
 
