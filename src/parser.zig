@@ -4,8 +4,7 @@
 //! Contains both lexer and parser.
 
 const std = @import("std");
-const bytecode = @import("bytecode.zig");
-const MAX_ARGS = bytecode.MAX_ARGS;
+const MAX_ARGS: usize = 32;
 const slash = @import("slash.zig");
 
 // SIMD helpers (fallback if simd.zig not available)
