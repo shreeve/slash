@@ -110,7 +110,7 @@ pub const Shell = struct {
             .not => self.evalNot(args, source),
             .subshell => self.evalSubshell(args, source),
             .assign => self.evalAssign(args, source),
-            .unset => self.evalUnset(args, source),
+            // .unset removed — use builtin command instead
             .@"if" => self.evalIf(args, source),
             .@"for" => self.evalFor(args, source),
             .@"while" => self.evalWhile(args, source),
