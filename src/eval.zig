@@ -150,17 +150,17 @@ pub const Eval = struct {
     fn evalCmd(self: *Eval, args: []const Sexp, source: []const u8) void {
         if (args.len == 0) return;
 
-        var argv_list = std.ArrayList([]const u8).init(self.allocator);
-        defer argv_list.deinit();
+        var argv_list: std.ArrayList([]const u8) = .empty;
+        defer argv_list.deinit(self.allocator);
 
         const cmd_name = self.sexpToStr(args[0], source) orelse return;
-        argv_list.append(cmd_name) catch return;
+        argv_list.append(self.allocator, cmd_name) catch return;
 
         for (args[1..]) |arg| {
             switch (arg) {
                 .src => {
                     if (self.sexpToStr(arg, source)) |s| {
-                        argv_list.append(s) catch {};
+                        argv_list.append(self.allocator, s) catch {};
                     }
                 },
                 .list => |items| {
@@ -169,12 +169,12 @@ pub const Eval = struct {
                             .tag => |t| {
                                 if (isRedirTag(t)) continue;
                                 if (self.sexpToStr(arg, source)) |s| {
-                                    argv_list.append(s) catch {};
+                                    argv_list.append(self.allocator, s) catch {};
                                 }
                             },
                             else => {
                                 if (self.sexpToStr(arg, source)) |s| {
-                                    argv_list.append(s) catch {};
+                                    argv_list.append(self.allocator, s) catch {};
                                 }
                             },
                         }
@@ -182,7 +182,7 @@ pub const Eval = struct {
                 },
                 else => {
                     if (self.sexpToStr(arg, source)) |s| {
-                        argv_list.append(s) catch {};
+                        argv_list.append(self.allocator, s) catch {};
                     }
                 },
             }
@@ -240,7 +240,7 @@ pub const Eval = struct {
         posix.close(pipe_fds[1]);
         _ = posix.waitpid(pid1, 0);
         const result = posix.waitpid(pid2, 0);
-        self.last_exit = if (result.status.signal != null) 128 else @truncate(result.status.exit_status);
+        self.last_exit = statusToExit(result.status);
     }
 
     fn evalAnd(self: *Eval, args: []const Sexp, source: []const u8) void {
@@ -296,7 +296,7 @@ pub const Eval = struct {
         }
 
         const result = posix.waitpid(pid, 0);
-        self.last_exit = if (result.status.signal != null) 128 else @truncate(result.status.exit_status);
+        self.last_exit = statusToExit(result.status);
     }
 
     fn evalAssign(self: *Eval, args: []const Sexp, source: []const u8) void {
@@ -469,19 +469,14 @@ pub const Eval = struct {
         if (pid == 0) {
             const argv_z = toExecArgs(self.allocator, argv) catch posix.exit(127);
             const envp = getEnvP();
-            const err = posix.execvpeZ(argv_z[0].?, argv_z, envp);
-            _ = err;
+            posix.execvpeZ(argv_z[0].?, argv_z, envp) catch {};
             const name = argv[0];
             std.debug.print("slash: {s}: command not found\n", .{name});
             posix.exit(127);
         }
 
         const result = posix.waitpid(pid, 0);
-        if (result.status.signal) |_| {
-            self.last_exit = 128;
-        } else {
-            self.last_exit = @truncate(result.status.exit_status);
-        }
+        self.last_exit = statusToExit(result.status);
     }
 
     // =========================================================================
@@ -522,4 +517,10 @@ fn toExecArgs(alloc: Allocator, argv: []const []const u8) ![*:null]const ?[*:0]c
 
 fn getEnvP() [*:null]const ?[*:0]const u8 {
     return std.c.environ;
+}
+
+fn statusToExit(status: u32) u8 {
+    if (posix.W.IFSIGNALED(status)) return 128 +| @as(u8, @truncate(posix.W.TERMSIG(status)));
+    if (posix.W.IFEXITED(status)) return @truncate(posix.W.EXITSTATUS(status));
+    return 1;
 }

@@ -4048,7 +4048,16 @@ const ParserGenerator = struct {
         );
 
         // Generate token to symbol mapping
+        // Track emitted token categories to avoid duplicate switch arms
+        var emitted_cats = std.StringHashMap(void).init(self.allocator);
+        defer {
+            var it = emitted_cats.keyIterator();
+            while (it.next()) |key| self.allocator.free(key.*);
+            emitted_cats.deinit();
+        }
+
         try writer.print("            .eof => {d},\n", .{self.end_id});
+        try emitted_cats.put(try self.allocator.dupe(u8, "eof"), {});
 
         // Check if we have @as directives for "ident" - if so, route through identToSymbol
         var has_ident_as = false;
@@ -4122,13 +4131,14 @@ const ParserGenerator = struct {
                         }
                     }
                 }
-                if (valid) {
+                if (valid and !emitted_cats.contains(lower_name)) {
                     try writer.print("            .{s} => {d},\n", .{ lower_name, sym.id });
+                    try emitted_cats.put(try self.allocator.dupe(u8, lower_name), {});
                 }
             }
         }
 
-        // Generate @op mappings for operator literals (e.g., "'=" => noteq)
+        // Generate @op mappings for operator literals (e.g., "and" => and_sym)
         for (self.symbols.items) |sym| {
             if (sym.kind == .terminal and sym.name.len >= 2 and sym.name[0] == '"') {
                 const raw_literal = sym.name[1 .. sym.name.len - 1];
@@ -4148,8 +4158,9 @@ const ParserGenerator = struct {
                 const literal = literal_buf[0..literal_len];
                 // Look up in @op mappings
                 for (self.op_mappings.items) |m| {
-                    if (std.mem.eql(u8, literal, m.lit)) {
+                    if (std.mem.eql(u8, literal, m.lit) and !emitted_cats.contains(m.tok)) {
                         try writer.print("            .{s} => {d},\n", .{ m.tok, sym.id });
+                        try emitted_cats.put(try self.allocator.dupe(u8, m.tok), {});
                         break;
                     }
                 }
@@ -4169,10 +4180,12 @@ const ParserGenerator = struct {
                 null;
 
             if (char) |c| {
-                // Look up token name from lexer spec
                 if (lexer_spec) |spec| {
                     if (findTokenForChar(spec, c)) |tok_name| {
-                        try writer.print("            .{s} => {d},\n", .{ tok_name, sym.id });
+                        if (!emitted_cats.contains(tok_name)) {
+                            try writer.print("            .{s} => {d},\n", .{ tok_name, sym.id });
+                            try emitted_cats.put(try self.allocator.dupe(u8, tok_name), {});
+                        }
                         continue;
                     }
                 }
@@ -4182,12 +4195,14 @@ const ParserGenerator = struct {
         // Map multi-char operator terminals to their lexer token names
         for (self.symbols.items) |sym| {
             if (sym.kind != .terminal or sym.name.len < 4 or sym.name[0] != '"') continue;
-            // Extract the literal string between quotes
             const raw = sym.name[1 .. sym.name.len - 1];
             if (raw.len < 2) continue;
             if (lexer_spec) |spec| {
                 if (findTokenForLiteral(spec, raw)) |tok_name| {
-                    try writer.print("            .{s} => {d},\n", .{ tok_name, sym.id });
+                    if (!emitted_cats.contains(tok_name)) {
+                        try writer.print("            .{s} => {d},\n", .{ tok_name, sym.id });
+                        try emitted_cats.put(try self.allocator.dupe(u8, tok_name), {});
+                    }
                 }
             }
         }

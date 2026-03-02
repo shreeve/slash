@@ -191,7 +191,8 @@ fn dumpSexp(alloc: std.mem.Allocator, source: []const u8, mode: ParseMode) void 
     };
 
     var write_buf: [4096]u8 = undefined;
-    const w = std.fs.File.stdout().writer(&write_buf);
+    var stdout_writer = std.fs.File.stdout().writer(&write_buf);
+    const w = &stdout_writer.interface;
     result.write(source, w) catch {};
     w.writeAll("\n") catch {};
     w.flush() catch {};
