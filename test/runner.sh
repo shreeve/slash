@@ -226,6 +226,59 @@ check "source"                 "source file.slash"          "(source file.slash)
 check "exec"                   "exec ls -la"                "(exec (cmd ls -la))"
 
 # ==========================================================================
+# COMBINED / EDGE CASES
+# ==========================================================================
+
+# --- multiple redirections on one command ---
+check "multi redir"            "app > out.txt 2> err.txt"       "(cmd app (redir_out out.txt) (redir_err err.txt))"
+check "redir + append"         "app > out.txt 2>> err.log"      "(cmd app (redir_out out.txt) (redir_err_app err.log))"
+
+# --- pipes with redirections ---
+check "pipe + redir"           "ls | sort > out.txt"            "(pipe (cmd ls) (cmd sort (redir_out out.txt)))"
+check "pipe + herestring"      'sort <<< "c b a"'               '(cmd sort (herestring "c b a"))'
+
+# --- background with pipes ---
+check "bg pipeline"            "ls | sort &"                    "(bg (pipe (cmd ls) (cmd sort)))"
+
+# --- negation with pipeline ---
+check "not pipeline"           "! ls | wc"                      "(pipe (not (cmd ls)) (cmd wc))"
+
+# --- for with variable words ---
+check "for with vars"          'for f in $a $b $c { echo $f }'  '(for f (list $a $b $c) (block (cmd echo $f)))'
+
+# --- while with comparison ---
+check "while comparison"       'while $x < 10 { echo $x }'     "(while (lt \$x 10) (block (cmd echo \$x)))"
+
+# --- nested captures ---
+check "nested capture"         'echo $(echo $(date))'           "(cmd echo (capture (cmd echo (capture (cmd date)))))"
+
+# --- cmd with block ---
+check "cmd with block"         "cmd foo { echo hi }"            "(cmd_def foo _ (block (cmd echo hi)))"
+check "cmd with args body"     'cmd g git status'               "(cmd_def g _ (cmd git status))"
+
+# --- chained boolean ---
+check "chain &&"               "a && b && c"                    "(and (cmd a) (and (cmd b) (cmd c)))"
+check "chain ||"               "a || b || c"                    "(or (cmd a) (or (cmd b) (cmd c)))"
+check "mixed && ||"            "a && b || c"                    "(and (cmd a) (or (cmd b) (cmd c)))"
+check "mixed ; &&"             "a ; b && c"                     "(seq (cmd a) (and (cmd b) (cmd c)))"
+
+# --- display edge cases ---
+check "display nested parens"  "= ((1 + 2))"                   "(display (add 1 2))"
+check "display var math"       '= $x * 2'                      "(display (mul \$x 2))"
+check "display positive"       "= +5"                           "(display 5)"
+check "display double neg"     "= -(-3)"                        "(display (neg (neg 3)))"
+
+# --- subshell with boolean ---
+check "subshell &&"            "(a && b)"                       "(subshell (and (cmd a) (cmd b)))"
+check "subshell ||"            "(a || b)"                       "(subshell (or (cmd a) (cmd b)))"
+
+# --- redir in if ---
+check "redir in if block"     "if ls { echo ok > /dev/null }"  "(if (cmd ls) (block (cmd echo ok (redir_out /dev/null))))"
+
+# --- capture in assignment ---
+check "assign capture pipe"   'x = $(ls | wc -l)'              "(assign x (capture (pipe (cmd ls) (cmd wc -l))))"
+
+# ==========================================================================
 # RESULTS
 # ==========================================================================
 echo ""
