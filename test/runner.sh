@@ -194,6 +194,9 @@ check "cmd define with args"   "cmd g git status"           "(cmd_def g _ (cmd g
 check "cmd delete"             "cmd foo -"                  "(cmd_del foo)"
 check "cmd show"               "cmd foo"                    "(cmd_show foo)"
 check "cmd list"               "cmd"                        "(cmd_list)"
+check "cmd ??? define"         'cmd ??? { echo missing }'   "(cmd_missing _ (block (cmd echo missing)))"
+check "cmd ??? show"           "cmd ???"                    "(cmd_missing_show)"
+check "cmd ??? delete"         "cmd ??? -"                  "(cmd_missing_del)"
 
 # ==========================================================================
 # KEY BINDINGS

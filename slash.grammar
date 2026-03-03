@@ -609,8 +609,10 @@ brace_item = stmt                           → 1
 # must check the LPAREN token's `pre` field when deciding whether to
 # enter the params? branch. The grammar cannot express this distinction.
 
-cmd_def   = CMD MISSING params? block        → (cmd_hook 3 4)
-          | CMD MISSING params? stmt        → (cmd_hook 3 4)
+cmd_def   = CMD MISSING params? block        → (cmd_missing 3 4)
+          | CMD MISSING params? stmt        → (cmd_missing 3 4)
+          | CMD MISSING "-"                 → (cmd_missing_del)
+          | CMD MISSING                     → (cmd_missing_show)
           | CMD name params? block          → (cmd_def 2 3 4)
           | CMD name params? stmt           → (cmd_def 2 3 4)
           | CMD name "-"                    → (cmd_del 2)
