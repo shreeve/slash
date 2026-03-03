@@ -532,3 +532,85 @@ source text → lexer → tokens → parser → s-expressions → executor → e
 
 No AST node types, no visitor pattern. S-expressions are lists.
 The executor is a recursive function that switches on the head tag.
+
+---
+
+## 6. Coverage Matrix
+
+Every language feature from SLASH.md traced against `slash.grammar`.
+
+### 6.1 Fully Covered (lexer + parser)
+
+| Feature | Example |
+|---------|---------|
+| Simple commands | `ls -la /tmp` |
+| Pipelines | `ls \| grep zig \| sort` |
+| Pipe stderr | `make \|& grep error` |
+| Standard redirects | `> >> < 2> 2>> &> 2>&1` |
+| Numbered fd redirects | `3> file`, `1>&3` |
+| Herestrings | `<<< "hello"` |
+| Heredocs (all 3 types) | `'''`, `"""`, `` ```lang `` |
+| Boolean operators | `&& \|\| xor` |
+| Word-form booleans | `and or not xor` |
+| Semicolons | `mkdir build; cd build` |
+| Background | `sleep 10 &` |
+| Subshell grouping | `(cd /tmp; ls)` |
+| Comments (inline too) | `ls -la # show all` |
+| Variable assignment | `name = "steve"` |
+| Variable unset | `name = -` |
+| Inline math | `x = 10 + 4`, `y = $x * 3` |
+| Math at prompt | `1 + 2 * 8` |
+| Special variables | `$?`, `$$`, `$!`, `$#`, `$*`, `$0` |
+| Braced variables | `${name}`, `${1 ?? "default"}` |
+| Default values | `$1 ?? 8080` |
+| Subshell capture | `$(git branch --show-current)` |
+| Process substitution | `<(sort a.txt)`, `>(cmd)` |
+| if/unless/else chains | All forms |
+| Comparisons | `== != < > <= >= =~ !~` |
+| Boolean conditions | `$x > 0 and $x < 100` |
+| Grouped conditions | `($a == 1 or $b == 2) and $c == 3` |
+| for/while/until loops | All forms |
+| break/continue | Both |
+| try/pattern matching | String and word arms |
+| Blocks (braces) | `{ echo hi }` |
+| Blocks (indentation) | `INDENT ... OUTDENT` |
+| test with flags | `test -f $file` |
+| cmd define (one-line) | `cmd g git $*` |
+| cmd define (multi-line) | `cmd serve(port) ...` |
+| cmd show/delete/list | `cmd foo`, `cmd foo -`, `cmd` |
+| cmd ??? hook | `cmd ???(name) ...` |
+| key bindings | `key esc-l "ls -la"` |
+| key delete | `key combo -` |
+| set/show/reset/list | All forms |
+| exit with code | `exit 1` |
+| source / exec / shift | `source file`, `exec ls`, `shift` |
+| Flags as arguments | `-la`, `--verbose` |
+| Bare minus as argument | `cat -`, `cd -` |
+| Glob chars in arguments | `*`, `?`, `[`, `]`, `,` |
+| Line continuation | `\` before newline |
+
+### 6.2 Requires Grammar Engine Implementation
+
+These features are correctly specified in the grammar file (tokens declared,
+rules documented, disambiguation contracts written) but need implementation
+in `grammar.zig`:
+
+| Feature | What's Needed |
+|---------|---------------|
+| Regex literals `/pattern/flags` | Context-sensitive lexer heuristic in `matchRules()`. The preceding token determines whether `/` starts a regex or is division. Disambiguation rules are specified in the grammar's regex section. |
+| Else after OUTDENT | The lexer's indentation handler must not emit NEWLINE between OUTDENT and ELSE. Documented as a contract in the grammar's conditionals section. |
+| `cmd name(params)` vs `cmd name (body)` | The generated parser must check LPAREN's `pre` field (whitespace count). `pre=0` means parameter list, `pre>0` means subshell body. Documented in the grammar's cmd section. |
+
+### 6.3 Executor/Expander Concerns (not grammar)
+
+These features are handled post-parse by the executor and expander, not by
+the grammar. The grammar passes the raw tokens through; expansion happens
+at runtime.
+
+| Feature | Where It Lives |
+|---------|---------------|
+| Glob expansion (`*.zig`, `file[0-9]`) | Expander stitches adjacent `pre=0` tokens into patterns, does filesystem matching |
+| Brace expansion (`{a,b,c}`) | Expander checks `pre=0` on LBRACE to distinguish from block syntax |
+| Variable interpolation in strings | Expander parses `$name` inside `string_dq` tokens |
+| Tilde expansion (`~/foo`) | Expander handles `~` prefix in idents |
+| Auto-cd (`/tmp` as command) | Executor fallback when command not found |
