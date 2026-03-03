@@ -948,6 +948,17 @@ const LexerGenerator = struct {
         for (self.spec.states.items) |state| {
             try self.print("    {s}: i32,\n", .{state.name});
         }
+        // Heredoc state
+        try self.write(
+            \\    // Heredoc state
+            \\    hd_type: u8 = 0,              // 0=none, 1=sq, 2=dq, 3=bt
+            \\    hd_margin: u32 = 0,            // closing delimiter's indentation (left margin)
+            \\    hd_scanned: bool = false,       // true after margin scan
+            \\    hd_buf: [64]Token = undefined, // buffered tokens after opening delimiter
+            \\    hd_buf_count: u8 = 0,
+            \\    hd_buf_pos: u8 = 0,            // replay cursor
+            \\
+        );
 
         // Init function
         try self.write(
@@ -985,6 +996,11 @@ const LexerGenerator = struct {
         try self.write("    /// Reset lexer to beginning\n");
         try self.write("    pub fn reset(self: *Lexer) void {\n");
         try self.write("        self.pos = 0;\n");
+        try self.write("        self.hd_type = 0;\n");
+        try self.write("        self.hd_margin = 0;\n");
+        try self.write("        self.hd_scanned = false;\n");
+        try self.write("        self.hd_buf_count = 0;\n");
+        try self.write("        self.hd_buf_pos = 0;\n");
         for (self.spec.states.items) |state| {
             try self.print("        self.{s} = {d};\n", .{ state.name, state.initial_value });
         }
@@ -1006,11 +1022,142 @@ const LexerGenerator = struct {
             \\
         );
 
-        // Next function (simple - matchRules handles everything)
+        // Next function with heredoc state machine
         try self.write(
             \\    /// Get next token
             \\    pub fn next(self: *Lexer) Token {
-            \\        return self.matchRules();
+            \\        // Replaying buffered tokens (only after heredoc body is fully collected)
+            \\        if (self.hd_type == 0 and self.hd_buf_pos < self.hd_buf_count) {
+            \\            const tok = self.hd_buf[self.hd_buf_pos];
+            \\            self.hd_buf_pos += 1;
+            \\            if (self.hd_buf_pos >= self.hd_buf_count) {
+            \\                self.hd_buf_count = 0;
+            \\                self.hd_buf_pos = 0;
+            \\            }
+            \\            return tok;
+            \\        }
+            \\        // Collecting heredoc body lines
+            \\        if (self.hd_type != 0) {
+            \\            return self.collectHeredocLine();
+            \\        }
+            \\        const tok = self.matchRules();
+            \\        // Detect heredoc opening — buffer remaining line tokens
+            \\        if (tok.cat == .heredoc_sq or tok.cat == .heredoc_dq or tok.cat == .heredoc_bt) {
+            \\            self.hd_type = switch (tok.cat) {
+            \\                .heredoc_sq => 1,
+            \\                .heredoc_dq => 2,
+            \\                .heredoc_bt => 3,
+            \\                else => 0,
+            \\            };
+            \\            self.hd_margin = 0;
+            \\            self.hd_scanned = false;
+            \\            self.hd_buf_count = 0;
+            \\            self.hd_buf_pos = 0;
+            \\            // Buffer remaining tokens on this line until NEWLINE or EOF
+            \\            while (true) {
+            \\                const t = self.matchRules();
+            \\                if (t.cat == .newline or t.cat == .eof) break;
+            \\                if (self.hd_buf_count < 64) {
+            \\                    self.hd_buf[self.hd_buf_count] = t;
+            \\                    self.hd_buf_count += 1;
+            \\                }
+            \\            }
+            \\            // Now in body collection mode — next call to next() will collect body
+            \\            return tok;
+            \\        }
+            \\        return tok;
+            \\    }
+            \\
+            \\    /// Collect one heredoc body line, or detect closing delimiter
+            \\    fn collectHeredocLine(self: *Lexer) Token {
+            \\        if (self.pos >= self.source.len) {
+            \\            self.hd_type = 0;
+            \\            return Token{ .cat = .eof, .pre = 0, .pos = @intCast(self.pos), .len = 0 };
+            \\        }
+            \\        // Count leading whitespace
+            \\        var ws: u32 = 0;
+            \\        while (self.pos + ws < self.source.len and (self.source[self.pos + ws] == ' ' or self.source[self.pos + ws] == '\t'))
+            \\            ws += 1;
+            \\        const content_start = self.pos + ws;
+            \\        // Check for closing delimiter
+            \\        const delim: []const u8 = switch (self.hd_type) {
+            \\            1 => "'''",
+            \\            2 => "\"\"\"",
+            \\            3 => "```",
+            \\            else => "",
+            \\        };
+            \\        // Scan ahead on first call to find margin from closing delimiter
+            \\        if (!self.hd_scanned) {
+            \\            self.hd_scanned = true;
+            \\            var scan = self.pos;
+            \\            while (scan < self.source.len) {
+            \\                var sws: u32 = 0;
+            \\                while (scan + sws < self.source.len and (self.source[scan + sws] == ' ' or self.source[scan + sws] == '\t'))
+            \\                    sws += 1;
+            \\                const sc = scan + sws;
+            \\                if (sc + delim.len <= self.source.len and std.mem.eql(u8, self.source[sc..][0..delim.len], delim)) {
+            \\                    self.hd_margin = sws;
+            \\                    break;
+            \\                }
+            \\                while (scan < self.source.len and self.source[scan] != '\n') scan += 1;
+            \\                if (scan < self.source.len) scan += 1;
+            \\            }
+            \\        }
+            \\        if (content_start + delim.len <= self.source.len) {
+            \\            const candidate = self.source[content_start..][0..delim.len];
+            \\            if (std.mem.eql(u8, candidate, delim)) {
+            \\                // Check that after delimiter it's whitespace, pipe, newline, or EOF
+            \\                const after = content_start + @as(u32, @intCast(delim.len));
+            \\                const is_closing = after >= self.source.len or
+            \\                    self.source[after] == '\n' or self.source[after] == ' ' or
+            \\                    self.source[after] == '\t' or self.source[after] == '|' or
+            \\                    self.source[after] == '\r';
+            \\                if (is_closing) {
+            \\                    // Closing delimiter found — emit it
+            \\                    const close_cat: TokenCat = switch (self.hd_type) {
+            \\                        1 => .heredoc_sq,
+            \\                        2 => .heredoc_dq,
+            \\                        3 => .heredoc_end,
+            \\                        else => .err,
+            \\                    };
+            \\                    self.pos = after;
+            \\                    self.hd_type = 0;
+            \\                    // If there's content after closing delimiter on this line, lex it into buffer
+            \\                    while (self.pos < self.source.len and (self.source[self.pos] == ' ' or self.source[self.pos] == '\t'))
+            \\                        self.pos += 1;
+            \\                    if (self.pos < self.source.len and self.source[self.pos] != '\n' and self.source[self.pos] != '\r') {
+            \\                        // Content after closing delimiter (pipe continuation)
+            \\                        // Buffer these tokens, then add a NEWLINE
+            \\                        // Buffer pipe continuation tokens from closing line
+            \\                        while (true) {
+            \\                            const t = self.matchRules();
+            \\                            if (t.cat == .newline) {
+            \\                                if (self.hd_buf_count < 64) {
+            \\                                    self.hd_buf[self.hd_buf_count] = t;
+            \\                                    self.hd_buf_count += 1;
+            \\                                }
+            \\                                break;
+            \\                            }
+            \\                            if (t.cat == .eof) break;
+            \\                            if (self.hd_buf_count < 64) {
+            \\                                self.hd_buf[self.hd_buf_count] = t;
+            \\                                self.hd_buf_count += 1;
+            \\                            }
+            \\                        }
+            \\                    }
+            \\                    return Token{ .cat = close_cat, .pre = @intCast(@min(ws, 255)), .pos = @intCast(content_start), .len = @intCast(delim.len) };
+            \\                }
+            \\            }
+            \\        }
+            \\        // Not a closing delimiter — emit body line with margin stripped
+            \\        var line_end = self.pos;
+            \\        while (line_end < self.source.len and self.source[line_end] != '\n') line_end += 1;
+            \\        const strip = @min(ws, self.hd_margin);
+            \\        const body_start = self.pos + strip;
+            \\        const body_len = if (line_end > body_start) line_end - body_start else 0;
+            \\        self.pos = line_end;
+            \\        if (self.pos < self.source.len and self.source[self.pos] == '\n') self.pos += 1;
+            \\        return Token{ .cat = .heredoc_body, .pre = 0, .pos = @intCast(body_start), .len = @intCast(body_len) };
             \\    }
             \\
             \\

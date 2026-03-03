@@ -282,6 +282,51 @@ check "redir in if block"     "if ls { echo ok > /dev/null }"  "(if (cmd ls) (bl
 check "assign capture pipe"   'x = $(ls | wc -l)'              "(assign x (capture (pipe (cmd ls) (cmd wc -l))))"
 
 # ==========================================================================
+# HEREDOCS (multi-line, use script files)
+# ==========================================================================
+
+check_script() {
+    local label="$1"
+    local script="$2"
+    local expect="$3"
+    local actual
+    local tmpf="/tmp/_slash_test_$$.slash"
+    printf '%s\n' "$script" > "$tmpf"
+    actual=$("$SLASH" "$tmpf" 2>/dev/null)
+    rm -f "$tmpf"
+    if [ "$actual" = "$expect" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: ${label}\n    expect: ${expect}\n    actual: ${actual}\n"
+    fi
+}
+
+check_script "heredoc literal" \
+    "$(printf "cat '''\n    hello world\n    '''\n")" \
+    "hello world"
+
+check_script "heredoc multi-line" \
+    "$(printf "cat '''\n    line 1\n    line 2\n    '''\n")" \
+    "$(printf 'line 1\nline 2')"
+
+check_script "heredoc margin strip" \
+    "$(printf "cat '''\n        indented\n    '''\n")" \
+    "    indented"
+
+check_script "heredoc pipe closing" \
+    "$(printf "cat '''\n    hello\n    ''' | wc -l\n")" \
+    "       1"
+
+check_script "heredoc pipe opening" \
+    "$(printf "cat ''' | wc -l\n    hello\n    '''\n")" \
+    "       1"
+
+check_script "heredoc interpolated" \
+    "$(printf 'cat \"\"\"\n    hello\n    \"\"\"\n')" \
+    "hello"
+
+# ==========================================================================
 # RESULTS
 # ==========================================================================
 echo ""

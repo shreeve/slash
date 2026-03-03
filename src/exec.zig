@@ -200,6 +200,10 @@ pub const Shell = struct {
                                 if (val) |v| argv_list.append(self.allocator, v) catch {};
                                 continue;
                             }
+                            if (isHeredocTag(t)) {
+                                self.collectHeredocRedirect(items[1..], source, &redir_list);
+                                continue;
+                            }
                             if (t == .procsub_in or t == .procsub_out) {
                                 if (self.spawnProcSub(t, items[1..], source, &procsub_fds)) |path| {
                                     argv_list.append(self.allocator, path) catch {};
@@ -967,6 +971,24 @@ pub const Shell = struct {
             .str => |s| s,
             else => null,
         };
+    }
+
+    fn isHeredocTag(tag: Tag) bool {
+        return switch (tag) {
+            .heredoc_literal, .heredoc_interp, .heredoc_lang => true,
+            else => false,
+        };
+    }
+
+    fn collectHeredocRedirect(self: *Shell, args: []const Sexp, source: []const u8, list: *std.ArrayList(Redirect)) void {
+        var content: std.ArrayListUnmanaged(u8) = .{};
+        for (args, 0..) |body, i| {
+            if (i > 0) content.append(self.allocator, '\n') catch {};
+            const text = self.sexpToStr(body, source) orelse continue;
+            content.appendSlice(self.allocator, text) catch {};
+        }
+        const result = content.toOwnedSlice(self.allocator) catch "";
+        list.append(self.allocator, .{ .tag = .herestring, .target = result }) catch {};
     }
 
     fn isRedirTag(tag: Tag) bool {
