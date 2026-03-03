@@ -1,10 +1,10 @@
 #!/bin/bash
 #
-# test-sexp.sh — Validate slash grammar by checking s-expression output
+# runner.sh — Slash grammar test suite
 #
-# Usage: ./test/test-sexp.sh [path/to/slash]
+# Usage: ./test/runner.sh [path/to/slash]
 #
-# Each test: input string → expected s-expression output
+# Validates the grammar by checking s-expression output for each input.
 # Exits 0 if all pass, 1 if any fail.
 
 SLASH="${1:-bin/slash}"
@@ -40,15 +40,15 @@ check "multi-word command"      "git commit -m initial"     "(cmd git commit -m 
 # ---------------------------------------------------------------------------
 check "assign integer"          "x = 42"                    "(assign x 42)"
 check "assign string"           'name = "steve"'            '(assign name "steve")'
-check "assign addition"         "x = 10 + 4"               "(assign x (add 10 4))"
-check "assign subtraction"      "x = 10 - 3"               "(assign x (sub 10 3))"
-check "assign multiply"         "x = 3 * 7"                "(assign x (mul 3 7))"
-check "assign division"         "x = 10 / 2"               "(assign x (div 10 2))"
-check "assign modulo"           "x = 10 % 3"               "(assign x (mod 10 3))"
-check "assign power"            "x = 2 ** 8"               "(assign x (pow 2 8))"
+check "assign addition"         "x = 10 + 4"                "(assign x (add 10 4))"
+check "assign subtraction"      "x = 10 - 3"                "(assign x (sub 10 3))"
+check "assign multiply"         "x = 3 * 7"                 "(assign x (mul 3 7))"
+check "assign division"         "x = 10 / 2"                "(assign x (div 10 2))"
+check "assign modulo"           "x = 10 % 3"                "(assign x (mod 10 3))"
+check "assign power"            "x = 2 ** 8"                "(assign x (pow 2 8))"
 check "assign negative"         "x = -5"                    "(assign x (neg 5))"
-check "precedence mul+add"      "x = 2 + 3 * 4"            "(assign x (add 2 (mul 3 4)))"
-check "precedence parens"       "x = (1 + 2) * 3"          "(assign x (mul (add 1 2) 3))"
+check "precedence mul+add"      "x = 2 + 3 * 4"             "(assign x (add 2 (mul 3 4)))"
+check "precedence parens"       "x = (1 + 2) * 3"           "(assign x (mul (add 1 2) 3))"
 check "assign default"          'x = $y ?? 0'               "(assign x (default \$y 0))"
 check "assign capture"          'x = $(ls)'                 "(assign x (capture (cmd ls)))"
 check "unset variable"          "name = -"                  "(unset name)"
@@ -101,11 +101,11 @@ check "process sub in"          "diff <(sort a) <(sort b)"  "(cmd diff (procsub_
 check "if pipeline"             "if ls { echo yes }"                    "(if (cmd ls) (block (cmd echo yes)))"
 check "if with test"            "if test -f foo { echo y }"             "(if (test -f foo) (block (cmd echo y)))"
 check "unless"                  "unless ls { echo no }"                 "(unless (cmd ls) (block (cmd echo no)))"
-check "if/else"                 "if ls { echo y } else { echo n }"     "(if (cmd ls) (block (cmd echo y)) (else (block (cmd echo n))))"
-check "if comparison"           'if $x == 1 { echo one }'              "(if (eq \$x 1) (block (cmd echo one)))"
-check "if not-equal"            'if $x != 0 { echo nz }'               "(if (ne \$x 0) (block (cmd echo nz)))"
-check "if bool and"             'if $x > 0 and $x < 100 { echo r }'    "(if (and (gt \$x 0) (lt \$x 100)) (block (cmd echo r)))"
-check "if not cmp"              'if not $x == 0 { echo nz }'           "(if (not (eq \$x 0)) (block (cmd echo nz)))"
+check "if/else"                 "if ls { echo y } else { echo n }"      "(if (cmd ls) (block (cmd echo y)) (else (block (cmd echo n))))"
+check "if comparison"           'if $x == 1 { echo one }'               "(if (eq \$x 1) (block (cmd echo one)))"
+check "if not-equal"            'if $x != 0 { echo nz }'                "(if (ne \$x 0) (block (cmd echo nz)))"
+check "if bool and"             'if $x > 0 and $x < 100 { echo r }'     "(if (and (gt \$x 0) (lt \$x 100)) (block (cmd echo r)))"
+check "if not cmp"              'if not $x == 0 { echo nz }'            "(if (not (eq \$x 0)) (block (cmd echo nz)))"
 check "if cmd and cmd"          "if test -d a and test -f b { echo y }" "(if (and (test -d a) (test -f b)) (block (cmd echo y)))"
 check "if cmd && cmd"           "if ls && test -f a { echo y }"         "(if (and (cmd ls) (test -f a)) (block (cmd echo y)))"
 
