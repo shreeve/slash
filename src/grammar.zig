@@ -4051,9 +4051,12 @@ const ParserGenerator = struct {
             for (self.as_directives.items) |directive| {
                 if (!std.mem.eql(u8, directive.token, "ident")) continue;
 
-                // For "fn", "isv", "ssvn": prefer keyword over IDENT and store last_matched_id
-                // For others (like "cmd"): prefer IDENT over keyword
-                const prefer_keyword = std.mem.eql(u8, directive.rule, "fn") or std.mem.eql(u8, directive.rule, "isv") or std.mem.eql(u8, directive.rule, "ssvn");
+                // Prefer keyword over IDENT: try keyword symbol first, fall back to IDENT
+                // if the keyword doesn't fit the current parser state. This is correct
+                // for languages where keywords are context-sensitive (MUMPS functions,
+                // Slash control flow) — the parser state determines whether a word
+                // acts as a keyword or as a bare identifier.
+                const prefer_keyword = true;
 
                 if (prefer_keyword) {
                     // Function keywords: prefer keyword over IDENT (e.g., $S should become $SELECT)

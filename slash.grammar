@@ -339,12 +339,11 @@ defaults {
 # Bare words: command names, arguments, filenames, keywords.
 # Keywords are recognized in the parser via @as directives, not here.
 #
-# GLOB EXPANSION: Glob characters (*, ?, [, ], {, }, ,) are lexed as
-# individual tokens and allowed in the argument rule. The expander
-# stitches adjacent tokens in argument position into glob patterns and
-# performs expansion post-parse. Brace expansion ({a,b}) uses the pre
-# field: { touching a word (pre=0) is glob, { with space is syntax.
-# This is the same strategy as bash/zsh — globs are not a grammar concern.
+# GLOB EXPANSION: Glob patterns (*.zig, file[0-9], {a,b}.txt) are expanded
+# by the shell BEFORE parsing, the same way bash works. The pre-parser
+# expands globs to filename lists, and the parser sees only the expanded
+# IDENT tokens. The lexer still tokenizes *, ?, [, ] for syntax
+# highlighting, but these tokens do not appear in the argument rule.
 
 [a-zA-Z_][a-zA-Z0-9_-]*                     → ident
 [a-zA-Z_./~][a-zA-Z0-9_./-]*                → ident   # path-like idents
@@ -390,21 +389,18 @@ defaults {
 @as = [ident, shift    ]
 @as = [ident, exec     ]
 
-# Operators that have word aliases
-@op = [
-    "and" → "and_sym",
-    "or"  → "or_sym",
-    "not" → "not_sym",
-    "xor" → "xor",
-]
+# Word-form boolean operators are handled via @as keywords (AND, OR, NOT, XOR)
+# and referenced explicitly in grammar rules alongside their symbol forms
+# (&&, ||, !). No @op merging — the LALR parser needs distinct symbols for
+# cmdlist (&&/||) vs comparison (and/or) contexts.
 
 # ------------------------------------------------------------------------------
 # ALIASES (zero-cost, expanded at compile time)
 # ------------------------------------------------------------------------------
 
 name     = IDENT
-word     = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG | MINUS
-cmd_name = IDENT | STRING_SQ | STRING_DQ
+word     = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG
+cmd_name = IDENT
 
 # ==============================================================================
 # START SYMBOLS
@@ -442,8 +438,10 @@ stmt      = IDENT "=" "-"                    → (unset 1)
 # Command lists chain pipelines with &&, ||, ;, or &.
 
 cmdlist   = pipeline "&&"  cmdlist           → (and 1 3)
+          | pipeline AND   cmdlist           → (and 1 3)
           | pipeline "||"  cmdlist           → (or 1 3)
-          | pipeline "xor" cmdlist           → (xor 1 3)
+          | pipeline OR    cmdlist           → (or 1 3)
+          | pipeline XOR   cmdlist           → (xor 1 3)
           | pipeline ";"   cmdlist           → (seq 1 3)
           | pipeline "&"   cmdlist           → (bg 1 3)
           | pipeline "&"                     → (bg 1)
@@ -460,6 +458,7 @@ pipeline  = command "|&" pipeline           → (pipe_err 1 3)
 # A simple command: optional negation, command word, arguments, redirections.
 
 command   = "!" command                     → (not 2)
+          | NOT command                     → (not 2)
           | "(" cmdlist ")"                 → (subshell 2)
           | TEST FLAG word                  → (test 2 3)
           | EXIT [INTEGER]                  → (exit 2)
@@ -470,14 +469,16 @@ command   = "!" command                     → (not 2)
           | EXEC simple_cmd                 → (exec 2)
           | simple_cmd
 
-simple_cmd = cmd_name (argument | redirect)* [heredoc] → (cmd 1 ...2 3)
+simple_cmd = cmd_name cmd_arg* [heredoc]    → (cmd 1 ...2 3)
+
+cmd_arg   = argument
+          | redirect
 
 # ==============================================================================
 # ARGUMENTS
 # ==============================================================================
 
-argument  = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED
-          | FLAG | MINUS | STAR | QUESTION | LBRACKET | RBRACKET | COMMA
+argument  = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG
           | proc_sub
           | subshell_capture
 
@@ -529,10 +530,10 @@ else_clause = ELSE if_stmt                  → 2
             | ELSE block                    → (else 2)
 
 condition = comparison
-          | pipeline
+          | cmdlist
 
-comparison = cmp_term "and" comparison       → (and 1 3)
-           | cmp_term "or"  comparison       → (or 1 3)
+comparison = cmp_term AND comparison          → (and 1 3)
+           | cmp_term OR  comparison          → (or 1 3)
            | cmp_term
 
 cmp_term   = expr "==" expr                 → (eq 1 3)
@@ -543,7 +544,7 @@ cmp_term   = expr "==" expr                 → (eq 1 3)
            | expr ">=" expr                 → (ge 1 3)
            | expr "=~" expr                 → (match 1 3)
            | expr "!~" expr                 → (nomatch 1 3)
-           | "not" cmp_term                 → (not 2)
+           | NOT cmp_term                   → (not 2)
            | "(" comparison ")"             → 2
 
 # ==============================================================================
@@ -562,10 +563,14 @@ wordlist   = word+                          → (list ...1)
 
 try_stmt   = TRY expr try_block             → (try 2 3)
 
-try_block  = "{" try_line+ "}"              → (...2)
-           | INDENT try_line+ OUTDENT       → (...2)
+try_block  = "{" try_bitem+ "}"             → (...2)
+           | INDENT try_iline+ OUTDENT      → (...2)
 
-try_line   = try_arm [COMMENT] NEWLINE      → 1
+try_bitem  = try_arm                        → 1
+           | NEWLINE                        → _
+           | COMMENT                        → _
+
+try_iline  = try_arm [COMMENT] NEWLINE      → 1
            | [COMMENT] NEWLINE              → _
 
 try_arm    = REGEX block                    → (arm 1 2)
@@ -581,8 +586,12 @@ try_arm    = REGEX block                    → (arm 1 2)
 # Blocks are either brace-delimited or indentation-delimited.
 # The lexer emits INDENT/OUTDENT for indentation form.
 
-block     = "{" line* "}"                   → (block ...2)
+block     = "{" brace_item* "}"              → (block ...2)
           | INDENT line* OUTDENT            → (block ...2)
+
+brace_item = stmt                           → 1
+           | NEWLINE                        → _
+           | COMMENT                        → _
 
 # ==============================================================================
 # USER COMMANDS: cmd
@@ -654,5 +663,4 @@ atom      = VARIABLE
           | REAL
           | STRING_DQ
           | STRING_SQ
-          | IDENT
           | subshell_capture
