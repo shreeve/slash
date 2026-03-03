@@ -26,141 +26,208 @@ check() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
+# ==========================================================================
+# COMMANDS
+# ==========================================================================
 check "bare command"            "ls"                        "(cmd ls)"
 check "command with flag"       "ls -la"                    "(cmd ls -la)"
 check "command with args"       "ls -la /tmp"               "(cmd ls -la /tmp)"
 check "command with string"     'echo "hello world"'        '(cmd echo "hello world")'
+check "command with sq string"  "echo 'hello'"              "(cmd echo 'hello')"
 check "multi-word command"      "git commit -m initial"     "(cmd git commit -m initial)"
+check "long flag"               "ls --verbose"              "(cmd ls --verbose)"
+check "path-like arg"           "cat /etc/hosts"            "(cmd cat /etc/hosts)"
+check "dotpath arg"             "ls ./src"                  "(cmd ls ./src)"
+check "tilde arg"               "cd ~/projects"             "(cmd cd ~/projects)"
 
-# ---------------------------------------------------------------------------
-# Assignment and math
-# ---------------------------------------------------------------------------
+# ==========================================================================
+# VARIABLES IN COMMANDS
+# ==========================================================================
+check "variable arg"            'echo $HOME'                '(cmd echo $HOME)'
+check "variable special ?"      'echo $?'                   '(cmd echo $?)'
+check "variable special $$"     'echo $$'                   '(cmd echo $$)'
+check "variable positional"     'echo $1'                   '(cmd echo $1)'
+check "variable braced"         'echo ${name}'              '(cmd echo ${name})'
+
+# ==========================================================================
+# DISPLAY (= expr)
+# ==========================================================================
+check "display add"             "= 1 + 3"                  "(display (add 1 3))"
+check "display sub"             "= 10 - 3"                  "(display (sub 10 3))"
+check "display mul"             "= 3 * 7"                   "(display (mul 3 7))"
+check "display div"             "= 22 / 7"                  "(display (div 22 7))"
+check "display mod"             "= 100 % 7"                 "(display (mod 100 7))"
+check "display power"           "= 2 ** 8"                  "(display (pow 2 8))"
+check "display neg"             "= -5"                      "(display (neg 5))"
+check "display parens"          "= (1 + 2) * 3"             "(display (mul (add 1 2) 3))"
+check "display precedence"      "= 2 + 3 * 4"              "(display (add 2 (mul 3 4)))"
+check "display default"         '= $x ?? 0'                 "(display (default \$x 0))"
+check "display variable"        '= $x + 1'                  "(display (add \$x 1))"
+check "display float"           "= 3.14"                    "(display 3.14)"
+check "display capture"         '= $(ls)'                   "(display (capture (cmd ls)))"
+
+# ==========================================================================
+# ASSIGNMENT AND MATH
+# ==========================================================================
 check "assign integer"          "x = 42"                    "(assign x 42)"
 check "assign string"           'name = "steve"'            '(assign name "steve")'
-check "assign addition"         "x = 10 + 4"                "(assign x (add 10 4))"
-check "assign subtraction"      "x = 10 - 3"                "(assign x (sub 10 3))"
-check "assign multiply"         "x = 3 * 7"                 "(assign x (mul 3 7))"
-check "assign division"         "x = 10 / 2"                "(assign x (div 10 2))"
-check "assign modulo"           "x = 10 % 3"                "(assign x (mod 10 3))"
-check "assign power"            "x = 2 ** 8"                "(assign x (pow 2 8))"
-check "assign negative"         "x = -5"                    "(assign x (neg 5))"
-check "precedence mul+add"      "x = 2 + 3 * 4"             "(assign x (add 2 (mul 3 4)))"
-check "precedence parens"       "x = (1 + 2) * 3"           "(assign x (mul (add 1 2) 3))"
+check "assign sq string"        "name = 'steve'"            "(assign name 'steve')"
+check "assign addition"         "x = 10 + 4"               "(assign x (add 10 4))"
+check "assign subtraction"      "x = 10 - 3"               "(assign x (sub 10 3))"
+check "assign multiply"         "x = 3 * 7"                "(assign x (mul 3 7))"
+check "assign division"         "x = 10 / 2"               "(assign x (div 10 2))"
+check "assign modulo"           "x = 10 % 3"               "(assign x (mod 10 3))"
+check "assign power"            "x = 2 ** 8"               "(assign x (pow 2 8))"
+check "assign negative"         "x = -5"                   "(assign x (neg 5))"
+check "assign float"            "x = 3.14"                 "(assign x 3.14)"
+check "precedence mul+add"      "x = 2 + 3 * 4"            "(assign x (add 2 (mul 3 4)))"
+check "precedence parens"       "x = (1 + 2) * 3"          "(assign x (mul (add 1 2) 3))"
 check "assign default"          'x = $y ?? 0'               "(assign x (default \$y 0))"
 check "assign capture"          'x = $(ls)'                 "(assign x (capture (cmd ls)))"
 check "unset variable"          "name = -"                  "(unset name)"
 
-# ---------------------------------------------------------------------------
-# Pipelines
-# ---------------------------------------------------------------------------
+# ==========================================================================
+# PIPELINES
+# ==========================================================================
 check "simple pipe"             "ls | wc"                   "(pipe (cmd ls) (cmd wc))"
 check "multi pipe"              "ls | grep zig | sort"      "(pipe (cmd ls) (pipe (cmd grep zig) (cmd sort)))"
 check "pipe stderr"             "make |& grep error"        "(pipe_err (cmd make) (cmd grep error))"
 
-# ---------------------------------------------------------------------------
-# Boolean operators (symbol and word forms)
-# ---------------------------------------------------------------------------
+# ==========================================================================
+# BOOLEAN OPERATORS (symbol and word forms)
+# ==========================================================================
 check "&& symbol"               "make && echo done"         "(and (cmd make) (cmd echo done))"
 check "and keyword"             "make and echo done"        "(and (cmd make) (cmd echo done))"
 check "|| symbol"               "make || echo fail"         "(or (cmd make) (cmd echo fail))"
 check "or keyword"              "make or echo fail"         "(or (cmd make) (cmd echo fail))"
 check "! symbol"                "! ls"                      "(not (cmd ls))"
 check "not keyword"             "not ls"                    "(not (cmd ls))"
+check "xor keyword"             "a xor b"                   "(xor (cmd a) (cmd b))"
+check "! with args"             "! echo fail"               "(not (cmd echo fail))"
+check "not with args"           "not echo fail"             "(not (cmd echo fail))"
 
-# ---------------------------------------------------------------------------
-# Semicolons and background
-# ---------------------------------------------------------------------------
+# ==========================================================================
+# SEMICOLONS AND BACKGROUND
+# ==========================================================================
 check "semicolon"               "a ; b"                     "(seq (cmd a) (cmd b))"
+check "semicolon three"         "a ; b ; c"                 "(seq (cmd a) (seq (cmd b) (cmd c)))"
 check "background"              "sleep 10 &"                "(bg (cmd sleep 10))"
 check "background + next"       "make & echo watching"      "(bg (cmd make) (cmd echo watching))"
 
-# ---------------------------------------------------------------------------
-# Redirections
-# ---------------------------------------------------------------------------
+# ==========================================================================
+# REDIRECTIONS
+# ==========================================================================
 check "redirect out"            "ls > out.txt"              "(cmd ls (redir_out out.txt))"
 check "redirect append"         "ls >> out.txt"             "(cmd ls (redir_append out.txt))"
 check "redirect in"             "cat < in.txt"              "(cmd cat (redir_in in.txt))"
 check "redirect stderr"         "app 2> err.txt"            "(cmd app (redir_err err.txt))"
+check "redirect stderr app"     "app 2>> err.log"           "(cmd app (redir_err_app err.log))"
 check "redirect both"           "app &> all.txt"            "(cmd app (redir_both all.txt))"
 check "redirect dup"            "ls > out.txt 2>&1"         "(cmd ls (redir_out out.txt) (redir_dup))"
+check "redirect to devnull"     "echo hello > /dev/null"    "(cmd echo hello (redir_out /dev/null))"
 check "herestring"              'wc <<< "hello"'            '(cmd wc (herestring "hello"))'
+check "herestring variable"     'cat <<< $name'             '(cmd cat (herestring $name))'
 
-# ---------------------------------------------------------------------------
-# Subshell, capture, process substitution
-# ---------------------------------------------------------------------------
+# ==========================================================================
+# SUBSHELL, CAPTURE, PROCESS SUBSTITUTION
+# ==========================================================================
 check "subshell"                "(cd /tmp ; ls)"            "(subshell (seq (cmd cd /tmp) (cmd ls)))"
+check "subshell pipeline"       "(ls | wc)"                 "(subshell (pipe (cmd ls) (cmd wc)))"
 check "capture in cmd"          'echo $(ls)'                "(cmd echo (capture (cmd ls)))"
+check "capture pipeline"        'echo $(ls | wc)'           "(cmd echo (capture (pipe (cmd ls) (cmd wc))))"
 check "process sub in"          "diff <(sort a) <(sort b)"  "(cmd diff (procsub_in (cmd sort a)) (procsub_in (cmd sort b)))"
+check "process sub out"         "tee >(wc)"                 "(cmd tee (procsub_out (cmd wc)))"
 
-# ---------------------------------------------------------------------------
-# Conditionals: if / unless / else
-# ---------------------------------------------------------------------------
+# ==========================================================================
+# CONDITIONALS: if / unless / else
+# ==========================================================================
 check "if pipeline"             "if ls { echo yes }"                    "(if (cmd ls) (block (cmd echo yes)))"
 check "if with test"            "if test -f foo { echo y }"             "(if (test -f foo) (block (cmd echo y)))"
 check "unless"                  "unless ls { echo no }"                 "(unless (cmd ls) (block (cmd echo no)))"
-check "if/else"                 "if ls { echo y } else { echo n }"      "(if (cmd ls) (block (cmd echo y)) (else (block (cmd echo n))))"
-check "if comparison"           'if $x == 1 { echo one }'               "(if (eq \$x 1) (block (cmd echo one)))"
-check "if not-equal"            'if $x != 0 { echo nz }'                "(if (ne \$x 0) (block (cmd echo nz)))"
-check "if bool and"             'if $x > 0 and $x < 100 { echo r }'     "(if (and (gt \$x 0) (lt \$x 100)) (block (cmd echo r)))"
-check "if not cmp"              'if not $x == 0 { echo nz }'            "(if (not (eq \$x 0)) (block (cmd echo nz)))"
-check "if cmd and cmd"          "if test -d a and test -f b { echo y }" "(if (and (test -d a) (test -f b)) (block (cmd echo y)))"
-check "if cmd && cmd"           "if ls && test -f a { echo y }"         "(if (and (cmd ls) (test -f a)) (block (cmd echo y)))"
+check "if/else"                 "if ls { echo y } else { echo n }"     "(if (cmd ls) (block (cmd echo y)) (else (block (cmd echo n))))"
+check "if/else if/else"         "if ls { echo a } else if test -f x { echo b } else { echo c }" "(if (cmd ls) (block (cmd echo a)) (if (test -f x) (block (cmd echo b)) (else (block (cmd echo c)))))"
 
-# ---------------------------------------------------------------------------
-# Loops: for / while / until
-# ---------------------------------------------------------------------------
-check "for loop"                "for f in a b c { echo f }" "(for f (list a b c) (block (cmd echo f)))"
-check "while loop"              "while true { echo y }"     "(while (cmd true) (block (cmd echo y)))"
+# --- comparison operators ---
+check "if ==" 'if $x == 1 { echo y }'       "(if (eq \$x 1) (block (cmd echo y)))"
+check "if !=" 'if $x != 0 { echo y }'       "(if (ne \$x 0) (block (cmd echo y)))"
+check "if <"  'if $x < 10 { echo y }'       "(if (lt \$x 10) (block (cmd echo y)))"
+check "if >"  'if $x > 10 { echo y }'       "(if (gt \$x 10) (block (cmd echo y)))"
+check "if <=" 'if $x <= 10 { echo y }'      "(if (le \$x 10) (block (cmd echo y)))"
+check "if >=" 'if $x >= 10 { echo y }'      "(if (ge \$x 10) (block (cmd echo y)))"
+check "cmp var==var" 'if $a == $b { echo y }' "(if (eq \$a \$b) (block (cmd echo y)))"
+check "cmp var>var"  'if $x > $y { echo y }'  "(if (gt \$x \$y) (block (cmd echo y)))"
 
-# ---------------------------------------------------------------------------
-# Pattern matching: try
-# ---------------------------------------------------------------------------
-check "try with arms"           'try $x { "a" { echo a } "b" { echo b } }' '(try $x ((arm "a" (block (cmd echo a))) (arm "b" (block (cmd echo b)))))'
+# --- boolean logic in conditions ---
+check "cmp and"                'if $x > 0 and $x < 100 { echo r }'     "(if (and (gt \$x 0) (lt \$x 100)) (block (cmd echo r)))"
+check "cmp or"                 'if $x == 1 or $x == 2 { echo y }'      "(if (or (eq \$x 1) (eq \$x 2)) (block (cmd echo y)))"
+check "cmp not"                'if not $x == 0 { echo nz }'            "(if (not (eq \$x 0)) (block (cmd echo nz)))"
+check "cmp grouped"            'if ($a == 1 or $b == 2) and $c == 3 { echo y }' "(if (and (or (eq \$a 1) (eq \$b 2)) (eq \$c 3)) (block (cmd echo y)))"
+check "cmd and cmd"            "if test -d a and test -f b { echo y }" "(if (and (test -d a) (test -f b)) (block (cmd echo y)))"
+check "cmd && cmd"             "if ls && test -f a { echo y }"         "(if (and (cmd ls) (test -f a)) (block (cmd echo y)))"
 
-# ---------------------------------------------------------------------------
-# Nested constructs
-# ---------------------------------------------------------------------------
-check "nested if in for"        'for f in a b c { if test -f $f { echo $f } }' '(for f (list a b c) (block (if (test -f $f) (block (cmd echo $f)))))'
+# ==========================================================================
+# LOOPS: for / while / until
+# ==========================================================================
+check "for loop"               "for f in a b c { echo f }" "(for f (list a b c) (block (cmd echo f)))"
+check "for many words"         "for f in a b c d e { echo f }" "(for f (list a b c d e) (block (cmd echo f)))"
+check "while loop"             "while true { echo y }"     "(while (cmd true) (block (cmd echo y)))"
+check "until loop"             "until true { echo y }"     "(until (cmd true) (block (cmd echo y)))"
 
-# ---------------------------------------------------------------------------
-# User commands: cmd
-# ---------------------------------------------------------------------------
-check "cmd define one-line"     "cmd g ls"                  "(cmd_def g _ (cmd ls))"
-check "cmd delete"              "cmd foo -"                 "(cmd_del foo)"
-check "cmd show"                "cmd foo"                   "(cmd_show foo)"
-check "cmd list"                "cmd"                       "(cmd_list)"
+# ==========================================================================
+# PATTERN MATCHING: try
+# ==========================================================================
+check "try with arms"          'try $x { "a" { echo a } "b" { echo b } }' '(try $x ((arm "a" (block (cmd echo a))) (arm "b" (block (cmd echo b)))))'
+check "try with else"          'try $x { "a" { echo a } else { echo z } }' '(try $x ((arm "a" (block (cmd echo a))) (arm_else (block (cmd echo z)))))'
 
-# ---------------------------------------------------------------------------
-# Key bindings
-# ---------------------------------------------------------------------------
-check "key define"              'key esc-l "ls -la"'        '(key esc-l "ls -la")'
-check "key delete"              "key esc-l -"               "(key_del esc-l)"
+# ==========================================================================
+# NESTED CONSTRUCTS
+# ==========================================================================
+check "nested if in for"       'for f in a b c { if test -f $f { echo $f } }' '(for f (list a b c) (block (if (test -f $f) (block (cmd echo $f)))))'
+check "pipe in subshell"       "(ls | sort)"                "(subshell (pipe (cmd ls) (cmd sort)))"
+check "redir in if block"      "if ls { echo ok > /dev/null }" "(if (cmd ls) (block (cmd echo ok (redir_out /dev/null))))"
 
-# ---------------------------------------------------------------------------
-# Shell options: set
-# ---------------------------------------------------------------------------
-check "set option"              "set foo bar"               "(set foo bar)"
-check "set reset"               "set foo -"                 "(set_reset foo)"
-check "set show"                "set foo"                   "(set_show foo)"
-check "set list"                "set"                       "(set_list)"
+# ==========================================================================
+# USER COMMANDS: cmd
+# ==========================================================================
+check "cmd define one-line"    "cmd g ls"                   "(cmd_def g _ (cmd ls))"
+check "cmd define with args"   "cmd g git status"           "(cmd_def g _ (cmd git status))"
+check "cmd delete"             "cmd foo -"                  "(cmd_del foo)"
+check "cmd show"               "cmd foo"                    "(cmd_show foo)"
+check "cmd list"               "cmd"                        "(cmd_list)"
 
-# ---------------------------------------------------------------------------
-# Special builtins
-# ---------------------------------------------------------------------------
-check "test flag"               "test -f foo"               "(test -f foo)"
-check "exit"                    "exit 1"                    "(exit 1)"
-check "exit no arg"             "exit"                      "(exit)"
-check "shift"                   "shift"                     "(shift)"
-check "break"                   "break"                     "(break)"
-check "continue"                "continue"                  "(continue)"
-check "source"                  "source file.slash"         "(source file.slash)"
+# ==========================================================================
+# KEY BINDINGS
+# ==========================================================================
+check "key define string"      'key esc-l "ls -la"'         '(key esc-l "ls -la")'
+check "key define action"      "key esc-l dirs"             "(key esc-l dirs)"
+check "key delete"             "key esc-l -"                "(key_del esc-l)"
 
-# ---------------------------------------------------------------------------
-# Results
-# ---------------------------------------------------------------------------
+# ==========================================================================
+# SHELL OPTIONS: set
+# ==========================================================================
+check "set option"             "set foo bar"                "(set foo bar)"
+check "set option true"        "set prompt-git true"        "(set prompt-git true)"
+check "set reset"              "set foo -"                  "(set_reset foo)"
+check "set show"               "set foo"                    "(set_show foo)"
+check "set list"               "set"                        "(set_list)"
+
+# ==========================================================================
+# SPECIAL BUILTINS
+# ==========================================================================
+check "test -f"                "test -f foo"                "(test -f foo)"
+check "test -d"                "test -d src"                "(test -d src)"
+check "test -e"                "test -e /tmp"               "(test -e /tmp)"
+check "exit code"              "exit 1"                     "(exit 1)"
+check "exit no arg"            "exit"                       "(exit)"
+check "shift"                  "shift"                      "(shift)"
+check "break"                  "break"                      "(break)"
+check "continue"               "continue"                   "(continue)"
+check "source"                 "source file.slash"          "(source file.slash)"
+check "exec"                   "exec ls -la"                "(exec (cmd ls -la))"
+
+# ==========================================================================
+# RESULTS
+# ==========================================================================
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed ($(( PASS + FAIL )) total)"
 if [ "$FAIL" -gt 0 ]; then
