@@ -43,12 +43,28 @@ pub const Shell = struct {
     pub fn execLine(self: *Shell, source: []const u8) void {
         var p = Parser.init(self.allocator, source);
         defer p.deinit();
-        const sexp = p.parseOneline() catch |err| {
-            std.debug.print("parse error: {s}\n", .{@errorName(err)});
+        const sexp = p.parseOneline() catch {
+            if (self.retryMathSpaced(source)) return;
+            std.debug.print("parse error\n", .{});
             self.last_exit = 2;
             return;
         };
         self.eval(sexp, source);
+    }
+
+    fn retryMathSpaced(self: *Shell, source: []const u8) bool {
+        const trimmed = std.mem.trimLeft(u8, source, " \t");
+        if (trimmed.len == 0 or trimmed[0] != '=') return false;
+        const expr_part = std.mem.trimLeft(u8, trimmed[1..], " \t");
+        const spaced = spaceMathOps(self.allocator, expr_part) orelse return false;
+        defer self.allocator.free(spaced);
+        const wrapped = std.fmt.allocPrint(self.allocator, "= {s}", .{spaced}) catch return false;
+        defer self.allocator.free(wrapped);
+        var p2 = Parser.init(self.allocator, wrapped);
+        defer p2.deinit();
+        const sexp = p2.parseOneline() catch return false;
+        self.eval(sexp, wrapped);
+        return true;
     }
 
     pub fn execSource(self: *Shell, source: []const u8) void {
@@ -978,6 +994,37 @@ fn toExecArgs(alloc: Allocator, argv: []const []const u8) ![*:null]const ?[*:0]c
 
 fn getEnvP() [*:null]const ?[*:0]const u8 {
     return std.c.environ;
+}
+
+fn spaceMathOps(alloc: Allocator, input: []const u8) ?[]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    var i: usize = 0;
+    while (i < input.len) {
+        const c = input[i];
+        if (c == '*' and i + 1 < input.len and input[i + 1] == '*') {
+            out.appendSlice(alloc, " ** ") catch return null;
+            i += 2;
+        } else if (c == '+' or c == '/' or c == '%') {
+            out.append(alloc, ' ') catch return null;
+            out.append(alloc, c) catch return null;
+            out.append(alloc, ' ') catch return null;
+            i += 1;
+        } else if (c == '*') {
+            out.append(alloc, ' ') catch return null;
+            out.append(alloc, c) catch return null;
+            out.append(alloc, ' ') catch return null;
+            i += 1;
+        } else if (c == '-' and i > 0 and input[i - 1] >= '0' and input[i - 1] <= '9') {
+            out.append(alloc, ' ') catch return null;
+            out.append(alloc, c) catch return null;
+            out.append(alloc, ' ') catch return null;
+            i += 1;
+        } else {
+            out.append(alloc, c) catch return null;
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice(alloc) catch null;
 }
 
 fn statusToExit(status: u32) u8 {
