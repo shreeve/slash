@@ -345,8 +345,8 @@ defaults {
 # IDENT tokens. The lexer still tokenizes *, ?, [, ] for syntax
 # highlighting, but these tokens do not appear in the argument rule.
 
-[a-zA-Z_][a-zA-Z0-9_-]*                     → ident
-[a-zA-Z_./~][a-zA-Z0-9_./-]*                → ident   # path-like idents
+[a-zA-Z_][\w./-]*                           → ident
+[./~][\w./-]*                               → ident   # paths: /usr/bin, ./foo, ~/bar
 
 # ==============================================================================
 # ERROR / FALLBACK
@@ -408,7 +408,6 @@ cmd_name = IDENT
 
 program!  = line*                           → (program ...1)
 oneline!  = stmt                            → 1
-          | expr                            → 1
 
 # ==============================================================================
 # LINE STRUCTURE
@@ -417,7 +416,8 @@ oneline!  = stmt                            → 1
 line      = stmt [COMMENT] NEWLINE           → 1
           | [COMMENT] NEWLINE               → _
 
-stmt      = IDENT "=" "-"                    → (unset 1)
+stmt      = "=" expr                         → (display 2)
+          | IDENT "=" "-"                    → (unset 1)
           | IDENT "=" expr                   → (assign 1 3)
           | cmd_def                         → 1
           | key_def                         → 1

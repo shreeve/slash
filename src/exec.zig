@@ -43,49 +43,12 @@ pub const Shell = struct {
     pub fn execLine(self: *Shell, source: []const u8) void {
         var p = Parser.init(self.allocator, source);
         defer p.deinit();
-        const sexp = p.parseOneline() catch {
-            self.tryMathLine(source);
+        const sexp = p.parseOneline() catch |err| {
+            std.debug.print("parse error: {s}\n", .{@errorName(err)});
+            self.last_exit = 2;
             return;
         };
         self.eval(sexp, source);
-    }
-
-    fn tryMathLine(self: *Shell, source: []const u8) void {
-        if (source.len == 0) { self.last_exit = 2; return; }
-        const first = source[0];
-        if (!((first >= '0' and first <= '9') or first == '(' or first == '$' or first == '.')) {
-            std.debug.print("parse error\n", .{});
-            self.last_exit = 2;
-            return;
-        }
-        const wrapped = std.fmt.allocPrint(self.allocator, "_ = {s}", .{source}) catch {
-            self.last_exit = 2;
-            return;
-        };
-        defer self.allocator.free(wrapped);
-        var p2 = Parser.init(self.allocator, wrapped);
-        defer p2.deinit();
-        const sexp = p2.parseOneline() catch {
-            std.debug.print("parse error\n", .{});
-            self.last_exit = 2;
-            return;
-        };
-        switch (sexp) {
-            .list => |items| {
-                if (items.len >= 3) {
-                    const val = self.evalMath(items[2], wrapped);
-                    const stdout = std.fs.File.stdout();
-                    const str = std.fmt.allocPrint(self.allocator, "{d}\n", .{val}) catch return;
-                    defer self.allocator.free(str);
-                    stdout.writeAll(str) catch {};
-                    self.last_exit = 0;
-                    return;
-                }
-            },
-            else => {},
-        }
-        std.debug.print("parse error\n", .{});
-        self.last_exit = 2;
     }
 
     pub fn execSource(self: *Shell, source: []const u8) void {
@@ -128,6 +91,7 @@ pub const Shell = struct {
             .bg => self.evalBg(args, source),
             .not => self.evalNot(args, source),
             .subshell => self.evalSubshell(args, source),
+            .display => self.evalDisplay(args, source),
             .assign => self.evalAssign(args, source),
             .unset => self.evalUnset(args, source),
             .unless => self.evalUnless(args, source),
@@ -450,22 +414,35 @@ pub const Shell = struct {
     }
 
     // =========================================================================
-    // MATH EVALUATION
+    // DISPLAY (= expr)
+    // =========================================================================
+
+    fn evalDisplay(self: *Shell, args: []const Sexp, source: []const u8) void {
+        if (args.len < 1) return;
+        const val = self.evalMath(args[0], source);
+        const str = formatFloat(self.allocator, val);
+        const stdout = std.fs.File.stdout();
+        stdout.writeAll(str) catch {};
+        stdout.writeAll("\n") catch {};
+        self.last_exit = 0;
+    }
+
+    // =========================================================================
+    // MATH EVALUATION (f64)
     // =========================================================================
 
     fn evalMathToStr(self: *Shell, sexp: Sexp, source: []const u8) []const u8 {
-        const val = self.evalMath(sexp, source);
-        return std.fmt.allocPrint(self.allocator, "{d}", .{val}) catch "0";
+        return formatFloat(self.allocator, self.evalMath(sexp, source));
     }
 
-    fn evalMath(self: *Shell, sexp: Sexp, source: []const u8) i64 {
+    fn evalMath(self: *Shell, sexp: Sexp, source: []const u8) f64 {
         switch (sexp) {
             .src => |s| {
                 const text = source[s.pos..][0..s.len];
                 const expanded = self.expandToken(text);
-                return std.fmt.parseInt(i64, expanded, 10) catch 0;
+                return std.fmt.parseFloat(f64, expanded) catch 0;
             },
-            .str => |s| return std.fmt.parseInt(i64, s, 10) catch 0,
+            .str => |s| return std.fmt.parseFloat(f64, s) catch 0,
             .nil => return 0,
             .tag => return 0,
             .list => |items| {
@@ -473,32 +450,29 @@ pub const Shell = struct {
                 switch (items[0]) {
                     .tag => |tag| {
                         const a = items[1..];
+                        if (a.len == 0) return 0;
                         return switch (tag) {
                             .add => self.evalMath(a[0], source) + if (a.len > 1) self.evalMath(a[1], source) else 0,
                             .sub => self.evalMath(a[0], source) - if (a.len > 1) self.evalMath(a[1], source) else 0,
                             .mul => self.evalMath(a[0], source) * if (a.len > 1) self.evalMath(a[1], source) else 1,
                             .div => blk: {
                                 const b = if (a.len > 1) self.evalMath(a[1], source) else 1;
-                                break :blk if (b != 0) @divTrunc(self.evalMath(a[0], source), b) else 0;
+                                break :blk if (b != 0) self.evalMath(a[0], source) / b else 0;
                             },
                             .mod => blk: {
                                 const b = if (a.len > 1) self.evalMath(a[1], source) else 1;
                                 break :blk if (b != 0) @mod(self.evalMath(a[0], source), b) else 0;
                             },
-                            .pow => blk: {
-                                const base = self.evalMath(a[0], source);
-                                const exp = if (a.len > 1) self.evalMath(a[1], source) else 0;
-                                break :blk intPow(base, exp);
-                            },
+                            .pow => std.math.pow(f64, self.evalMath(a[0], source), if (a.len > 1) self.evalMath(a[1], source) else 0),
                             .neg => -self.evalMath(a[0], source),
                             .default => blk: {
-                                const val = if (a.len > 0) self.evalMath(a[0], source) else 0;
+                                const val = self.evalMath(a[0], source);
                                 if (val != 0) break :blk val;
                                 break :blk if (a.len > 1) self.evalMath(a[1], source) else 0;
                             },
                             .capture => blk: {
-                                const out = self.evalCapture(a, source) orelse break :blk @as(i64, 0);
-                                break :blk std.fmt.parseInt(i64, std.mem.trim(u8, out, " \t\n"), 10) catch 0;
+                                const out = self.evalCapture(a, source) orelse break :blk @as(f64, 0);
+                                break :blk std.fmt.parseFloat(f64, std.mem.trim(u8, out, " \t\n")) catch 0;
                             },
                             else => 0,
                         };
@@ -507,16 +481,6 @@ pub const Shell = struct {
                 }
             },
         }
-    }
-
-    fn intPow(base: i64, exp: i64) i64 {
-        if (exp <= 0) return 1;
-        var result: i64 = 1;
-        var i: i64 = 0;
-        while (i < exp) : (i += 1) {
-            result *|= base;
-        }
-        return result;
     }
 
     // =========================================================================
@@ -541,8 +505,8 @@ pub const Shell = struct {
     }
 
     fn numCmp(a: []const u8, b: []const u8) std.math.Order {
-        const na = std.fmt.parseInt(i64, a, 10) catch return strOrd(a, b);
-        const nb = std.fmt.parseInt(i64, b, 10) catch return strOrd(a, b);
+        const na = std.fmt.parseFloat(f64, a) catch return strOrd(a, b);
+        const nb = std.fmt.parseFloat(f64, b) catch return strOrd(a, b);
         return std.math.order(na, nb);
     }
 
@@ -1020,4 +984,16 @@ fn statusToExit(status: u32) u8 {
     if (posix.W.IFSIGNALED(status)) return 128 +| @as(u8, @truncate(posix.W.TERMSIG(status)));
     if (posix.W.IFEXITED(status)) return @truncate(posix.W.EXITSTATUS(status));
     return 1;
+}
+
+fn formatFloat(alloc: Allocator, val: f64) []const u8 {
+    if (val == @trunc(val) and @abs(val) < 1e15) {
+        return std.fmt.allocPrint(alloc, "{d}", .{@as(i64, @intFromFloat(val))}) catch "0";
+    }
+    const raw = std.fmt.allocPrint(alloc, "{d:.10}", .{val}) catch return "0";
+    var end: usize = raw.len;
+    while (end > 0 and raw[end - 1] == '0') end -= 1;
+    if (end > 0 and raw[end - 1] == '.') end -= 1;
+    if (end == 0) return "0";
+    return raw[0..end];
 }
