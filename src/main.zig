@@ -13,7 +13,6 @@
 //!   -c CMD             Execute command string
 
 const std = @import("std");
-const posix = std.posix;
 const build_options = @import("build_options");
 const exec = @import("exec.zig");
 
