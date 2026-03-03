@@ -136,6 +136,11 @@ pub const Shell = struct {
         target: []const u8,
     };
 
+    const ProcSubFd = struct {
+        pipe_fd: posix.fd_t,
+        child_pid: posix.pid_t,
+    };
+
     fn evalCmd(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len == 0) return;
 
@@ -143,6 +148,8 @@ pub const Shell = struct {
         defer argv_list.deinit(self.allocator);
         var redir_list: std.ArrayList(Redirect) = .empty;
         defer redir_list.deinit(self.allocator);
+        var procsub_fds: std.ArrayList(ProcSubFd) = .empty;
+        defer procsub_fds.deinit(self.allocator);
 
         for (args) |arg| {
             switch (arg) {
@@ -174,6 +181,9 @@ pub const Shell = struct {
                                 continue;
                             }
                             if (t == .procsub_in or t == .procsub_out) {
+                                if (self.spawnProcSub(t, items[1..], source, &procsub_fds)) |path| {
+                                    argv_list.append(self.allocator, path) catch {};
+                                }
                                 continue;
                             }
                         },
@@ -189,8 +199,10 @@ pub const Shell = struct {
 
         const redirs = redir_list.items;
         const has_redirs = redirs.len > 0;
+        const is_builtin = isBuiltin(argv[0]);
+        const is_user_cmd = self.user_cmds.get(argv[0]) != null;
 
-        if (self.tryBuiltin(argv, source) or self.user_cmds.get(argv[0]) != null) {
+        if (is_builtin or is_user_cmd) {
             var saved: [3]posix.fd_t = .{ -1, -1, -1 };
             if (has_redirs) {
                 saved[0] = posix.dup(posix.STDIN_FILENO) catch -1;
@@ -198,18 +210,59 @@ pub const Shell = struct {
                 saved[2] = posix.dup(posix.STDERR_FILENO) catch -1;
                 applyRedirects(self.allocator, redirs);
             }
-            if (!self.tryBuiltin(argv, source)) {
-                if (self.user_cmds.get(argv[0])) |body| self.eval(body, source);
+            if (is_builtin) {
+                _ = self.tryBuiltin(argv, source);
+            } else if (self.user_cmds.get(argv[0])) |body| {
+                self.eval(body, source);
             }
             if (has_redirs) {
                 if (saved[0] != -1) { posix.dup2(saved[0], posix.STDIN_FILENO) catch {}; posix.close(saved[0]); }
                 if (saved[1] != -1) { posix.dup2(saved[1], posix.STDOUT_FILENO) catch {}; posix.close(saved[1]); }
                 if (saved[2] != -1) { posix.dup2(saved[2], posix.STDERR_FILENO) catch {}; posix.close(saved[2]); }
             }
+            self.cleanupProcSubs(procsub_fds.items);
             return;
         }
 
         self.forkExecWithRedirects(argv, redirs);
+        self.cleanupProcSubs(procsub_fds.items);
+    }
+
+    fn spawnProcSub(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, fds: *std.ArrayList(ProcSubFd)) ?[]const u8 {
+        if (args.len < 1) return null;
+        const pipe_fds = posix.pipe() catch return null;
+        const pid = posix.fork() catch return null;
+
+        if (tag == .procsub_in) {
+            if (pid == 0) {
+                posix.close(pipe_fds[0]);
+                posix.dup2(pipe_fds[1], posix.STDOUT_FILENO) catch posix.exit(1);
+                posix.close(pipe_fds[1]);
+                self.eval(args[0], source);
+                posix.exit(self.last_exit);
+            }
+            posix.close(pipe_fds[1]);
+            fds.append(self.allocator, .{ .pipe_fd = pipe_fds[0], .child_pid = pid }) catch {};
+            return std.fmt.allocPrint(self.allocator, "/dev/fd/{d}", .{pipe_fds[0]}) catch null;
+        } else {
+            if (pid == 0) {
+                posix.close(pipe_fds[1]);
+                posix.dup2(pipe_fds[0], posix.STDIN_FILENO) catch posix.exit(1);
+                posix.close(pipe_fds[0]);
+                self.eval(args[0], source);
+                posix.exit(self.last_exit);
+            }
+            posix.close(pipe_fds[0]);
+            fds.append(self.allocator, .{ .pipe_fd = pipe_fds[1], .child_pid = pid }) catch {};
+            return std.fmt.allocPrint(self.allocator, "/dev/fd/{d}", .{pipe_fds[1]}) catch null;
+        }
+    }
+
+    fn cleanupProcSubs(_: *Shell, fds: []const ProcSubFd) void {
+        for (fds) |ps| {
+            posix.close(ps.pipe_fd);
+            _ = posix.waitpid(ps.child_pid, 0);
+        }
     }
 
     fn collectRedirect(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, list: *std.ArrayList(Redirect)) void {
@@ -218,7 +271,10 @@ pub const Shell = struct {
             return;
         }
         if (args.len < 1) return;
-        const target = self.sexpToStr(args[0], source) orelse return;
+        const target = if (tag == .herestring)
+            self.sexpToExpandedStr(args[0], source)
+        else
+            self.sexpToStr(args[0], source) orelse return;
         list.append(self.allocator, .{ .tag = tag, .target = target }) catch {};
     }
 
@@ -235,6 +291,14 @@ pub const Shell = struct {
                     posix.dup2(posix.STDOUT_FILENO, posix.STDERR_FILENO) catch {};
                 },
                 .redir_dup => { posix.dup2(posix.STDOUT_FILENO, posix.STDERR_FILENO) catch {}; },
+                .herestring => {
+                    const hs_pipe = posix.pipe() catch continue;
+                    _ = posix.write(hs_pipe[1], r.target) catch 0;
+                    _ = posix.write(hs_pipe[1], "\n") catch 0;
+                    posix.close(hs_pipe[1]);
+                    posix.dup2(hs_pipe[0], posix.STDIN_FILENO) catch {};
+                    posix.close(hs_pipe[0]);
+                },
                 else => {},
             }
         }
