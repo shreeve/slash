@@ -1004,6 +1004,9 @@ fn spaceMathOps(alloc: Allocator, input: []const u8) ?[]u8 {
         if (c == '*' and i + 1 < input.len and input[i + 1] == '*') {
             out.appendSlice(alloc, " ** ") catch return null;
             i += 2;
+        } else if (c == '^') {
+            out.appendSlice(alloc, " ** ") catch return null;
+            i += 1;
         } else if (c == '+' or c == '/' or c == '%') {
             out.append(alloc, ' ') catch return null;
             out.append(alloc, c) catch return null;
