@@ -701,7 +701,8 @@ pub const Shell = struct {
 
         switch (word_list) {
             .list => |items| {
-                for (items) |item| {
+                const start: usize = if (items.len > 0 and items[0] == .tag) 1 else 0;
+                for (items[start..]) |item| {
                     const val = self.sexpToExpandedStr(item, source);
                     self.vars.put(var_name, val) catch continue;
                     self.eval(body, source);
