@@ -43,12 +43,49 @@ pub const Shell = struct {
     pub fn execLine(self: *Shell, source: []const u8) void {
         var p = Parser.init(self.allocator, source);
         defer p.deinit();
-        const sexp = p.parseOneline() catch |err| {
-            std.debug.print("parse error: {s}\n", .{@errorName(err)});
-            self.last_exit = 2;
+        const sexp = p.parseOneline() catch {
+            self.tryMathLine(source);
             return;
         };
         self.eval(sexp, source);
+    }
+
+    fn tryMathLine(self: *Shell, source: []const u8) void {
+        if (source.len == 0) { self.last_exit = 2; return; }
+        const first = source[0];
+        if (!((first >= '0' and first <= '9') or first == '(' or first == '$' or first == '.')) {
+            std.debug.print("parse error\n", .{});
+            self.last_exit = 2;
+            return;
+        }
+        const wrapped = std.fmt.allocPrint(self.allocator, "_ = {s}", .{source}) catch {
+            self.last_exit = 2;
+            return;
+        };
+        defer self.allocator.free(wrapped);
+        var p2 = Parser.init(self.allocator, wrapped);
+        defer p2.deinit();
+        const sexp = p2.parseOneline() catch {
+            std.debug.print("parse error\n", .{});
+            self.last_exit = 2;
+            return;
+        };
+        switch (sexp) {
+            .list => |items| {
+                if (items.len >= 3) {
+                    const val = self.evalMath(items[2], wrapped);
+                    const stdout = std.fs.File.stdout();
+                    const str = std.fmt.allocPrint(self.allocator, "{d}\n", .{val}) catch return;
+                    defer self.allocator.free(str);
+                    stdout.writeAll(str) catch {};
+                    self.last_exit = 0;
+                    return;
+                }
+            },
+            else => {},
+        }
+        std.debug.print("parse error\n", .{});
+        self.last_exit = 2;
     }
 
     pub fn execSource(self: *Shell, source: []const u8) void {
