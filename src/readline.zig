@@ -432,6 +432,14 @@ fn historySearch(kh: KeyHandler) ?[]const u8 {
     return null;
 }
 
+var palette_buf: [4096]u8 = undefined;
+
+fn stablePaletteResult(r: PaletteResult) PaletteResult {
+    const len = @min(r.text.len, palette_buf.len);
+    @memcpy(palette_buf[0..len], r.text[0..len]);
+    return .{ .text = palette_buf[0..len], .kind = r.kind };
+}
+
 fn paletteSearch(kh: KeyHandler) ?PaletteResult {
     const palette_fn = kh.palette orelse return null;
     var query_buf: [256]u8 = undefined;
@@ -475,7 +483,7 @@ fn paletteSearch(kh: KeyHandler) ?PaletteResult {
         switch (ch[0]) {
             '\r', '\n' => {
                 clearOverlay(results.len + 1);
-                if (selected < results.len) return results[selected];
+                if (selected < results.len) return stablePaletteResult(results[selected]);
                 return null;
             },
             27 => {
@@ -503,7 +511,7 @@ fn paletteSearch(kh: KeyHandler) ?PaletteResult {
             9 => {
                 // Tab — paste to prompt (same as Enter for palette)
                 clearOverlay(results.len + 1);
-                if (selected < results.len) return results[selected];
+                if (selected < results.len) return stablePaletteResult(results[selected]);
                 return null;
             },
             3 => {
