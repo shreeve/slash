@@ -48,9 +48,9 @@ SQLite foundation — one database powers history, search, and navigation.
 - [x] Inline ghost suggestions — show most likely completion in gray, `→` to accept
 - [x] Command palette (`Ctrl+P`) — unified search across history, dirs, user commands; typed results; overlay UI
 - [x] Multi-line editing — blank-line continuation for indent blocks, `\` continuation, `...` prompt
+- [x] Tab completion — context-aware: files/dirs, commands ($PATH + builtins), variables ($VAR), common prefix on multiple matches
 
 ## Final Touches
 
-- [x] Tab completion — context-aware: files/dirs, commands ($PATH + builtins), variables ($VAR), common prefix on multiple matches
 - [ ] Completion definitions for common commands (git, zig, etc.) — Phase 2
 - [ ] Syntax highlighting — live as you type, using the parser
