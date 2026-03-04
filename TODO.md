@@ -51,6 +51,6 @@ SQLite foundation — one database powers history, search, and navigation.
 
 ## Final Touches
 
-- [ ] Tab completion engine — context-aware (command, file, variable, flag)
-- [ ] Completion definitions for common commands (git, zig, etc.)
+- [x] Tab completion — context-aware: files/dirs, commands ($PATH + builtins), variables ($VAR), common prefix on multiple matches
+- [ ] Completion definitions for common commands (git, zig, etc.) — Phase 2
 - [ ] Syntax highlighting — live as you type, using the parser

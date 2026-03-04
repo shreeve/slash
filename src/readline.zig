@@ -263,7 +263,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                 }
             },
             9 => {
-                // Tab: accept ghost suggestion + trailing space
+                // Tab: accept ghost suggestion OR complete
                 if (ghost_text.len > 0 and cursor == len) {
                     if (len + ghost_text.len + 1 <= line_buf.len) {
                         @memcpy(line_buf[len..][0..ghost_text.len], ghost_text);
@@ -273,6 +273,25 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                         cursor = len;
                         ghost_text = "";
                         updateGhost(line_buf[0..len]);
+                        refreshLine(line_buf[0..len], cursor);
+                    }
+                } else if (len > 0) {
+                    const result = tabComplete(line_buf[0..len], cursor);
+                    if (result.replacement.len > 0) {
+                        const word_start = result.word_start;
+                        const word_end = cursor;
+                        const new_len = word_start + result.replacement.len + (len - word_end);
+                        if (new_len < line_buf.len) {
+                            if (word_end < len) std.mem.copyBackwards(u8, line_buf[word_start + result.replacement.len ..], line_buf[word_end..len]);
+                            @memcpy(line_buf[word_start..][0..result.replacement.len], result.replacement);
+                            len = new_len;
+                            cursor = word_start + result.replacement.len;
+                            ghost_text = "";
+                            updateGhost(line_buf[0..len]);
+                            refreshLine(line_buf[0..len], cursor);
+                        }
+                    } else if (result.matches > 1) {
+                        showCompletions(line_buf[0..len], cursor, result.word_start);
                         refreshLine(line_buf[0..len], cursor);
                     }
                 }
@@ -314,6 +333,203 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
 }
 
 var ghost_buf: [4096]u8 = undefined;
+var complete_buf: [4096]u8 = undefined;
+var complete_list_buf: [32][]const u8 = undefined;
+
+const TabResult = struct {
+    replacement: []const u8,
+    word_start: usize,
+    matches: usize,
+};
+
+fn tabComplete(line: []const u8, cursor: usize) TabResult {
+    // Find the word being completed
+    var word_start = cursor;
+    while (word_start > 0 and line[word_start - 1] != ' ' and line[word_start - 1] != '\t') word_start -= 1;
+    const prefix = line[word_start..cursor];
+    if (prefix.len == 0) return .{ .replacement = "", .word_start = word_start, .matches = 0 };
+
+    // Determine context
+    const is_first_word = blk: {
+        var i: usize = 0;
+        while (i < word_start and (line[i] == ' ' or line[i] == '\t')) i += 1;
+        break :blk i == word_start;
+    };
+    const is_variable = prefix.len > 0 and prefix[0] == '$';
+
+    if (is_variable) return completeVariable(prefix, word_start);
+    if (is_first_word) return completeCommand(prefix, word_start);
+    return completePath(prefix, word_start);
+}
+
+fn completePath(prefix: []const u8, word_start: usize) TabResult {
+    // Split into directory and file prefix
+    var dir_end: usize = 0;
+    for (prefix, 0..) |ch, i| {
+        if (ch == '/') dir_end = i + 1;
+    }
+    const dir_part = if (dir_end > 0) prefix[0..dir_end] else "";
+    const file_prefix = prefix[dir_end..];
+    const dir_path = if (dir_part.len > 0) dir_part else ".";
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch
+        return .{ .replacement = "", .word_start = word_start, .matches = 0 };
+    defer dir.close();
+
+    var match_count: usize = 0;
+    var single_match: []const u8 = "";
+    var common_len: usize = 0;
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.name[0] == '.' and (file_prefix.len == 0 or file_prefix[0] != '.')) continue;
+        if (file_prefix.len == 0 or std.mem.startsWith(u8, entry.name, file_prefix)) {
+            if (match_count < 32) {
+                const full = if (dir_part.len > 0)
+                    std.fmt.bufPrint(complete_buf[match_count * 128 ..][0..128], "{s}{s}", .{ dir_part, entry.name }) catch continue
+                else
+                    entry.name;
+                const is_dir = entry.kind == .directory;
+                if (match_count == 0) {
+                    single_match = full;
+                    common_len = full.len;
+                } else {
+                    var cl: usize = 0;
+                    while (cl < common_len and cl < full.len and single_match[cl] == full[cl]) cl += 1;
+                    common_len = cl;
+                }
+                complete_list_buf[match_count] = full;
+                _ = is_dir;
+            }
+            match_count += 1;
+        }
+    }
+
+    if (match_count == 0) return .{ .replacement = "", .word_start = word_start, .matches = 0 };
+    if (match_count == 1) {
+        // Check if it's a directory — append /
+        const name = complete_list_buf[0];
+        const check_path = if (std.mem.eql(u8, dir_path, ".") and dir_part.len == 0) name else name;
+        const stat = std.fs.cwd().statFile(check_path) catch null;
+        if (stat != null and stat.?.kind == .directory) {
+            const trail_len = name.len + 1;
+            if (trail_len < 128) {
+                @memcpy(complete_buf[3968..][0..name.len], name);
+                complete_buf[3968 + name.len] = '/';
+                return .{ .replacement = complete_buf[3968..][0..trail_len], .word_start = word_start, .matches = 1 };
+            }
+        }
+        return .{ .replacement = name, .word_start = word_start, .matches = 1 };
+    }
+    // Multiple matches — complete common prefix
+    if (common_len > prefix.len) {
+        return .{ .replacement = single_match[0..common_len], .word_start = word_start, .matches = match_count };
+    }
+    return .{ .replacement = "", .word_start = word_start, .matches = match_count };
+}
+
+fn completeCommand(prefix: []const u8, word_start: usize) TabResult {
+    const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "jobs", "fg", "bg", "dirs", "history", "j", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue", "exec", "if", "unless", "for", "while", "until", "try" };
+
+    var match_count: usize = 0;
+    var first_match: []const u8 = "";
+    var common_len: usize = 0;
+
+    for (builtins) |b| {
+        if (std.mem.startsWith(u8, b, prefix)) {
+            if (match_count == 0) { first_match = b; common_len = b.len; } else {
+                var cl: usize = 0;
+                while (cl < common_len and cl < b.len and first_match[cl] == b[cl]) cl += 1;
+                common_len = cl;
+            }
+            if (match_count < 32) complete_list_buf[match_count] = b;
+            match_count += 1;
+        }
+    }
+
+    // Also check PATH for executables
+    const path_env = std.posix.getenv("PATH") orelse "";
+    var path_iter = std.mem.splitScalar(u8, path_env, ':');
+    while (path_iter.next()) |dir_path| {
+        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
+        defer dir.close();
+        var iter = dir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind != .file and entry.kind != .sym_link) continue;
+            if (std.mem.startsWith(u8, entry.name, prefix)) {
+                if (match_count == 0) { first_match = entry.name; common_len = entry.name.len; } else {
+                    var cl: usize = 0;
+                    while (cl < common_len and cl < entry.name.len and first_match[cl] == entry.name[cl]) cl += 1;
+                    common_len = cl;
+                }
+                match_count += 1;
+                if (match_count >= 100) break;
+            }
+        }
+        if (match_count >= 100) break;
+    }
+
+    if (match_count == 0) return .{ .replacement = "", .word_start = word_start, .matches = 0 };
+    if (match_count == 1) return .{ .replacement = first_match, .word_start = word_start, .matches = 1 };
+    if (common_len > prefix.len) return .{ .replacement = first_match[0..common_len], .word_start = word_start, .matches = match_count };
+    return .{ .replacement = "", .word_start = word_start, .matches = match_count };
+}
+
+fn completeVariable(prefix: []const u8, word_start: usize) TabResult {
+    const var_prefix = if (prefix.len > 1) prefix[1..] else "";
+    const specials = [_][]const u8{ "$?", "$$", "$#", "$*", "$0", "$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9" };
+
+    var match_count: usize = 0;
+    var first_match: []const u8 = "";
+
+    for (specials) |s| {
+        if (std.mem.startsWith(u8, s, prefix)) {
+            if (match_count == 0) first_match = s;
+            match_count += 1;
+        }
+    }
+
+    // Check environment variables
+    if (var_prefix.len > 0) {
+        const env = std.c.environ;
+        var i: usize = 0;
+        while (env[i]) |entry| : (i += 1) {
+            const slice: [*]const u8 = @ptrCast(entry);
+            var eq: usize = 0;
+            while (slice[eq] != '=' and slice[eq] != 0) eq += 1;
+            const name = slice[0..eq];
+            if (std.mem.startsWith(u8, name, var_prefix)) {
+                const full_len = 1 + name.len;
+                if (full_len < 128) {
+                    complete_buf[match_count * 128] = '$';
+                    @memcpy(complete_buf[match_count * 128 + 1 ..][0..name.len], name);
+                    const full = complete_buf[match_count * 128 ..][0..full_len];
+                    if (match_count == 0) first_match = full;
+                    if (match_count < 32) complete_list_buf[match_count] = full;
+                    match_count += 1;
+                }
+            }
+        }
+    }
+
+    if (match_count == 1) return .{ .replacement = first_match, .word_start = word_start, .matches = 1 };
+    return .{ .replacement = "", .word_start = word_start, .matches = match_count };
+}
+
+fn showCompletions(line: []const u8, cursor: usize, word_start: usize) void {
+    _ = cursor;
+    const prefix = line[word_start..line.len];
+    _ = prefix;
+    writeAll("\n");
+    var i: usize = 0;
+    while (i < 32 and complete_list_buf[i].len > 0) : (i += 1) {
+        writeAll(complete_list_buf[i]);
+        writeAll("  ");
+    }
+    writeAll("\n");
+    writeAll(active_prompt);
+    writeAll(line);
+}
 
 fn updateGhost(line: []const u8) void {
     ghost_text = "";
