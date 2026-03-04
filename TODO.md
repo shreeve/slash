@@ -26,10 +26,7 @@ Features not yet implemented, organized by category and priority.
 - [x] Indent blocks — INDENT/OUTDENT tokens from lexer, `block = INDENT line* OUTDENT`, works for cmd/if/for/while, nested
 - [x] `exec` (replace process) — execvpeZ without fork, replaces current process
 - [x] Job control — process groups (setpgid), terminal ownership (tcsetpgrp), job table, WUNTRACED for Ctrl+Z, fg/bg/jobs builtins, background reaping
-
-## Grammar Engine
-
-- [ ] Regex `=~` / `!~` — context-sensitive `/` disambiguation in grammar.zig
+- [x] Regex literals — `~|pattern|flags` standalone, `/pattern/` after `=~`/`!~`, any delimiter, Oniguruma execution
 
 ## Executor
 

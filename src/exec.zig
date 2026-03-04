@@ -14,6 +14,7 @@ const libc = @cImport({
 });
 
 const parser = @import("parser.zig");
+const Regex = @import("regex.zig").Regex;
 const Sexp = parser.Sexp;
 const Tag = parser.Tag;
 const Parser = parser.Parser;
@@ -727,8 +728,22 @@ pub const Shell = struct {
     fn evalComparison(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) { self.last_exit = 1; return; }
         const lhs = self.sexpToExpandedStr(args[0], source);
-        const rhs = self.sexpToExpandedStr(args[1], source);
 
+        if (tag == .match or tag == .nomatch) {
+            const rhs_raw = self.sexpToStr(args[1], source) orelse "";
+            const pattern = parseRegexLiteral(rhs_raw);
+            const re = Regex.compile(pattern) catch {
+                std.debug.print("slash: invalid regex: {s}\n", .{pattern});
+                self.last_exit = 2;
+                return;
+            };
+            defer re.free();
+            const found = re.search(lhs);
+            self.last_exit = if ((tag == .match) == found) 0 else 1;
+            return;
+        }
+
+        const rhs = self.sexpToExpandedStr(args[1], source);
         const result = switch (tag) {
             .eq => std.mem.eql(u8, lhs, rhs) or numCmp(lhs, rhs) == .eq,
             .ne => !std.mem.eql(u8, lhs, rhs) and numCmp(lhs, rhs) != .eq,
@@ -739,6 +754,21 @@ pub const Shell = struct {
             else => false,
         };
         self.last_exit = if (result) 0 else 1;
+    }
+
+    fn parseRegexLiteral(raw: []const u8) []const u8 {
+        if (raw.len < 2) return raw;
+        var start: usize = 0;
+        // Skip ~ prefix if present
+        if (raw[0] == '~') start = 1;
+        // The first char after optional ~ is the delimiter
+        const delim = raw[start];
+        start += 1;
+        // Find closing delimiter from the end (before flags)
+        var end = raw.len;
+        while (end > start and std.ascii.isAlphabetic(raw[end - 1])) end -= 1;
+        if (end > start and raw[end - 1] == delim) end -= 1;
+        return raw[start..end];
     }
 
     fn numCmp(a: []const u8, b: []const u8) std.math.Order {

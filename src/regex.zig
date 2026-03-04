@@ -44,6 +44,21 @@ pub const Regex = struct {
         return @intCast(r);
     }
 
+    /// Search for pattern anywhere in `source`.
+    /// Returns true if found.
+    pub fn search(self: Regex, source: []const u8) bool {
+        const r = c.onig_search(
+            self.inner,
+            source.ptr,
+            source.ptr + source.len,
+            source.ptr,
+            source.ptr + source.len,
+            null,
+            c.ONIG_OPTION_NONE,
+        );
+        return r >= 0;
+    }
+
     pub fn free(self: Regex) void {
         c.onig_free(self.inner);
     }

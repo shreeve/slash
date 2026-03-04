@@ -209,25 +209,20 @@ defaults {
 # REGEX LITERALS
 # ==============================================================================
 #
-# Regex: /pattern/flags — used after =~ and !~ operators and in try arms.
+# Regex literals: ~|pattern|flags — the ~ prefix with any delimiter.
 #
-# The `/` character is ambiguous: division or regex start. The lexer uses
-# the preceding token to decide:
+# Syntax: ~ followed immediately (no space) by a non-/ non-alphanumeric
+# character. That character is the delimiter. Scan to the matching
+# delimiter, then consume optional flags [gimsux]*.
 #
-#   REGEX context (/ starts a regex):
-#     after: =~  !~  ==  !=  <=  >=  &&  ||  (  ,  =  ;  NEWLINE
-#     after keywords: if  unless  while  until  and  or  not  try
-#     at start of input
+# Examples:
+#   ~|^foo.*|i       pipe delimiter, case-insensitive
+#   ~!bar$!          bang delimiter
+#   ~#\d{3}#g        hash delimiter, global
+#   ~/pattern/i      slash delimiter (/ is fine here — no ambiguity)
 #
-#   DIVISION context (/ is arithmetic):
-#     after: ident  integer  real  string_sq  string_dq  variable
-#     after: var_braced  rparen  flag
-#
-# This heuristic is implemented in the generated matchRules() function
-# in parser.zig, not as a simple lexer rule. The pattern below documents
-# the token shape for the generated code to use.
-#
-# Pattern: '/' ([^/\n\\] | '\\' .)* '/' [gimsux]*    → regex
+# The lexer handles this in the generated next() function, not as a
+# regex rule, since the delimiter character varies.
 
 # ==============================================================================
 # VARIABLE REFERENCES
@@ -543,6 +538,8 @@ cmp_term   = expr "==" expr                 → (eq 1 3)
            | expr ">"  expr                 → (gt 1 3)
            | expr "<=" expr                 → (le 1 3)
            | expr ">=" expr                 → (ge 1 3)
+           | expr "=~" REGEX               → (match 1 3)
+           | expr "!~" REGEX               → (nomatch 1 3)
            | expr "=~" expr                 → (match 1 3)
            | expr "!~" expr                 → (nomatch 1 3)
            | NOT cmp_term                   → (not 2)

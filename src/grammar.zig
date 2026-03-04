@@ -965,6 +965,9 @@ const LexerGenerator = struct {
             \\    indent_pending: u8 = 0,        // number of OUTDENT tokens to emit
             \\    indent_queued: ?Token = null,   // queued token to emit next (NEWLINE after OUTDENT)
             \\
+            \\    // Regex context — track previous token for =~ / !~ detection
+            \\    last_cat: TokenCat = .eof,
+            \\
         );
 
         // Init function
@@ -1012,6 +1015,7 @@ const LexerGenerator = struct {
         try self.write("        self.indent_depth = 0;\n");
         try self.write("        self.indent_pending = 0;\n");
         try self.write("        self.indent_queued = null;\n");
+        try self.write("        self.last_cat = .eof;\n");
         for (self.spec.states.items) |state| {
             try self.print("        self.{s} = {d};\n", .{ state.name, state.initial_value });
         }
@@ -1062,7 +1066,42 @@ const LexerGenerator = struct {
             \\        if (self.hd_type != 0) {
             \\            return self.collectHeredocLine();
             \\        }
+            \\        // Skip whitespace for regex context check
+            \\        var ws_skip: u32 = 0;
+            \\        while (self.pos + ws_skip < self.source.len and (self.source[self.pos + ws_skip] == ' ' or self.source[self.pos + ws_skip] == '\t'))
+            \\            ws_skip += 1;
+            \\        const rx_pos = self.pos + ws_skip;
+            \\        // After =~ or !~: any non-alnum non-space char starts regex (/ allowed, ~ optional)
+            \\        if ((self.last_cat == .match or self.last_cat == .nomatch) and rx_pos < self.source.len) {
+            \\            const ch = self.source[rx_pos];
+            \\            if (ch == '~' and rx_pos + 1 < self.source.len) {
+            \\                // ~<delim> form after =~ — skip the ~, use next char as delimiter
+            \\                const d = self.source[rx_pos + 1];
+            \\                if (!std.ascii.isAlphanumeric(d) and d != ' ' and d != '\t' and d != '\n') {
+            \\                    self.pos = rx_pos;
+            \\                    const result = self.collectRegex();
+            \\                    self.last_cat = result.cat;
+            \\                    return result;
+            \\                }
+            \\            } else if (!std.ascii.isAlphanumeric(ch) and ch != ' ' and ch != '\t' and ch != '\n' and ch != '\r' and ch != '$') {
+            \\                // Bare delimiter after =~ (e.g., =~ /pattern/)
+            \\                self.pos = rx_pos;
+            \\                const result = self.collectRegexBare();
+            \\                self.last_cat = result.cat;
+            \\                return result;
+            \\            }
+            \\        }
+            \\        // Standalone regex: ~ followed by non-/ non-alnum delimiter
+            \\        if (self.pos + 1 < self.source.len and self.source[self.pos] == '~') {
+            \\            const delim = self.source[self.pos + 1];
+            \\            if (delim != '/' and !std.ascii.isAlphanumeric(delim) and delim != ' ' and delim != '\t' and delim != '\n' and delim != '\r') {
+            \\                const result = self.collectRegex();
+            \\                self.last_cat = result.cat;
+            \\                return result;
+            \\            }
+            \\        }
             \\        const tok = self.matchRules();
+            \\        self.last_cat = tok.cat;
             \\        // Handle indentation on newlines
             \\        if (tok.cat == .newline) {
             \\            return self.handleIndent(tok);
@@ -1232,6 +1271,47 @@ const LexerGenerator = struct {
             \\        }
             \\        // Same level — emit NEWLINE as normal
             \\        return nl_tok;
+            \\    }
+            \\
+            \\    /// Collect a bare regex: <delim>pattern<delim>flags (after =~ / !~)
+            \\    fn collectRegexBare(self: *Lexer) Token {
+            \\        return self.scanRegex(self.pos);
+            \\    }
+            \\
+            \\    /// Collect a regex literal: ~<delim>pattern<delim>flags
+            \\    fn collectRegex(self: *Lexer) Token {
+            \\        const start = self.pos;
+            \\        self.pos += 1; // skip ~
+            \\        const result = self.scanRegex(start);
+            \\        if (result.cat == .err) self.pos = start + 1;
+            \\        return result;
+            \\    }
+            \\
+            \\    /// Core regex scanner: reads <delim>pattern<delim>flags from current pos.
+            \\    /// `start` is the token start position (may include ~ prefix).
+            \\    fn scanRegex(self: *Lexer, start: u32) Token {
+            \\        const delim = self.source[self.pos];
+            \\        self.pos += 1;
+            \\        while (self.pos < self.source.len) {
+            \\            const ch = self.source[self.pos];
+            \\            if (ch == '\\' and self.pos + 1 < self.source.len) {
+            \\                self.pos += 2;
+            \\                continue;
+            \\            }
+            \\            if (ch == delim) {
+            \\                self.pos += 1;
+            \\                while (self.pos < self.source.len) {
+            \\                    const f = self.source[self.pos];
+            \\                    if (f == 'g' or f == 'i' or f == 'm' or f == 's' or f == 'u' or f == 'x') {
+            \\                        self.pos += 1;
+            \\                    } else break;
+            \\                }
+            \\                return Token{ .cat = .regex, .pre = 0, .pos = @intCast(start), .len = @intCast(self.pos - start) };
+            \\            }
+            \\            if (ch == '\n') break;
+            \\            self.pos += 1;
+            \\        }
+            \\        return Token{ .cat = .err, .pre = 0, .pos = @intCast(start), .len = 1 };
             \\    }
             \\
             \\
@@ -1414,6 +1494,17 @@ const LexerGenerator = struct {
             \\
             \\            if (self.pos >= self.source.len)
             \\                return Token{ .cat = .eof, .pre = ws_count, .pos = @intCast(self.pos), .len = 0 };
+            \\
+            \\            // Check for standalone regex: ~<delim> where delim is not / or alnum
+            \\            if (self.pos + 1 < self.source.len and self.source[self.pos] == '~') {
+            \\                const rd = self.source[self.pos + 1];
+            \\                if (rd != '/' and !std.ascii.isAlphanumeric(rd) and rd != ' ' and rd != '\t' and rd != '\n' and rd != '\r' and rd != '_') {
+            \\                    var result = self.collectRegex();
+            \\                    result.pre = ws_count;
+            \\                    self.last_cat = result.cat;
+            \\                    return result;
+            \\                }
+            \\            }
             \\
             \\            const start: u32 = @intCast(self.pos);
             \\
