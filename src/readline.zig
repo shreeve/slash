@@ -390,7 +390,6 @@ fn completePath(prefix: []const u8, word_start: usize) TabResult {
                     std.fmt.bufPrint(complete_buf[match_count * 128 ..][0..128], "{s}{s}", .{ dir_part, entry.name }) catch continue
                 else
                     entry.name;
-                const is_dir = entry.kind == .directory;
                 if (match_count == 0) {
                     single_match = full;
                     common_len = full.len;
@@ -400,7 +399,6 @@ fn completePath(prefix: []const u8, word_start: usize) TabResult {
                     common_len = cl;
                 }
                 complete_list_buf[match_count] = full;
-                _ = is_dir;
             }
             match_count += 1;
         }
@@ -478,6 +476,7 @@ fn completeCommand(prefix: []const u8, word_start: usize) TabResult {
         }
     }
 
+    complete_match_count = cmd_match_count;
     if (cmd_match_count == 0) return .{ .replacement = "", .word_start = word_start, .matches = 0 };
     if (cmd_match_count == 1) return .{ .replacement = complete_list_buf[0], .word_start = word_start, .matches = 1 };
     if (common_len > prefix.len) return .{ .replacement = cmd_match_buf[0][0..common_len], .word_start = word_start, .matches = cmd_match_count };
