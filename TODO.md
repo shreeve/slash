@@ -33,7 +33,7 @@ Features not yet implemented, organized by category and priority.
 
 ## Executor
 
-- [ ] String interpolation in `"""` heredocs — `$var` expansion inside body text
+- [x] String interpolation in `"""` and `` ```lang `` heredocs — `$var`, `${var}`, `\$` escape
 - [ ] Glob expansion — pre-parse filesystem matching (*.zig, file[0-9], {a,b}.txt)
 
 ## Interactive (Phase D)

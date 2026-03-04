@@ -1487,16 +1487,67 @@ pub const Shell = struct {
 
     fn collectHeredocRedirect(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, list: *std.ArrayList(Redirect)) void {
         var content: std.ArrayListUnmanaged(u8) = .{};
+        const interpolate = (tag == .heredoc_interp or tag == .heredoc_lang);
         const start: usize = if (tag == .heredoc_lang and args.len > 0) 1 else 0;
         var first = true;
         for (args[start..]) |body| {
             if (!first) content.append(self.allocator, '\n') catch {};
             first = false;
             const text = self.sexpToStr(body, source) orelse continue;
-            content.appendSlice(self.allocator, text) catch {};
+            if (interpolate) {
+                self.expandInto(&content, text);
+            } else {
+                content.appendSlice(self.allocator, text) catch {};
+            }
         }
         const result = content.toOwnedSlice(self.allocator) catch "";
         list.append(self.allocator, .{ .tag = .herestring, .target = result }) catch {};
+    }
+
+    fn expandInto(self: *Shell, buf: *std.ArrayListUnmanaged(u8), text: []const u8) void {
+        var i: usize = 0;
+        while (i < text.len) {
+            if (text[i] == '$' and i + 1 < text.len) {
+                if (text[i + 1] == '{') {
+                    if (std.mem.indexOfScalarPos(u8, text, i + 2, '}')) |close| {
+                        const name = text[i + 2 .. close];
+                        const val = self.lookupVar(name);
+                        buf.appendSlice(self.allocator, val) catch {};
+                        i = close + 1;
+                        continue;
+                    }
+                } else {
+                    const name_start = i + 1;
+                    var name_end = name_start;
+                    while (name_end < text.len and (std.ascii.isAlphanumeric(text[name_end]) or text[name_end] == '_' or
+                        (name_end == name_start and (text[name_end] == '?' or text[name_end] == '$' or
+                        text[name_end] == '#' or text[name_end] == '*' or text[name_end] == '!')))) : (name_end += 1) {}
+                    if (name_end > name_start) {
+                        const val = self.lookupVar(text[name_start..name_end]);
+                        buf.appendSlice(self.allocator, val) catch {};
+                        i = name_end;
+                        continue;
+                    }
+                }
+            }
+            if (text[i] == '\\' and i + 1 < text.len) {
+                const next = text[i + 1];
+                switch (next) {
+                    'n' => buf.append(self.allocator, '\n') catch {},
+                    't' => buf.append(self.allocator, '\t') catch {},
+                    '\\' => buf.append(self.allocator, '\\') catch {},
+                    '$' => buf.append(self.allocator, '$') catch {},
+                    else => {
+                        buf.append(self.allocator, '\\') catch {};
+                        buf.append(self.allocator, next) catch {};
+                    },
+                }
+                i += 2;
+                continue;
+            }
+            buf.append(self.allocator, text[i]) catch {};
+            i += 1;
+        }
     }
 
     fn isRedirTag(tag: Tag) bool {
