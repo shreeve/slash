@@ -263,13 +263,16 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                 }
             },
             9 => {
-                // Tab: accept ghost suggestion
+                // Tab: accept ghost suggestion + trailing space
                 if (ghost_text.len > 0 and cursor == len) {
-                    if (len + ghost_text.len <= line_buf.len) {
+                    if (len + ghost_text.len + 1 <= line_buf.len) {
                         @memcpy(line_buf[len..][0..ghost_text.len], ghost_text);
                         len += ghost_text.len;
+                        line_buf[len] = ' ';
+                        len += 1;
                         cursor = len;
                         ghost_text = "";
+                        updateGhost(line_buf[0..len]);
                         refreshLine(line_buf[0..len], cursor);
                     }
                 }
