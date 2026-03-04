@@ -16,6 +16,7 @@ const std = @import("std");
 const posix = std.posix;
 const build_options = @import("build_options");
 const exec = @import("exec.zig");
+const readline = @import("readline.zig");
 
 const parser = @import("parser.zig");
 const Lexer = parser.Lexer;
@@ -129,27 +130,17 @@ pub fn main() !void {
 // =============================================================================
 
 fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
-    const stdin = std.fs.File.stdin();
-    const stdout = std.fs.File.stdout();
-
-    var buf: [4096]u8 = undefined;
+    var history = readline.History.init(alloc);
 
     while (true) {
-        stdout.writeAll("$ ") catch return;
+        const line = readline.readLine("$ ", &history) orelse return;
 
-        // Read one line from stdin
-        var len: usize = 0;
-        while (len < buf.len) {
-            const n = stdin.read(buf[len..][0..1]) catch return;
-            if (n == 0) return; // EOF
-            if (buf[len] == '\n') break;
-            len += 1;
-        }
-
-        const trimmed = std.mem.trim(u8, buf[0..len], " \t\r");
+        const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
 
         if (std.mem.eql(u8, trimmed, "exit")) return;
+
+        history.add(trimmed);
 
         const source = try alloc.dupeZ(u8, trimmed);
         defer alloc.free(source);
