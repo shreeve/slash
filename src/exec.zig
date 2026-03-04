@@ -1398,7 +1398,6 @@ pub const Shell = struct {
     }
 
     fn builtinJ(self: *Shell, argv: []const []const u8) void {
-        const HistoryDb = @import("history.zig");
         const hdb = self.history_db orelse {
             std.debug.print("j: database not available\n", .{});
             self.last_exit = 1;
@@ -1440,7 +1439,6 @@ pub const Shell = struct {
                 self.recordDir();
             }
         }
-        _ = HistoryDb;
         self.last_exit = 0;
     }
 

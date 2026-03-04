@@ -46,7 +46,6 @@ SQLite foundation — one database powers history, search, and navigation.
 - [x] `history` command — query/filter history
 - [ ] Up-arrow prefix search — typing `git` then `↑` filters history to git commands only
 - [ ] Inline ghost suggestions — show most likely completion in gray, `→` to accept
-- [ ] `history` command — query history (`history top`, `history search docker`)
 - [ ] Command palette (`Ctrl+P`) — unified search across history, dirs, aliases, scripts, git branches; fuzzy ranked; preview panel; providers architecture
 
 ## Final Touches
