@@ -23,6 +23,7 @@ pub const Db = struct {
         if (c.sqlite3_open(@ptrCast(db_path.ptr), &db_handle) != c.SQLITE_OK) return error.OpenFailed;
 
         const self = Db{ .handle = db_handle.? };
+        self.exec("PRAGMA journal_mode=WAL");
         self.exec(
             \\CREATE TABLE IF NOT EXISTS history (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,6 +36,7 @@ pub const Db = struct {
             \\CREATE INDEX IF NOT EXISTS idx_history_ts ON history(timestamp DESC);
             \\CREATE INDEX IF NOT EXISTS idx_history_cwd ON history(cwd);
         );
+        self.prune();
         return self;
     }
 
@@ -145,6 +147,43 @@ pub const Db = struct {
             }
         }
         return results.items;
+    }
+
+    fn prune(self: Db) void {
+        // Cap history at 50,000 entries
+        self.exec("DELETE FROM history WHERE id NOT IN (SELECT id FROM history ORDER BY timestamp DESC LIMIT 50000)");
+        // Remove entries with directories that no longer exist (check top 500 distinct dirs)
+        var stmt: ?*c.sqlite3_stmt = null;
+        const sql = "SELECT DISTINCT cwd FROM history WHERE cwd != '' ORDER BY MAX(id) DESC LIMIT 500";
+        if (c.sqlite3_prepare_v2(self.handle, sql, -1, &stmt, null) != c.SQLITE_OK) return;
+        defer _ = c.sqlite3_finalize(stmt);
+        var dead_buf: [128][4096]u8 = undefined;
+        var dead_count: usize = 0;
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW and dead_count < 128) {
+            const text_ptr = c.sqlite3_column_text(stmt, 0);
+            const text_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 0));
+            if (text_ptr) |p| {
+                const s: [*]const u8 = @ptrCast(p);
+                const path = s[0..text_len];
+                std.fs.cwd().access(path, .{}) catch {
+                    if (text_len < 4096) {
+                        @memcpy(dead_buf[dead_count][0..text_len], path);
+                        dead_buf[dead_count][text_len] = 0;
+                        dead_count += 1;
+                    }
+                    continue;
+                };
+            }
+        }
+        for (dead_buf[0..dead_count]) |*buf| {
+            var del_stmt: ?*c.sqlite3_stmt = null;
+            const del_sql = "DELETE FROM history WHERE cwd = ?";
+            if (c.sqlite3_prepare_v2(self.handle, del_sql, -1, &del_stmt, null) != c.SQLITE_OK) continue;
+            const end = std.mem.indexOfScalar(u8, buf, 0) orelse continue;
+            _ = c.sqlite3_bind_text(del_stmt, 1, @ptrCast(buf), @intCast(end), c.SQLITE_STATIC);
+            _ = c.sqlite3_step(del_stmt);
+            _ = c.sqlite3_finalize(del_stmt);
+        }
     }
 
     fn exec(self: Db, sql: [*:0]const u8) void {

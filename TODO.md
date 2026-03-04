@@ -50,7 +50,7 @@ SQLite foundation — one database powers history, search, and navigation.
 
 ## Final Touches
 
-- [ ] Syntax highlighting — live as you type, using the parser
 - [ ] Multi-line editing — blank-line continuation for indent blocks, `\` continuation at the prompt
+- [ ] Syntax highlighting — live as you type, using the parser
 - [ ] Tab completion engine — context-aware (command, file, variable, flag)
 - [ ] Completion definitions for common commands (git, zig, etc.)
