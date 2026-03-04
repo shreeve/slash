@@ -21,10 +21,7 @@ Features not yet implemented, organized by category and priority.
 - [x] `cmd ???` hook — define, show, delete
 - [x] Readline — raw terminal mode, arrow keys, history (512 entries), Ctrl+A/E/K/U/C/D
 - [x] 233 tests — parse + execution coverage
-
-## Next Up
-
-- [ ] Rich prompt — directory, git branch, exit code, duration
+- [x] Rich prompt — PROMPT variable, format escapes (%t %u %h %d %g %e %D %$ %fg %bg %> %r), hex colors, git branch via .git/HEAD, command timing, ~/.slashrc
 
 ## Grammar Engine
 

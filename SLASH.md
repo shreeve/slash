@@ -1414,6 +1414,42 @@ Wire the job control core into a pipeline executor:
 
 ---
 
+## Prompt
+
+The prompt is controlled by the `PROMPT` variable. Set it in `~/.slashrc`:
+
+```
+PROMPT="%bg(#43669d)%fg(#ecede8) %t %bg(#81a1c7)%fg(#43669d)%>%fg(#ecede8) %u@%h %r%fg(#81a1c7)%>%fg(#ecede8) %d>%r "
+```
+
+### Format Escapes
+
+| Escape | Description | Example |
+|--------|-------------|---------|
+| `%fg(#hex)` | Foreground color | `%fg(#ecede8)` |
+| `%bg(#hex)` | Background color | `%bg(#43669d)` |
+| `%r` | Reset all colors | |
+| `%>` | Powerline arrow (U+E0B0) | `` |
+| `%t` | Time (HH:MM:SS) | `21:45:08` |
+| `%u` | Username | `shreeve` |
+| `%h` | Hostname (short) | `pop` |
+| `%d` | Directory (~ abbreviated) | `~/Data/Code/slash` |
+| `%g` | Git branch + dirty state | `main *` |
+| `%e` | Exit code (non-zero only) | `1` |
+| `%D` | Command duration (> 1s only) | `3.2s` |
+| `%$` | Colored `$` — green if last exit 0, red if non-zero | `$` |
+| `%%` | Literal `%` | `%` |
+
+### Hex Color Shorthand
+
+| Format | Expands to | Example |
+|--------|------------|---------|
+| `#ba8c3f` | 6-digit — exact RGB | `%fg(#ba8c3f)` |
+| `#f00` | 3-digit — each digit doubled | `%fg(#ff0000)` |
+| `#c` | 1-digit — grayscale | `%fg(#cccccc)` |
+
+---
+
 ## What Slash Is Not
 
 Slash is not a POSIX shell. It does not aim for POSIX compliance. It will not

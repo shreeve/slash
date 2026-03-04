@@ -17,6 +17,7 @@ const posix = std.posix;
 const build_options = @import("build_options");
 const exec = @import("exec.zig");
 const readline = @import("readline.zig");
+const prompt = @import("prompt.zig");
 
 const parser = @import("parser.zig");
 const Lexer = parser.Lexer;
@@ -130,10 +131,20 @@ pub fn main() !void {
 // =============================================================================
 
 fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
+    if (std.posix.getenv("HOME")) |home| {
+        var path_buf: [4096]u8 = undefined;
+        const rc = std.fmt.bufPrint(&path_buf, "{s}/.slashrc", .{home}) catch null;
+        if (rc) |p| ev.sourceFile(p);
+    }
+
     var history = readline.History.init(alloc);
+    var last_duration_ms: u64 = 0;
 
     while (true) {
-        const line = readline.readLine("$ ", &history) orelse return;
+        const fmt = ev.vars.get("PROMPT") orelse prompt.default_fmt;
+        const ctx = prompt.Context{ .last_exit = ev.last_exit, .duration_ms = last_duration_ms };
+        const ps = prompt.render(fmt, ctx);
+        const line = readline.readLineEx(ps.str, ps.visible_len, &history) orelse return;
 
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
@@ -144,7 +155,11 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
 
         const source = try alloc.dupeZ(u8, trimmed);
         defer alloc.free(source);
+
+        const t0 = std.time.milliTimestamp();
         ev.execLine(source);
+        const t1 = std.time.milliTimestamp();
+        last_duration_ms = @intCast(@max(0, t1 - t0));
     }
 }
 

@@ -43,6 +43,12 @@ pub const Shell = struct {
     // PUBLIC ENTRY POINTS
     // =========================================================================
 
+    pub fn sourceFile(self: *Shell, path: []const u8) void {
+        const content = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch return;
+        defer self.allocator.free(content);
+        self.execSource(content);
+    }
+
     pub fn execLine(self: *Shell, source: []const u8) void {
         var p = Parser.init(self.allocator, source);
         defer p.deinit();
@@ -693,9 +699,11 @@ pub const Shell = struct {
 
     fn evalAssign(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
-        const name = self.sexpToStr(args[0], source) orelse return;
-        const value = self.sexpToExpandedStr(args[1], source);
-        self.vars.put(name, value) catch {};
+        const name_raw = self.sexpToStr(args[0], source) orelse return;
+        const value_raw = self.sexpToExpandedStr(args[1], source);
+        const name = self.allocator.dupe(u8, name_raw) catch return;
+        const value = self.allocator.dupe(u8, value_raw) catch return;
+        self.vars.put(name, value) catch return;
         self.last_exit = 0;
     }
 
@@ -931,7 +939,8 @@ pub const Shell = struct {
 
     fn evalCmdDef(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
-        const name = self.sexpToStr(args[0], source) orelse return;
+        const name_raw = self.sexpToStr(args[0], source) orelse return;
+        const name = self.allocator.dupe(u8, name_raw) catch return;
         self.user_cmds.put(name, args[args.len - 1]) catch {};
         self.last_exit = 0;
     }
@@ -988,9 +997,11 @@ pub const Shell = struct {
 
     fn evalSet(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
-        const name = self.sexpToStr(args[0], source) orelse return;
-        const value = self.sexpToExpandedStr(args[1], source);
-        self.options.put(name, value) catch {};
+        const name_raw = self.sexpToStr(args[0], source) orelse return;
+        const value_raw = self.sexpToExpandedStr(args[1], source);
+        const name = self.allocator.dupe(u8, name_raw) catch return;
+        const value = self.allocator.dupe(u8, value_raw) catch return;
+        self.options.put(name, value) catch return;
         self.last_exit = 0;
     }
 
