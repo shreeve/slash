@@ -343,6 +343,10 @@ defaults {
 
 [a-zA-Z_][\w./-]*                           → ident
 [./~][\w./-]*                               → ident   # paths: /usr/bin, ./foo, ~/bar
+[*?][\w./*?-]*                              → ident   # globs: *.zig, ?.txt, **/*.zig
+[\w./-]*[*?][\w./*?-]*                      → ident   # globs: file*, src/*.zig
+[\w./-]*\{[\w.,/*?-]+\}[\w./*?-]*           → ident   # braces: {a,b}.txt, src/{main,exec}.zig
+[\w./-]*\[[\w^./-]+\][\w./*?-]*             → ident   # brackets: file[0-9], [a-z]*.txt
 
 # ==============================================================================
 # ERROR / FALLBACK
@@ -474,7 +478,7 @@ cmd_arg   = argument
 # ARGUMENTS
 # ==============================================================================
 
-argument  = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG
+argument  = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG | REGEX
           | proc_sub
           | subshell_capture
 

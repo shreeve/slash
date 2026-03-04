@@ -13,6 +13,14 @@ pub const Regex = struct {
     inner: c.OnigRegex,
 
     pub fn compile(pattern: []const u8) !Regex {
+        return compileWithOpts(pattern, c.ONIG_OPTION_NONE);
+    }
+
+    pub fn compileIgnoreCase(pattern: []const u8) !Regex {
+        return compileWithOpts(pattern, c.ONIG_OPTION_IGNORECASE);
+    }
+
+    fn compileWithOpts(pattern: []const u8, opts: c.OnigOptionType) !Regex {
         var regex: c.OnigRegex = undefined;
         var einfo: c.OnigErrorInfo = undefined;
         const enc = c.ONIG_ENCODING_UTF8();
@@ -20,7 +28,7 @@ pub const Regex = struct {
             &regex,
             pattern.ptr,
             pattern.ptr + pattern.len,
-            c.ONIG_OPTION_NONE,
+            opts,
             enc,
             c.ONIG_SYNTAX_DEFAULT(),
             &einfo,

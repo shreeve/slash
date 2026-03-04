@@ -400,7 +400,19 @@ pub const Shell = struct {
             }
         }
 
-        const argv = argv_list.items;
+        // Expand globs and regex literals in arguments
+        var expanded_argv: std.ArrayList([]const u8) = .empty;
+        defer expanded_argv.deinit(self.allocator);
+        for (argv_list.items) |arg| {
+            if (isRegexGlob(arg)) {
+                expandRegexGlob(self.allocator, arg, &expanded_argv);
+            } else if (hasGlobChars(arg)) {
+                expandGlob(self.allocator, arg, &expanded_argv);
+            } else {
+                expanded_argv.append(self.allocator, arg) catch {};
+            }
+        }
+        const argv = expanded_argv.items;
         if (argv.len == 0) return;
 
         const redirs = redir_list.items;
@@ -1644,4 +1656,179 @@ fn formatFloat(alloc: Allocator, val: f64) []const u8 {
     if (end > 0 and raw[end - 1] == '.') end -= 1;
     if (end == 0) return "0";
     return raw[0..end];
+}
+
+// =============================================================================
+// GLOB AND REGEX EXPANSION
+// =============================================================================
+
+fn isRegexGlob(arg: []const u8) bool {
+    return arg.len >= 3 and arg[0] == '~' and !std.ascii.isAlphanumeric(arg[1]) and arg[1] != '/';
+}
+
+fn hasGlobChars(arg: []const u8) bool {
+    for (arg) |ch| {
+        if (ch == '*' or ch == '?' or ch == '[' or ch == '{') return true;
+    }
+    return false;
+}
+
+fn expandRegexGlob(alloc: Allocator, arg: []const u8, out: *std.ArrayList([]const u8)) void {
+    const parsed = parseRegexGlob(arg) orelse {
+        out.append(alloc, arg) catch {};
+        return;
+    };
+    const re = if (parsed.ignore_case) Regex.compileIgnoreCase(parsed.pattern) catch {
+        out.append(alloc, arg) catch {};
+        return;
+    } else Regex.compile(parsed.pattern) catch {
+        out.append(alloc, arg) catch {};
+        return;
+    };
+    defer re.free();
+
+    const dir_path = if (parsed.dir.len > 0) parsed.dir else ".";
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+        out.append(alloc, arg) catch {};
+        return;
+    };
+    defer dir.close();
+
+    var matches: std.ArrayList([]const u8) = .empty;
+    defer matches.deinit(alloc);
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.name[0] == '.' and (parsed.pattern.len == 0 or parsed.pattern[0] != '.')) continue;
+        if (re.search(entry.name)) {
+            const name = if (parsed.dir.len > 0)
+                std.fmt.allocPrint(alloc, "{s}/{s}", .{ parsed.dir, entry.name }) catch continue
+            else
+                alloc.dupe(u8, entry.name) catch continue;
+            matches.append(alloc, name) catch {};
+        }
+    }
+
+    if (matches.items.len == 0) {
+        out.append(alloc, arg) catch {};
+        return;
+    }
+    std.mem.sort([]const u8, matches.items, {}, lessThanStr);
+    for (matches.items) |m| out.append(alloc, m) catch {};
+}
+
+const ParsedRegex = struct { dir: []const u8, pattern: []const u8, ignore_case: bool };
+
+fn parseRegexGlob(arg: []const u8) ?ParsedRegex {
+    if (arg.len < 3 or arg[0] != '~') return null;
+    const delim = arg[1];
+    var end: usize = 2;
+    while (end < arg.len) {
+        if (arg[end] == '\\' and end + 1 < arg.len) { end += 2; continue; }
+        if (arg[end] == delim) break;
+        end += 1;
+    }
+    if (end >= arg.len) return null;
+    const pattern = arg[2..end];
+    var ignore_case = false;
+    var fi = end + 1;
+    while (fi < arg.len and std.ascii.isAlphabetic(arg[fi])) : (fi += 1) {
+        if (arg[fi] == 'i') ignore_case = true;
+    }
+    return .{ .dir = "", .pattern = pattern, .ignore_case = ignore_case };
+}
+
+fn expandGlob(alloc: Allocator, pattern: []const u8, out: *std.ArrayList([]const u8)) void {
+    const re_pattern = globToRegex(alloc, pattern) orelse {
+        out.append(alloc, pattern) catch {};
+        return;
+    };
+    const re = Regex.compile(re_pattern) catch {
+        out.append(alloc, pattern) catch {};
+        return;
+    };
+    defer re.free();
+
+    // Split pattern into directory and filename parts
+    var dir_end: usize = 0;
+    for (pattern, 0..) |ch, i| {
+        if (ch == '/') dir_end = i + 1;
+    }
+    const dir_part = if (dir_end > 0) pattern[0 .. dir_end - 1] else "";
+    const dir_path = if (dir_part.len > 0) dir_part else ".";
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+        out.append(alloc, pattern) catch {};
+        return;
+    };
+    defer dir.close();
+
+    var matches: std.ArrayList([]const u8) = .empty;
+    defer matches.deinit(alloc);
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.name[0] == '.' and (pattern.len == 0 or pattern[dir_end] != '.')) continue;
+        const full = if (dir_part.len > 0)
+            std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_part, entry.name }) catch continue
+        else
+            alloc.dupe(u8, entry.name) catch continue;
+        if (re.search(full)) {
+            matches.append(alloc, full) catch {};
+        }
+    }
+
+    if (matches.items.len == 0) {
+        out.append(alloc, pattern) catch {};
+        return;
+    }
+    std.mem.sort([]const u8, matches.items, {}, lessThanStr);
+    for (matches.items) |m| out.append(alloc, m) catch {};
+}
+
+fn globToRegex(alloc: Allocator, pattern: []const u8) ?[]const u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    buf.append(alloc, '^') catch return null;
+
+    var i: usize = 0;
+    var in_brace = false;
+    while (i < pattern.len) {
+        const ch = pattern[i];
+        switch (ch) {
+            '*' => {
+                if (i + 1 < pattern.len and pattern[i + 1] == '*') {
+                    buf.appendSlice(alloc, ".*") catch return null;
+                    i += 2;
+                    if (i < pattern.len and pattern[i] == '/') i += 1;
+                } else {
+                    buf.appendSlice(alloc, "[^/]*") catch return null;
+                    i += 1;
+                }
+            },
+            '?' => { buf.appendSlice(alloc, "[^/]") catch return null; i += 1; },
+            '[' => { buf.append(alloc, '[') catch return null; i += 1; },
+            ']' => { buf.append(alloc, ']') catch return null; i += 1; },
+            '{' => { buf.append(alloc, '(') catch return null; in_brace = true; i += 1; },
+            '}' => { buf.append(alloc, ')') catch return null; in_brace = false; i += 1; },
+            ',' => {
+                if (in_brace) buf.append(alloc, '|') catch return null
+                else buf.append(alloc, ',') catch return null;
+                i += 1;
+            },
+            '.', '(', ')', '+', '|', '^', '$' => {
+                buf.append(alloc, '\\') catch return null;
+                buf.append(alloc, ch) catch return null;
+                i += 1;
+            },
+            else => { buf.append(alloc, ch) catch return null; i += 1; },
+        }
+    }
+
+    buf.append(alloc, '$') catch return null;
+    return (buf.toOwnedSlice(alloc) catch return null);
+}
+
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
 }

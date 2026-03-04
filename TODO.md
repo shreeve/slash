@@ -34,7 +34,8 @@ Features not yet implemented, organized by category and priority.
 
 ## Executor
 
-- [ ] Glob expansion — pre-parse filesystem matching (*.zig, file[0-9], {a,b}.txt)
+- [x] Glob expansion — *, ?, [a-z], {a,b}, ** recursive, plus regex globs (~|pattern|), sorted output
+- [ ] Regexp expansion - similar but using our new regex types
 
 ## Interactive (Phase D)
 
