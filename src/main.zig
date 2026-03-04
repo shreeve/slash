@@ -18,6 +18,7 @@ const build_options = @import("build_options");
 const exec = @import("exec.zig");
 const readline = @import("readline.zig");
 const prompt = @import("prompt.zig");
+const history = @import("history.zig");
 
 const parser = @import("parser.zig");
 const Lexer = parser.Lexer;
@@ -141,6 +142,13 @@ fn keyLookup(combo: []const u8) ?[]const u8 {
     return null;
 }
 
+fn historySearchFn(alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 {
+    if (repl_shell) |sh| {
+        if (sh.history_db) |hdb| return hdb.search(alloc, query, limit);
+    }
+    return &.{};
+}
+
 fn keyExec(cmd: []const u8) void {
     if (repl_shell) |sh| {
         const source = sh.allocator.dupeZ(u8, cmd) catch return;
@@ -157,10 +165,14 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
     }
 
     repl_shell = ev;
-    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec });
+    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec, .search = &historySearchFn });
     ev.recordDir();
 
-    var history = readline.History.init(alloc);
+    const hdb = history.Db.open() catch null;
+    defer if (hdb) |h| h.close();
+    ev.history_db = hdb;
+
+    var hist = readline.History.init(alloc);
     var last_duration_ms: u64 = 0;
 
     while (true) {
@@ -168,14 +180,14 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
         const fmt = ev.vars.get("PROMPT") orelse prompt.default_fmt;
         const ctx = prompt.Context{ .last_exit = ev.last_exit, .duration_ms = last_duration_ms };
         const ps = prompt.render(fmt, ctx);
-        const line = readline.readLineEx(ps.str, ps.visible_len, &history) orelse return;
+        const line = readline.readLineEx(ps.str, ps.visible_len, &hist) orelse return;
 
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
 
         if (std.mem.eql(u8, trimmed, "exit")) return;
 
-        history.add(trimmed);
+        hist.add(trimmed);
 
         const source = try alloc.dupeZ(u8, trimmed);
         defer alloc.free(source);
@@ -184,6 +196,12 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
         ev.execLine(source);
         const t1 = std.time.milliTimestamp();
         last_duration_ms = @intCast(@max(0, t1 - t0));
+
+        if (hdb) |h| {
+            var cwd_buf: [4096]u8 = undefined;
+            const cwd = std.posix.getcwd(&cwd_buf) catch "";
+            h.record(trimmed, cwd, ev.last_exit, last_duration_ms);
+        }
     }
 }
 

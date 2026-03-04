@@ -40,6 +40,7 @@ var active_prompt_len: usize = 2;
 pub const KeyHandler = struct {
     lookup: *const fn (combo: []const u8) ?[]const u8,
     exec: *const fn (cmd: []const u8) void,
+    search: ?*const fn (alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 = null,
 };
 
 var key_handler: ?KeyHandler = null;
@@ -191,6 +192,21 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     else => {},
                 }
             },
+            18 => {
+                // Ctrl+R: history search
+                if (key_handler) |kh| {
+                    disableRawMode(orig);
+                    const result = historySearch(kh);
+                    const new_orig = enableRawMode() orelse return null;
+                    _ = new_orig;
+                    if (result) |selected| {
+                        @memcpy(line_buf[0..selected.len], selected);
+                        len = selected.len;
+                        cursor = len;
+                    }
+                    refreshLine(line_buf[0..len], cursor);
+                }
+            },
             1 => {
                 cursor = 0;
                 refreshLine(line_buf[0..len], cursor);
@@ -239,6 +255,107 @@ fn refreshLine(line: []const u8, cursor: usize) void {
     var move_buf: [32]u8 = undefined;
     const move = std.fmt.bufPrint(&move_buf, "\r\x1b[{d}C", .{total}) catch return;
     writeAll(move);
+}
+
+fn historySearch(kh: KeyHandler) ?[]const u8 {
+    const search_fn = kh.search orelse return null;
+    var query_buf: [256]u8 = undefined;
+    var qlen: usize = 0;
+    var selected: usize = 0;
+    var results: [][]const u8 = &.{};
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Initial results (empty query = recent)
+    results = search_fn(alloc, "", 10);
+
+    while (true) {
+        // Clear overlay area and draw
+        writeAll("\r\n\x1b[J"); // newline + clear below
+        writeAll("\x1b[7m History Search: \x1b[0m ");
+        writeAll(query_buf[0..qlen]);
+        writeAll("\n");
+        for (results, 0..) |cmd, i| {
+            if (i == selected) writeAll("\x1b[7m") else writeAll("  ");
+            writeAll(cmd);
+            if (i == selected) writeAll("\x1b[0m");
+            writeAll("\n");
+        }
+        // Move cursor back up to search line
+        var up_buf: [16]u8 = undefined;
+        const up = std.fmt.bufPrint(&up_buf, "\x1b[{d}A", .{results.len + 1}) catch break;
+        writeAll(up);
+        var col_buf: [16]u8 = undefined;
+        const col = std.fmt.bufPrint(&col_buf, "\r\x1b[{d}C", .{19 + qlen}) catch break;
+        writeAll(col);
+
+        // Read input
+        var ch: [1]u8 = undefined;
+        const n = posix.read(STDIN, &ch) catch break;
+        if (n == 0) break;
+
+        switch (ch[0]) {
+            '\r', '\n' => {
+                // Accept selection
+                clearOverlay(results.len + 1);
+                if (selected < results.len) {
+                    const r = alloc.dupe(u8, results[selected]) catch return null;
+                    @memcpy(save_buf[0..r.len], r);
+                    return save_buf[0..r.len];
+                }
+                return null;
+            },
+            27 => {
+                // ESC or arrow keys
+                var seq: [2]u8 = undefined;
+                const n1 = posix.read(STDIN, seq[0..1]) catch break;
+                if (n1 > 0 and seq[0] == '[') {
+                    const n2 = posix.read(STDIN, seq[1..2]) catch break;
+                    if (n2 > 0) {
+                        if (seq[1] == 'A' and selected > 0) selected -= 1; // up
+                        if (seq[1] == 'B' and selected + 1 < results.len) selected += 1; // down
+                    }
+                } else {
+                    // Plain ESC — cancel
+                    clearOverlay(results.len + 1);
+                    return null;
+                }
+            },
+            127, 8 => {
+                if (qlen > 0) {
+                    qlen -= 1;
+                    selected = 0;
+                    _ = arena.reset(.retain_capacity);
+                    results = search_fn(alloc, query_buf[0..qlen], 10);
+                }
+            },
+            3 => {
+                // Ctrl+C — cancel
+                clearOverlay(results.len + 1);
+                return null;
+            },
+            else => |byte| {
+                if (byte >= 32 and byte < 127 and qlen < query_buf.len) {
+                    query_buf[qlen] = byte;
+                    qlen += 1;
+                    selected = 0;
+                    _ = arena.reset(.retain_capacity);
+                    results = search_fn(alloc, query_buf[0..qlen], 10);
+                }
+            },
+        }
+    }
+    clearOverlay(results.len + 1);
+    return null;
+}
+
+fn clearOverlay(lines: usize) void {
+    var buf: [16]u8 = undefined;
+    writeAll("\r\n\x1b[J");
+    const up = std.fmt.bufPrint(&buf, "\x1b[{d}A", .{lines}) catch return;
+    writeAll(up);
+    writeAll("\r\x1b[K");
 }
 
 fn writeAll(data: []const u8) void {

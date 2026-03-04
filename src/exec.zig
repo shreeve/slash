@@ -63,6 +63,9 @@ pub const Shell = struct {
     // Key bindings (key combo → command string)
     key_bindings: std.StringHashMap([]const u8),
 
+    // History database (set by REPL)
+    history_db: ?@import("history.zig").Db = null,
+
     // Job control state
     tty_fd: posix.fd_t = posix.STDIN_FILENO,
     shell_pgid: posix.pid_t = 0,
@@ -1219,6 +1222,8 @@ pub const Shell = struct {
         if (std.mem.eql(u8, name, "pwd")) { self.builtinPwd(); return true; }
         if (std.mem.eql(u8, name, "jobs")) { self.builtinJobs(); return true; }
         if (std.mem.eql(u8, name, "dirs")) { self.builtinDirs(); return true; }
+        if (std.mem.eql(u8, name, "history")) { self.builtinHistory(argv); return true; }
+        if (std.mem.eql(u8, name, "j")) { self.builtinJ(argv); return true; }
         if (std.mem.eql(u8, name, "fg")) { self.builtinFg(argv); return true; }
         if (std.mem.eql(u8, name, "bg")) { self.builtinBg(argv); return true; }
 
@@ -1379,6 +1384,66 @@ pub const Shell = struct {
         self.last_exit = 0;
     }
 
+    fn builtinHistory(self: *Shell, argv: []const []const u8) void {
+        const hdb = self.history_db orelse {
+            std.debug.print("history: database not available\n", .{});
+            self.last_exit = 1;
+            return;
+        };
+        const query = if (argv.len > 1) argv[1] else "";
+        const limit: usize = if (argv.len > 2) std.fmt.parseInt(usize, argv[2], 10) catch 20 else 20;
+        const results = hdb.search(self.allocator, query, limit);
+        for (results) |cmd| std.debug.print("{s}\n", .{cmd});
+        self.last_exit = 0;
+    }
+
+    fn builtinJ(self: *Shell, argv: []const []const u8) void {
+        const HistoryDb = @import("history.zig");
+        const hdb = self.history_db orelse {
+            std.debug.print("j: database not available\n", .{});
+            self.last_exit = 1;
+            return;
+        };
+        const query = if (argv.len > 1) argv[1] else "";
+        const results = hdb.frecency(self.allocator, query, 9);
+        if (results.len == 0) {
+            std.debug.print("j: no matches\n", .{});
+            self.last_exit = 1;
+            return;
+        }
+        if (argv.len > 1) {
+            posix.chdir(results[0].path) catch |err| {
+                std.debug.print("j: {s}: {s}\n", .{ results[0].path, @errorName(err) });
+                self.last_exit = 1;
+                return;
+            };
+            self.recordDir();
+            self.last_exit = 0;
+            return;
+        }
+        for (results, 0..) |r, i| {
+            std.debug.print("{d} {s}\n", .{ i + 1, r.path });
+        }
+        std.debug.print("? ", .{});
+        var input: [1]u8 = undefined;
+        const n = posix.read(posix.STDIN_FILENO, &input) catch { self.last_exit = 0; return; };
+        if (n == 0) { self.last_exit = 0; return; }
+        std.debug.print("\n", .{});
+        if (input[0] >= '1' and input[0] <= '9') {
+            const idx: usize = input[0] - '1';
+            if (idx < results.len) {
+                posix.chdir(results[idx].path) catch |err| {
+                    std.debug.print("j: {s}: {s}\n", .{ results[idx].path, @errorName(err) });
+                    self.last_exit = 1;
+                    return;
+                };
+                self.recordDir();
+            }
+        }
+        _ = HistoryDb;
+        self.last_exit = 0;
+    }
+
     fn builtinType(self: *Shell, argv: []const []const u8) void {
         for (argv[1..]) |name| {
             if (self.user_cmds.contains(name)) {
@@ -1394,7 +1459,7 @@ pub const Shell = struct {
 
     fn isBuiltin(name: []const u8) bool {
         if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) return true;
-        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "jobs", "fg", "bg", "dirs", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
+        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "jobs", "fg", "bg", "dirs", "history", "j", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
         for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
         }

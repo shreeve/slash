@@ -4,6 +4,14 @@ const std = @import("std");
 
 const version = "0.1.0";
 
+const sqlite_cflags = &[_][]const u8{
+    "-std=c99",
+    "-DNDEBUG",
+    "-DSQLITE_THREADSAFE=0",
+    "-DSQLITE_OMIT_LOAD_EXTENSION",
+    "-fno-sanitize=undefined",
+};
+
 const regex_cflags = &[_][]const u8{
     "-std=gnu99",
     "-DNDEBUG",
@@ -55,6 +63,12 @@ pub fn build(b: *std.Build) void {
         .files = regex_sources,
         .flags = regex_cflags,
     });
+    main_mod.addIncludePath(b.path("sqlite"));
+    main_mod.addCSourceFiles(.{
+        .root = b.path("sqlite"),
+        .files = &.{"sqlite3.c"},
+        .flags = sqlite_cflags,
+    });
 
     const exe = b.addExecutable(.{
         .name = "slash",
@@ -92,6 +106,12 @@ pub fn build(b: *std.Build) void {
         .root = b.path("regex"),
         .files = regex_sources,
         .flags = regex_cflags,
+    });
+    test_mod.addIncludePath(b.path("sqlite"));
+    test_mod.addCSourceFiles(.{
+        .root = b.path("sqlite"),
+        .files = &.{"sqlite3.c"},
+        .flags = sqlite_cflags,
     });
 
     const tests = b.addTest(.{ .root_module = test_mod });

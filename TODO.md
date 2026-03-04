@@ -36,24 +36,22 @@ Features not yet implemented, organized by category and priority.
 - [x] `dirs` — directory MRU picker, numbered 1-9, type digit to jump
 - [x] `key` bindings — `key esc+= dirs`, ESC+char dispatch from readline
 
-## History & Navigation (Phase A)
+## History & Navigation
 
 SQLite foundation — one database powers history, search, and navigation.
 
-- [ ] SQLite history — `~/.slash/history.db`, record command, cwd, timestamp, exit_code, duration
-- [ ] List-based `Ctrl+R` — show filtered results as a list (not Bash single-result cycling), arrow keys to navigate, Enter to select
-- [ ] `j` frecency jump — directory ranking by frequency + recency, `j foo` jumps to best match
+- [x] SQLite history — `~/.slash/history.db`, record command, cwd, timestamp, exit_code, duration
+- [x] List-based `Ctrl+R` — overlay search with live filtering, arrow keys, Enter to select
+- [x] `j` frecency jump — directory ranking by frequency + recency from SQLite
+- [x] `history` command — query/filter history
 - [ ] Up-arrow prefix search — typing `git` then `↑` filters history to git commands only
 - [ ] Inline ghost suggestions — show most likely completion in gray, `→` to accept
 - [ ] `history` command — query history (`history top`, `history search docker`)
 - [ ] Command palette (`Ctrl+P`) — unified search across history, dirs, aliases, scripts, git branches; fuzzy ranked; preview panel; providers architecture
 
-## Interactive (Phase B)
+## Final Touches
 
 - [ ] Syntax highlighting — live as you type, using the parser
 - [ ] Multi-line editing — blank-line continuation for indent blocks, `\` continuation at the prompt
-
-## Completion (Phase C)
-
 - [ ] Tab completion engine — context-aware (command, file, variable, flag)
 - [ ] Completion definitions for common commands (git, zig, etc.)
