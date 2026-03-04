@@ -53,4 +53,4 @@ SQLite foundation — one database powers history, search, and navigation.
 ## Final Touches
 
 - [ ] Completion definitions for common commands (git, zig, etc.) — Phase 2
-- [ ] Syntax highlighting — live as you type, using the parser
+- [x] Syntax highlighting — live as you type, lexer-based coloring (keywords blue, strings green, variables cyan, operators yellow, flags cyan, regex red, comments gray)

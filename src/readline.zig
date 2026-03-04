@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const posix = std.posix;
+const parser = @import("parser.zig");
+const TokenCat = parser.TokenCat;
 
 const STDIN = posix.STDIN_FILENO;
 const STDOUT = posix.STDOUT_FILENO;
@@ -556,7 +558,7 @@ fn updateGhost(line: []const u8) void {
 fn refreshLine(line: []const u8, cursor: usize) void {
     writeAll("\r\x1b[K");
     writeAll(active_prompt);
-    writeAll(line);
+    writeColorized(line);
     if (ghost_text.len > 0 and cursor == line.len) {
         writeAll("\x1b[90m");
         writeAll(ghost_text);
@@ -566,6 +568,64 @@ fn refreshLine(line: []const u8, cursor: usize) void {
     var move_buf: [32]u8 = undefined;
     const move = std.fmt.bufPrint(&move_buf, "\r\x1b[{d}C", .{total}) catch return;
     writeAll(move);
+}
+
+const keywords = [_][]const u8{ "if", "unless", "else", "for", "in", "while", "until", "try", "and", "or", "not", "xor", "cmd", "key", "set", "test", "source", "exit", "exec", "break", "continue", "shift" };
+
+fn isKeyword(word: []const u8) bool {
+    for (keywords) |kw| {
+        if (std.mem.eql(u8, word, kw)) return true;
+    }
+    return false;
+}
+
+fn tokenColor(cat: TokenCat, text: []const u8) ?[]const u8 {
+    return switch (cat) {
+        .string_sq, .string_dq => "\x1b[32m",
+        .variable, .var_braced => "\x1b[36m",
+        .integer, .real => "\x1b[35m",
+        .flag => "\x1b[96m",
+        .pipe, .pipe_err, .and_sym, .or_sym, .semi, .bg => "\x1b[33m",
+        .redir_out, .redir_append, .redir_in, .redir_err, .redir_err_app, .redir_both, .redir_dup, .herestring => "\x1b[33m",
+        .assign, .eq, .ne, .le, .ge, .match, .nomatch => "\x1b[33m",
+        .regex => "\x1b[31m",
+        .comment => "\x1b[90m",
+        .not_sym => "\x1b[33m",
+        .dollar_paren, .proc_sub_in, .proc_sub_out => "\x1b[36m",
+        .err => "\x1b[31;4m",
+        .ident => if (isKeyword(text)) "\x1b[34m" else null,
+        else => null,
+    };
+}
+
+fn writeColorized(line: []const u8) void {
+    if (line.len == 0) return;
+
+    var lex = parser.BaseLexer.init(line);
+    var pos: usize = 0;
+
+    while (true) {
+        const tok = lex.matchRules();
+        const tok_start: usize = tok.pos;
+        const tok_end: usize = @min(tok_start + tok.len, line.len);
+
+        if (tok_start > pos) writeAll(line[pos..tok_start]);
+
+        if (tok.cat == .eof) {
+            if (pos < line.len) writeAll(line[pos..]);
+            break;
+        }
+
+        const text = line[tok_start..tok_end];
+        if (tokenColor(tok.cat, text)) |color| {
+            writeAll(color);
+            writeAll(text);
+            writeAll("\x1b[0m");
+        } else {
+            writeAll(text);
+        }
+        pos = tok_end;
+    }
 }
 
 fn historySearch(kh: KeyHandler) ?[]const u8 {
