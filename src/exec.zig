@@ -201,7 +201,7 @@ pub const Shell = struct {
                                 continue;
                             }
                             if (isHeredocTag(t)) {
-                                self.collectHeredocRedirect(items[1..], source, &redir_list);
+                                self.collectHeredocRedirect(t, items[1..], source, &redir_list);
                                 continue;
                             }
                             if (t == .procsub_in or t == .procsub_out) {
@@ -844,7 +844,9 @@ pub const Shell = struct {
     fn builtinPwd(self: *Shell) void {
         var buf: [4096]u8 = undefined;
         const cwd = posix.getcwd(&buf) catch { self.last_exit = 1; return; };
-        std.debug.print("{s}\n", .{cwd});
+        const stdout = std.fs.File.stdout();
+        stdout.writeAll(cwd) catch {};
+        stdout.writeAll("\n") catch {};
         self.last_exit = 0;
     }
 
@@ -981,10 +983,13 @@ pub const Shell = struct {
         };
     }
 
-    fn collectHeredocRedirect(self: *Shell, args: []const Sexp, source: []const u8, list: *std.ArrayList(Redirect)) void {
+    fn collectHeredocRedirect(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, list: *std.ArrayList(Redirect)) void {
         var content: std.ArrayListUnmanaged(u8) = .{};
-        for (args, 0..) |body, i| {
-            if (i > 0) content.append(self.allocator, '\n') catch {};
+        const start: usize = if (tag == .heredoc_lang and args.len > 0) 1 else 0;
+        var first = true;
+        for (args[start..]) |body| {
+            if (!first) content.append(self.allocator, '\n') catch {};
+            first = false;
             const text = self.sexpToStr(body, source) orelse continue;
             content.appendSlice(self.allocator, text) catch {};
         }

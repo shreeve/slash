@@ -19,13 +19,15 @@ check() {
     local expect_exec="${4:-}"
     local actual
 
-    # Test 1: s-expression output
-    actual=$("$SLASH" -s -c "$input" 2>&1)
-    if [ "$actual" = "$expect_sexp" ]; then
-        PASS=$((PASS + 1))
-    else
-        FAIL=$((FAIL + 1))
-        ERRORS="${ERRORS}\n  FAIL: ${label} [sexp]\n    input:  ${input}\n    expect: ${expect_sexp}\n    actual: ${actual}\n"
+    # Test 1: s-expression output (skip if expect is empty)
+    if [ -n "$expect_sexp" ]; then
+        actual=$("$SLASH" -s -c "$input" 2>&1)
+        if [ "$actual" = "$expect_sexp" ]; then
+            PASS=$((PASS + 1))
+        else
+            FAIL=$((FAIL + 1))
+            ERRORS="${ERRORS}\n  FAIL: ${label} [sexp]\n    input:  ${input}\n    expect: ${expect_sexp}\n    actual: ${actual}\n"
+        fi
     fi
 
     # Test 2: execution output (if expected output provided)
@@ -420,6 +422,150 @@ check_script "exec test -f false" \
 
 # Cleanup redirect test file
 rm -f /tmp/_slash_redir_test.txt
+
+# ==========================================================================
+# EXECUTION: ENVIRONMENT & VARIABLES
+# ==========================================================================
+
+check_script "exec echo USER" \
+    "$(printf 'echo $USER\n')" \
+    "$USER"
+
+check_script "exec echo HOME" \
+    "$(printf 'echo $HOME\n')" \
+    "$HOME"
+
+check_script "exec herestring var" \
+    "$(printf 'cat <<< $HOME\n')" \
+    "$HOME"
+
+check_script "exec nested capture" \
+    "$(printf 'echo $(echo $(echo deep))\n')" \
+    "deep"
+
+# ==========================================================================
+# EXECUTION: FLOAT MATH
+# ==========================================================================
+
+check_script "exec float add int" \
+    "$(printf '= 1.5 + 2.5\n')" \
+    "4"
+
+check_script "exec float div" \
+    "$(printf '= 22 / 7\n')" \
+    "3.1428571429"
+
+check_script "exec float precision" \
+    "$(printf '= 1 / 3\n')" \
+    "0.3333333333"
+
+check_script "exec double neg" \
+    "$(printf '= -(-3)\n')" \
+    "3"
+
+check_script "exec modulo" \
+    "$(printf '= 10 %% 3\n')" \
+    "1"
+
+# ==========================================================================
+# EXECUTION: NO-SPACE MATH
+# ==========================================================================
+
+# No-space math uses retryMathSpaced which only works in -c/REPL mode
+check "exec nospace power"      "=2**8"       "(display (pow 2 8))"          "256"
+check "exec nospace div"        "=22/7"       ""                             "3.1428571429"
+check "exec nospace complex"    "=(1+2)*(3+4)" ""                            "21"
+check "exec nospace caret"      "=2^10"       ""                             "1024"
+
+# ==========================================================================
+# EXECUTION: REDIRECTIONS (advanced)
+# ==========================================================================
+
+check_script "exec redirect append" \
+    "$(printf 'echo line1 > /tmp/_sl_app.txt\necho line2 >> /tmp/_sl_app.txt\ncat /tmp/_sl_app.txt\n')" \
+    "$(printf 'line1\nline2')"
+
+check_script "exec redirect stderr" \
+    "$(printf 'echo hello 2> /tmp/_sl_err.txt\necho ok\n')" \
+    "$(printf 'hello\nok')"
+
+check_script "exec redirect both" \
+    "$(printf 'echo hello &> /tmp/_sl_both.txt\ncat /tmp/_sl_both.txt\n')" \
+    "hello"
+
+rm -f /tmp/_sl_app.txt /tmp/_sl_err.txt /tmp/_sl_both.txt
+
+# ==========================================================================
+# EXECUTION: SUBSHELL ISOLATION
+# ==========================================================================
+
+check_script "exec subshell cwd" \
+    "$(printf '(cd /tmp)\npwd\n')" \
+    "$(pwd)"
+
+# ==========================================================================
+# EXECUTION: BOOLEAN SHORT-CIRCUIT
+# ==========================================================================
+
+check_script "exec true && echo" \
+    "$(printf 'true && echo yes\n')" \
+    "yes"
+
+check_script "exec false && echo" \
+    "$(printf 'false && echo yes\n')" \
+    ""
+
+check_script "exec true || echo" \
+    "$(printf 'true || echo no\n')" \
+    ""
+
+check_script "exec false || echo" \
+    "$(printf 'false || echo fallback\n')" \
+    "fallback"
+
+# ==========================================================================
+# EXECUTION: USER COMMANDS
+# ==========================================================================
+
+check_script "exec cmd define + run" \
+    "$(printf 'cmd g echo hello\ng\n')" \
+    "hello"
+
+# ==========================================================================
+# EXECUTION: BOOLEAN CONDITIONS
+# ==========================================================================
+
+check_script "exec test and test" \
+    "$(printf 'if test -d /tmp and test -f build.zig { echo both }\n')" \
+    "both"
+
+# ==========================================================================
+# EXECUTION: FOR LOOP (multi-item)
+# ==========================================================================
+
+check_script "exec for 5 items" \
+    "$(printf 'for x in a b c d e { echo $x }\n')" \
+    "$(printf 'a\nb\nc\nd\ne')"
+
+# ==========================================================================
+# EXECUTION: HEREDOC EDGE CASES
+# ==========================================================================
+
+check_script "heredoc empty body" \
+    "$(printf "cat '''\n    '''\n")" \
+    ""
+
+check_script "heredoc lang tag" \
+    "$(printf 'cat ```sql\n    SELECT 1\n    ```\n')" \
+    "SELECT 1"
+
+# ==========================================================================
+# EXECUTION: PROCESS SUBSTITUTION WITH PIPELINE
+# ==========================================================================
+
+check_script "exec procsub pipeline" \
+    "$(printf 'cat <(echo hello | tr h H)\n')" \
+    "Hello"
 
 # ==========================================================================
 # RESULTS
