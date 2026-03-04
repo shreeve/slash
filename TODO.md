@@ -24,6 +24,8 @@ Features not yet implemented, organized by category and priority.
 - [x] Rich prompt — PROMPT variable, format escapes (%t %u %h %d %g %e %D %$ %fg %bg %> %r), hex colors, git branch via .git/HEAD, command timing, ~/.slashrc
 - [x] `cmd` with params — `cmd greet(name) echo hello $name`, LPAREN_TIGHT token, UserCmd struct with owned source
 - [x] Indent blocks — INDENT/OUTDENT tokens from lexer, `block = INDENT line* OUTDENT`, works for cmd/if/for/while, nested
+- [x] `exec` (replace process) — execvpeZ without fork, replaces current process
+- [x] Job control — process groups (setpgid), terminal ownership (tcsetpgrp), job table, WUNTRACED for Ctrl+Z, fg/bg/jobs builtins, background reaping
 
 ## Grammar Engine
 
@@ -35,15 +37,7 @@ Features not yet implemented, organized by category and priority.
 - [ ] `shift` — needs positional argument tracking ($1, $2, etc.)
 - [ ] Positional args `$1`-`$9`, `$*`, `$#` — arg passing to user commands and scripts
 - [ ] String interpolation in `"""` heredocs — `$var` expansion inside body text
-- [x] `exec` (replace process) — execvpeZ without fork, replaces current process
 - [ ] Glob expansion — pre-parse filesystem matching (*.zig, file[0-9], {a,b}.txt)
-
-## Job Control (Phase C)
-
-- [ ] Process groups / `setpgid` — every pipeline gets its own process group
-- [ ] Terminal ownership / `tcsetpgrp` — transfer terminal to foreground job
-- [ ] Job table — track background/stopped jobs
-- [ ] `fg` / `bg` / `jobs` builtins
 
 ## Interactive (Phase D)
 

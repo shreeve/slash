@@ -8,6 +8,10 @@
 const std = @import("std");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
+const libc = @cImport({
+    @cInclude("unistd.h");
+    @cInclude("sys/wait.h");
+});
 
 const parser = @import("parser.zig");
 const Sexp = parser.Sexp;
@@ -22,6 +26,24 @@ const UserCmd = struct {
     source: []const u8,
 };
 
+// =========================================================================
+// JOB CONTROL
+// =========================================================================
+
+pub const JobState = enum { running, stopped, done };
+
+pub const Job = struct {
+    id: u16,
+    pgid: posix.pid_t,
+    state: JobState,
+    exit_code: u8,
+    command: []const u8,
+    pids: [8]posix.pid_t = .{0} ** 8,
+    pid_count: u8 = 0,
+};
+
+const MAX_JOBS = 64;
+
 pub const Shell = struct {
     allocator: Allocator,
     vars: std.StringHashMap([]const u8),
@@ -29,6 +51,13 @@ pub const Shell = struct {
     flow: Flow = .normal,
     user_cmds: std.StringHashMap(UserCmd),
     options: std.StringHashMap([]const u8),
+
+    // Job control state
+    tty_fd: posix.fd_t = posix.STDIN_FILENO,
+    shell_pgid: posix.pid_t = 0,
+    interactive: bool = false,
+    jobs: [MAX_JOBS]?Job = .{null} ** MAX_JOBS,
+    next_job_id: u16 = 1,
 
     pub fn init(alloc: Allocator) Shell {
         return .{
@@ -39,10 +68,135 @@ pub const Shell = struct {
         };
     }
 
+    pub fn initInteractive(self: *Shell) void {
+        self.tty_fd = posix.STDIN_FILENO;
+        self.shell_pgid = libc.getpid();
+        self.interactive = true;
+        _ = libc.setpgid(0, self.shell_pgid);
+        _ = libc.tcsetpgrp(self.tty_fd, self.shell_pgid);
+    }
+
     pub fn deinit(self: *Shell) void {
         self.vars.deinit();
         self.user_cmds.deinit();
         self.options.deinit();
+    }
+
+    // =========================================================================
+    // JOB TABLE MANAGEMENT
+    // =========================================================================
+
+    fn addJob(self: *Shell, pgid: posix.pid_t, state: JobState, command: []const u8, pids: []const posix.pid_t) u16 {
+        const id = self.next_job_id;
+        self.next_job_id += 1;
+        for (&self.jobs) |*slot| {
+            if (slot.* == null) {
+                var job = Job{ .id = id, .pgid = pgid, .state = state, .exit_code = 0, .command = command };
+                for (pids, 0..) |pid, i| {
+                    if (i >= 8) break;
+                    job.pids[i] = pid;
+                }
+                job.pid_count = @intCast(@min(pids.len, 8));
+                slot.* = job;
+                return id;
+            }
+        }
+        return 0;
+    }
+
+    fn findJobByPgid(self: *Shell, pgid: posix.pid_t) ?*Job {
+        for (&self.jobs) |*slot| {
+            if (slot.*) |*job| {
+                if (job.pgid == pgid) return job;
+            }
+        }
+        return null;
+    }
+
+    fn findJobById(self: *Shell, id: u16) ?*Job {
+        for (&self.jobs) |*slot| {
+            if (slot.*) |*job| {
+                if (job.id == id) return job;
+            }
+        }
+        return null;
+    }
+
+    fn lastJob(self: *Shell) ?*Job {
+        var best: ?*Job = null;
+        for (&self.jobs) |*slot| {
+            if (slot.*) |*job| {
+                if (best == null or job.id > best.?.id) best = job;
+            }
+        }
+        return best;
+    }
+
+    fn removeJob(self: *Shell, id: u16) void {
+        for (&self.jobs) |*slot| {
+            if (slot.*) |job| {
+                if (job.id == id) { slot.* = null; return; }
+            }
+        }
+    }
+
+    fn reclaimTerminal(self: *Shell) void {
+        if (self.interactive) _ = libc.tcsetpgrp(self.tty_fd, self.shell_pgid);
+    }
+
+    pub fn reapAndReport(self: *Shell) void {
+        // Reap any finished background children (use raw C waitpid to handle ECHILD gracefully)
+        while (true) {
+            var status: i32 = 0;
+            const pid = libc.waitpid(-1, &status, 1);
+            if (pid <= 0) break;
+            const result_status: u32 = @bitCast(status);
+            for (&self.jobs) |*slot| {
+                if (slot.*) |*job| {
+                    if (job.state == .running) {
+                        for (job.pids[0..job.pid_count]) |jpid| {
+                            if (jpid == pid) {
+                                job.state = .done;
+                                job.exit_code = statusToExit(result_status);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Report and remove done jobs
+        for (&self.jobs) |*slot| {
+            if (slot.*) |*job| {
+                if (job.state == .done) {
+                    std.debug.print("[{d}]  Done\t\t{s}\n", .{ job.id, job.command });
+                    slot.* = null;
+                }
+            }
+        }
+    }
+
+    fn waitForForegroundJob(self: *Shell, pgid: posix.pid_t, pid_count: u8) void {
+        var remaining = pid_count;
+        while (remaining > 0) {
+            const result = posix.waitpid(-pgid, posix.W.UNTRACED);
+            if (result.pid <= 0) break;
+
+            if (posix.W.IFSTOPPED(result.status)) {
+                if (self.findJobByPgid(pgid)) |job| {
+                    job.state = .stopped;
+                    std.debug.print("\n[{d}]  Stopped\t\t{s}\n", .{ job.id, job.command });
+                }
+                self.reclaimTerminal();
+                return;
+            }
+
+            remaining -= 1;
+            if (remaining == 0) {
+                self.last_exit = statusToExit(result.status);
+            }
+        }
+        self.reclaimTerminal();
     }
 
     // =========================================================================
@@ -379,6 +533,7 @@ pub const Shell = struct {
     }
 
     fn forkExecWithRedirects(self: *Shell, argv: []const []const u8, redirs: []const Redirect) void {
+        const cmd_text = self.allocator.dupe(u8, argv[0]) catch argv[0];
         const pid = posix.fork() catch {
             std.debug.print("slash: fork failed\n", .{});
             self.last_exit = 1;
@@ -386,6 +541,10 @@ pub const Shell = struct {
         };
 
         if (pid == 0) {
+            if (self.interactive) {
+                _ = libc.setpgid(0, 0);
+                _ = libc.tcsetpgrp(self.tty_fd, libc.getpid());
+            }
             resetChildSignals();
             applyRedirects(self.allocator, redirs);
             const argv_z = toExecArgs(self.allocator, argv) catch posix.exit(127);
@@ -395,8 +554,19 @@ pub const Shell = struct {
             posix.exit(127);
         }
 
-        const result = posix.waitpid(pid, 0);
-        self.last_exit = statusToExit(result.status);
+        if (self.interactive) {
+            _ = libc.setpgid(pid, pid);
+            const pids = [_]posix.pid_t{pid};
+            const job_id = self.addJob(pid, .running, cmd_text, &pids);
+            _ = libc.tcsetpgrp(self.tty_fd, pid);
+            self.waitForForegroundJob(pid, 1);
+            if (self.findJobById(job_id)) |job| {
+                if (job.state != .stopped) self.removeJob(job_id);
+            }
+        } else {
+            const result = posix.waitpid(pid, 0);
+            self.last_exit = statusToExit(result.status);
+        }
     }
 
     // =========================================================================
@@ -638,16 +808,22 @@ pub const Shell = struct {
 
     fn evalBg(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len == 0) return;
+        const cmd_text = self.allocator.dupe(u8, source[0..@min(source.len, 80)]) catch "";
         const pid = posix.fork() catch {
             std.debug.print("slash: fork failed\n", .{});
             self.last_exit = 1;
             return;
         };
         if (pid == 0) {
+            if (self.interactive) _ = libc.setpgid(0, 0);
+            resetChildSignals();
             self.eval(args[0], source);
             posix.exit(self.last_exit);
         }
-        std.debug.print("[bg] {d}\n", .{pid});
+        if (self.interactive) _ = libc.setpgid(pid, pid);
+        const pids = [_]posix.pid_t{pid};
+        const job_id = self.addJob(pid, .running, cmd_text, &pids);
+        std.debug.print("[{d}] {d}\n", .{ job_id, pid });
         self.last_exit = 0;
         if (args.len >= 2) self.eval(args[1], source);
     }
@@ -676,27 +852,47 @@ pub const Shell = struct {
 
         const pid1 = posix.fork() catch { self.last_exit = 1; return; };
         if (pid1 == 0) {
+            if (self.interactive) _ = libc.setpgid(0, 0);
             posix.close(pipe_fds[0]);
             posix.dup2(pipe_fds[1], posix.STDOUT_FILENO) catch posix.exit(1);
             posix.close(pipe_fds[1]);
+            resetChildSignals();
             self.eval(args[0], source);
             posix.exit(self.last_exit);
         }
 
+        if (self.interactive) _ = libc.setpgid(pid1, pid1);
+
         const pid2 = posix.fork() catch { self.last_exit = 1; return; };
         if (pid2 == 0) {
+            if (self.interactive) _ = libc.setpgid(0, pid1);
             posix.close(pipe_fds[1]);
             posix.dup2(pipe_fds[0], posix.STDIN_FILENO) catch posix.exit(1);
             posix.close(pipe_fds[0]);
+            resetChildSignals();
             self.eval(args[1], source);
             posix.exit(self.last_exit);
         }
 
+        if (self.interactive) _ = libc.setpgid(pid2, pid1);
+
         posix.close(pipe_fds[0]);
         posix.close(pipe_fds[1]);
-        _ = posix.waitpid(pid1, 0);
-        const result = posix.waitpid(pid2, 0);
-        self.last_exit = statusToExit(result.status);
+
+        if (self.interactive) {
+            const pids = [_]posix.pid_t{ pid1, pid2 };
+            const cmd_text = self.allocator.dupe(u8, source[0..@min(source.len, 80)]) catch "";
+            const job_id = self.addJob(pid1, .running, cmd_text, &pids);
+            _ = libc.tcsetpgrp(self.tty_fd, pid1);
+            self.waitForForegroundJob(pid1, 2);
+            if (self.findJobById(job_id)) |job| {
+                if (job.state != .stopped) self.removeJob(job_id);
+            }
+        } else {
+            _ = posix.waitpid(pid1, 0);
+            const result = posix.waitpid(pid2, 0);
+            self.last_exit = statusToExit(result.status);
+        }
     }
 
     // =========================================================================
@@ -925,6 +1121,9 @@ pub const Shell = struct {
         if (std.mem.eql(u8, name, "false")) { self.last_exit = 1; return true; }
         if (std.mem.eql(u8, name, "type")) { self.builtinType(argv); return true; }
         if (std.mem.eql(u8, name, "pwd")) { self.builtinPwd(); return true; }
+        if (std.mem.eql(u8, name, "jobs")) { self.builtinJobs(); return true; }
+        if (std.mem.eql(u8, name, "fg")) { self.builtinFg(argv); return true; }
+        if (std.mem.eql(u8, name, "bg")) { self.builtinBg(argv); return true; }
 
         return false;
     }
@@ -958,6 +1157,76 @@ pub const Shell = struct {
         self.last_exit = 0;
     }
 
+    fn builtinJobs(self: *Shell) void {
+        for (&self.jobs) |*slot| {
+            if (slot.*) |job| {
+                const state_str = switch (job.state) {
+                    .running => "Running",
+                    .stopped => "Stopped",
+                    .done => "Done",
+                };
+                std.debug.print("[{d}]  {s}\t\t{s}\n", .{ job.id, state_str, job.command });
+            }
+        }
+        self.last_exit = 0;
+    }
+
+    fn builtinFg(self: *Shell, argv: []const []const u8) void {
+        const job = if (argv.len > 1) blk: {
+            const id = std.fmt.parseInt(u16, argv[1], 10) catch {
+                std.debug.print("fg: {s}: no such job\n", .{argv[1]});
+                self.last_exit = 1;
+                return;
+            };
+            break :blk self.findJobById(id);
+        } else self.lastJob();
+
+        if (job == null) {
+            std.debug.print("fg: no current job\n", .{});
+            self.last_exit = 1;
+            return;
+        }
+        const j = job.?;
+        std.debug.print("{s}\n", .{j.command});
+
+        if (self.interactive) _ = libc.tcsetpgrp(self.tty_fd, j.pgid);
+        if (j.state == .stopped) {
+            j.state = .running;
+            std.posix.kill(-j.pgid, std.posix.SIG.CONT) catch {};
+        }
+        self.waitForForegroundJob(j.pgid, j.pid_count);
+        if (j.state != .stopped) self.removeJob(j.id);
+    }
+
+    fn builtinBg(self: *Shell, argv: []const []const u8) void {
+        const job = if (argv.len > 1) blk: {
+            const id = std.fmt.parseInt(u16, argv[1], 10) catch {
+                std.debug.print("bg: {s}: no such job\n", .{argv[1]});
+                self.last_exit = 1;
+                return;
+            };
+            break :blk self.findJobById(id);
+        } else blk: {
+            for (&self.jobs) |*slot| {
+                if (slot.*) |*j| {
+                    if (j.state == .stopped) break :blk j;
+                }
+            }
+            break :blk null;
+        };
+
+        if (job == null) {
+            std.debug.print("bg: no current job\n", .{});
+            self.last_exit = 1;
+            return;
+        }
+        const j = job.?;
+        j.state = .running;
+        std.debug.print("[{d}]  {s} &\n", .{ j.id, j.command });
+        std.posix.kill(-j.pgid, std.posix.SIG.CONT) catch {};
+        self.last_exit = 0;
+    }
+
     fn builtinType(self: *Shell, argv: []const []const u8) void {
         for (argv[1..]) |name| {
             if (self.user_cmds.contains(name)) {
@@ -973,7 +1242,7 @@ pub const Shell = struct {
 
     fn isBuiltin(name: []const u8) bool {
         if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) return true;
-        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
+        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "jobs", "fg", "bg", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
         for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
         }

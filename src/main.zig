@@ -123,6 +123,7 @@ pub fn main() !void {
 
     var ev = exec.Shell.init(alloc);
     defer ev.deinit();
+    ev.initInteractive();
     try runRepl(alloc, &ev);
 }
 
@@ -141,6 +142,7 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
     var last_duration_ms: u64 = 0;
 
     while (true) {
+        ev.reapAndReport();
         const fmt = ev.vars.get("PROMPT") orelse prompt.default_fmt;
         const ctx = prompt.Context{ .last_exit = ev.last_exit, .duration_ms = last_duration_ms };
         const ps = prompt.render(fmt, ctx);
