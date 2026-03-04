@@ -723,6 +723,37 @@ pub const Shell = struct {
     // DISPLAY (= expr)
     // =========================================================================
 
+    pub fn tryEvalMath(self: *Shell, source: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trimLeft(u8, source, " \t");
+        if (trimmed.len < 2 or trimmed[0] != '=') return null;
+        // Try parsing as "= expr"
+        var p = Parser.init(self.allocator, source);
+        defer p.deinit();
+        const sexp = p.parseOneline() catch {
+            const spaced = spaceMathOps(self.allocator, std.mem.trimLeft(u8, trimmed[1..], " \t")) orelse return null;
+            defer self.allocator.free(spaced);
+            const wrapped = std.fmt.allocPrint(self.allocator, "= {s}", .{spaced}) catch return null;
+            defer self.allocator.free(wrapped);
+            var p2 = Parser.init(self.allocator, wrapped);
+            defer p2.deinit();
+            const sexp2 = p2.parseOneline() catch return null;
+            return switch (sexp2) {
+                .list => |items| if (items.len >= 2 and items[0] == .tag and items[0].tag == .display)
+                    formatFloat(self.allocator, self.evalMath(items[1], wrapped))
+                else
+                    null,
+                else => null,
+            };
+        };
+        return switch (sexp) {
+            .list => |items| if (items.len >= 2 and items[0] == .tag and items[0].tag == .display)
+                formatFloat(self.allocator, self.evalMath(items[1], source))
+            else
+                null,
+            else => null,
+        };
+    }
+
     fn evalDisplay(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
         const val = self.evalMath(args[0], source);

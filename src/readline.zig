@@ -51,6 +51,7 @@ pub const KeyHandler = struct {
     search: ?*const fn (alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 = null,
     suggest: ?*const fn (prefix: []const u8) ?[]const u8 = null,
     palette: ?*const fn (alloc: std.mem.Allocator, query: []const u8) []PaletteResult = null,
+    eval_math: ?*const fn (expr: []const u8) ?[]const u8 = null,
 };
 
 var key_handler: ?KeyHandler = null;
@@ -559,7 +560,9 @@ fn refreshLine(line: []const u8, cursor: usize) void {
     writeAll("\r\x1b[K");
     writeAll(active_prompt);
     writeColorized(line);
-    if (ghost_text.len > 0 and cursor == line.len) {
+    // Inline math preview: show result for lines starting with =
+    const math_shown = showMathPreview(line);
+    if (!math_shown and ghost_text.len > 0 and cursor == line.len) {
         writeAll("\x1b[90m");
         writeAll(ghost_text);
         writeAll("\x1b[0m");
@@ -568,6 +571,26 @@ fn refreshLine(line: []const u8, cursor: usize) void {
     var move_buf: [32]u8 = undefined;
     const move = std.fmt.bufPrint(&move_buf, "\r\x1b[{d}C", .{total}) catch return;
     writeAll(move);
+}
+
+fn showMathPreview(line: []const u8) bool {
+    if (line.len < 2) return false;
+    const trimmed = std.mem.trimLeft(u8, line, " \t");
+    if (trimmed.len < 2 or trimmed[0] != '=') return false;
+    // Must have something after =
+    const expr = std.mem.trimLeft(u8, trimmed[1..], " \t");
+    if (expr.len == 0) return false;
+    if (key_handler) |kh| {
+        if (kh.eval_math) |eval_fn| {
+            if (eval_fn(line)) |result| {
+                writeAll("  \x1b[90m= ");
+                writeAll(result);
+                writeAll("\x1b[0m");
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 const keywords = [_][]const u8{ "if", "unless", "else", "for", "in", "while", "until", "try", "and", "or", "not", "xor", "cmd", "key", "set", "test", "source", "exit", "exec", "break", "continue", "shift" };

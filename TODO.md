@@ -49,8 +49,8 @@ SQLite foundation — one database powers history, search, and navigation.
 - [x] Command palette (`Ctrl+P`) — unified search across history, dirs, user commands; typed results; overlay UI
 - [x] Multi-line editing — blank-line continuation for indent blocks, `\` continuation, `...` prompt
 - [x] Tab completion — context-aware: files/dirs, commands ($PATH + builtins), variables ($VAR), common prefix on multiple matches
+- [x] Syntax highlighting — live as you type, lexer-based coloring (keywords blue, strings green, variables cyan, operators yellow, flags cyan, regex red, comments gray)
 
 ## Final Touches
 
 - [ ] Completion definitions for common commands (git, zig, etc.) — Phase 2
-- [x] Syntax highlighting — live as you type, lexer-based coloring (keywords blue, strings green, variables cyan, operators yellow, flags cyan, regex red, comments gray)
