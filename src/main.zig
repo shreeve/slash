@@ -13,6 +13,7 @@
 //!   -c CMD             Execute command string
 
 const std = @import("std");
+const posix = std.posix;
 const build_options = @import("build_options");
 const exec = @import("exec.zig");
 
@@ -30,6 +31,8 @@ const version = build_options.version;
 // =============================================================================
 
 pub fn main() !void {
+    setupSignals();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
@@ -194,6 +197,23 @@ fn dumpSexp(alloc: std.mem.Allocator, source: []const u8, mode: ParseMode) void 
     result.write(source, w) catch {};
     w.writeAll("\n") catch {};
     w.flush() catch {};
+}
+
+// =============================================================================
+// SIGNALS
+// =============================================================================
+
+fn setupSignals() void {
+    const ign = posix.Sigaction{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.INT, &ign, null);
+    posix.sigaction(posix.SIG.QUIT, &ign, null);
+    posix.sigaction(posix.SIG.TSTP, &ign, null);
+    posix.sigaction(posix.SIG.TTOU, &ign, null);
+    posix.sigaction(posix.SIG.TTIN, &ign, null);
 }
 
 // =============================================================================

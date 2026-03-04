@@ -14,10 +14,13 @@ const Sexp = parser.Sexp;
 const Tag = parser.Tag;
 const Parser = parser.Parser;
 
+const Flow = enum { normal, break_loop, continue_loop };
+
 pub const Shell = struct {
     allocator: Allocator,
     vars: std.StringHashMap([]const u8),
     last_exit: u8 = 0,
+    flow: Flow = .normal,
     user_cmds: std.StringHashMap(Sexp),
     options: std.StringHashMap([]const u8),
 
@@ -129,6 +132,8 @@ pub const Shell = struct {
             .key_del => { self.last_exit = 0; },
             .eq, .ne, .lt, .gt, .le, .ge, .match, .nomatch => self.evalComparison(tag, args, source),
             .shift => { self.last_exit = 0; },
+            .@"break" => { self.flow = .break_loop; self.last_exit = 0; },
+            .@"continue" => { self.flow = .continue_loop; self.last_exit = 0; },
             else => self.dispatchKeyword(tag, args, source),
         }
     }
@@ -142,7 +147,6 @@ pub const Shell = struct {
         if (std.mem.eql(u8, tag_name, "else")) { if (args.len >= 1) self.eval(args[0], source); return; }
         if (std.mem.eql(u8, tag_name, "test")) return self.evalTest(args, source);
         if (std.mem.eql(u8, tag_name, "set")) return self.evalSet(args, source);
-        if (std.mem.eql(u8, tag_name, "break") or std.mem.eql(u8, tag_name, "continue")) { self.last_exit = 0; return; }
         std.debug.print("slash: unhandled tag: {s}\n", .{tag_name});
         self.last_exit = 1;
     }
@@ -248,6 +252,33 @@ pub const Shell = struct {
             return;
         }
 
+        // Auto-cd: if command is a directory path, cd to it
+        if (argv.len == 1 and !has_redirs) {
+            const name = argv[0];
+            if (name.len > 0 and (name[0] == '/' or name[0] == '.' or name[0] == '~')) {
+                const pathZ = self.allocator.dupeZ(u8, name) catch {
+                    self.forkExecWithRedirects(argv, redirs);
+                    self.cleanupProcSubs(procsub_fds.items);
+                    return;
+                };
+                defer self.allocator.free(pathZ);
+                const stat = std.fs.cwd().statFile(name) catch {
+                    self.forkExecWithRedirects(argv, redirs);
+                    self.cleanupProcSubs(procsub_fds.items);
+                    return;
+                };
+                if (stat.kind == .directory) {
+                    posix.chdir(pathZ) catch |err| {
+                        std.debug.print("cd: {s}: {s}\n", .{ name, @errorName(err) });
+                        self.last_exit = 1;
+                    };
+                    self.last_exit = 0;
+                    self.cleanupProcSubs(procsub_fds.items);
+                    return;
+                }
+            }
+        }
+
         self.forkExecWithRedirects(argv, redirs);
         self.cleanupProcSubs(procsub_fds.items);
     }
@@ -343,6 +374,7 @@ pub const Shell = struct {
         };
 
         if (pid == 0) {
+            resetChildSignals();
             applyRedirects(self.allocator, redirs);
             const argv_z = toExecArgs(self.allocator, argv) catch posix.exit(127);
             const envp = getEnvP();
@@ -586,7 +618,10 @@ pub const Shell = struct {
     }
 
     fn evalSequence(self: *Shell, args: []const Sexp, source: []const u8) void {
-        for (args) |child| self.eval(child, source);
+        for (args) |child| {
+            self.eval(child, source);
+            if (self.flow != .normal) return;
+        }
     }
 
     fn evalBg(self: *Shell, args: []const Sexp, source: []const u8) void {
@@ -706,6 +741,8 @@ pub const Shell = struct {
                     const val = self.sexpToExpandedStr(item, source);
                     self.vars.put(var_name, val) catch continue;
                     self.eval(body, source);
+                    if (self.flow == .break_loop) { self.flow = .normal; break; }
+                    if (self.flow == .continue_loop) { self.flow = .normal; }
                 }
             },
             else => {
@@ -722,6 +759,8 @@ pub const Shell = struct {
             self.eval(args[0], source);
             if (self.last_exit != 0) break;
             self.eval(args[1], source);
+            if (self.flow == .break_loop) { self.flow = .normal; break; }
+            if (self.flow == .continue_loop) { self.flow = .normal; }
         }
     }
 
@@ -731,6 +770,8 @@ pub const Shell = struct {
             self.eval(args[0], source);
             if (self.last_exit == 0) break;
             self.eval(args[1], source);
+            if (self.flow == .break_loop) { self.flow = .normal; break; }
+            if (self.flow == .continue_loop) { self.flow = .normal; }
         }
     }
 
@@ -812,6 +853,8 @@ pub const Shell = struct {
         const name = argv[0];
 
         if (std.mem.eql(u8, name, "cd")) { self.builtinCd(argv); return true; }
+        if (std.mem.eql(u8, name, "..")) { posix.chdir("..") catch {}; self.last_exit = 0; return true; }
+        if (std.mem.eql(u8, name, "...")) { posix.chdir("../..") catch {}; self.last_exit = 0; return true; }
         if (std.mem.eql(u8, name, "echo")) { self.builtinEcho(argv); return true; }
         if (std.mem.eql(u8, name, "true")) { self.last_exit = 0; return true; }
         if (std.mem.eql(u8, name, "false")) { self.last_exit = 1; return true; }
@@ -864,7 +907,7 @@ pub const Shell = struct {
     }
 
     fn isBuiltin(name: []const u8) bool {
-        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
+        const builtins = [_][]const u8{ "cd", "..", "...", "echo", "true", "false", "type", "pwd", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
         for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
         }
@@ -1059,6 +1102,20 @@ fn spaceMathOps(alloc: Allocator, input: []const u8) ?[]u8 {
         }
     }
     return out.toOwnedSlice(alloc) catch null;
+}
+
+fn resetChildSignals() void {
+    const dfl = posix.Sigaction{
+        .handler = .{ .handler = posix.SIG.DFL },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.INT, &dfl, null);
+    posix.sigaction(posix.SIG.QUIT, &dfl, null);
+    posix.sigaction(posix.SIG.TSTP, &dfl, null);
+    posix.sigaction(posix.SIG.TTOU, &dfl, null);
+    posix.sigaction(posix.SIG.TTIN, &dfl, null);
+    posix.sigaction(posix.SIG.PIPE, &dfl, null);
 }
 
 fn statusToExit(status: u32) u8 {
