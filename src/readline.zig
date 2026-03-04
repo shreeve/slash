@@ -227,10 +227,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
             18 => {
                 // Ctrl+R: history search
                 if (key_handler) |kh| {
-                    disableRawMode(orig);
                     const result = historySearch(kh);
-                    const new_orig = enableRawMode() orelse return null;
-                    _ = new_orig;
                     if (result) |selected| {
                         @memcpy(line_buf[0..selected.len], selected);
                         len = selected.len;
@@ -243,10 +240,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                 // Ctrl+P: command palette
                 if (key_handler) |kh| {
                     if (kh.palette != null) {
-                        disableRawMode(orig);
                         const result = paletteSearch(kh);
-                        const new_orig = enableRawMode() orelse return null;
-                        _ = new_orig;
                         if (result) |r| {
                             switch (r.kind) {
                                 .history, .command => {
