@@ -30,10 +30,10 @@ Features not yet implemented, organized by category and priority.
 - [x] Extract slash-specific lexer logic from grammar.zig into lexer.zig — heredoc, indent, regex are shell-specific, not generic grammar engine
 - [x] Positional args `$1`-`$9`, `$*`, `$#` — arg passing to user commands and scripts
 - [x] `shift` — shifts positional args left, drops $1
+- [x] String interpolation in `"""` and `` ```lang `` heredocs — `$var`, `${var}`, `\$` escape
 
 ## Executor
 
-- [x] String interpolation in `"""` and `` ```lang `` heredocs — `$var`, `${var}`, `\$` escape
 - [ ] Glob expansion — pre-parse filesystem matching (*.zig, file[0-9], {a,b}.txt)
 
 ## Interactive (Phase D)
