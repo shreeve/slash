@@ -142,6 +142,13 @@ fn keyLookup(combo: []const u8) ?[]const u8 {
     return null;
 }
 
+fn historySuggest(prefix: []const u8) ?[]const u8 {
+    if (repl_shell) |sh| {
+        if (sh.history_db) |hdb| return hdb.suggest(sh.allocator, prefix);
+    }
+    return null;
+}
+
 fn historySearchFn(alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 {
     if (repl_shell) |sh| {
         if (sh.history_db) |hdb| return hdb.search(alloc, query, limit);
@@ -165,7 +172,7 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
     }
 
     repl_shell = ev;
-    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec, .search = &historySearchFn });
+    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec, .search = &historySearchFn, .suggest = &historySuggest });
     ev.recordDir();
 
     const hdb = history.Db.open() catch null;

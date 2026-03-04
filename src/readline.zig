@@ -36,11 +36,13 @@ var line_buf: [4096]u8 = undefined;
 var save_buf: [4096]u8 = undefined;
 var active_prompt: []const u8 = "$ ";
 var active_prompt_len: usize = 2;
+var ghost_text: []const u8 = "";
 
 pub const KeyHandler = struct {
     lookup: *const fn (combo: []const u8) ?[]const u8,
     exec: *const fn (cmd: []const u8) void,
     search: ?*const fn (alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 = null,
+    suggest: ?*const fn (prefix: []const u8) ?[]const u8 = null,
 };
 
 var key_handler: ?KeyHandler = null;
@@ -100,6 +102,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     std.mem.copyForwards(u8, line_buf[cursor - 1 ..], line_buf[cursor..len]);
                     len -= 1;
                     cursor -= 1;
+                    updateGhost(line_buf[0..len]);
                     refreshLine(line_buf[0..len], cursor);
                 }
             },
@@ -132,38 +135,61 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
 
                 switch (seq[1]) {
                     'A' => {
-                        if (hist_pos > 0) {
-                            if (hist_pos == history.count) {
-                                @memcpy(save_buf[0..len], line_buf[0..len]);
-                                saved_len = len;
+                        if (hist_pos == history.count) {
+                            @memcpy(save_buf[0..len], line_buf[0..len]);
+                            saved_len = len;
+                        }
+                        // Search backward for matching prefix
+                        var search_pos = hist_pos;
+                        while (search_pos > 0) {
+                            search_pos -= 1;
+                            const h = history.get(search_pos);
+                            if (saved_len == 0 or (h.len >= saved_len and std.mem.eql(u8, h[0..saved_len], save_buf[0..saved_len]))) {
+                                hist_pos = search_pos;
+                                len = @min(h.len, line_buf.len);
+                                @memcpy(line_buf[0..len], h[0..len]);
+                                cursor = len;
+                                refreshLine(line_buf[0..len], cursor);
+                                break;
                             }
-                            hist_pos -= 1;
-                            const h = history.get(hist_pos);
-                            len = @min(h.len, line_buf.len);
-                            @memcpy(line_buf[0..len], h[0..len]);
-                            cursor = len;
-                            refreshLine(line_buf[0..len], cursor);
                         }
                     },
                     'B' => {
-                        if (hist_pos < history.count) {
-                            hist_pos += 1;
-                            if (hist_pos == history.count) {
+                        // Search forward for matching prefix
+                        var search_pos = hist_pos;
+                        while (search_pos < history.count) {
+                            search_pos += 1;
+                            if (search_pos == history.count) {
+                                hist_pos = search_pos;
                                 len = saved_len;
                                 @memcpy(line_buf[0..len], save_buf[0..len]);
-                            } else {
-                                const h = history.get(hist_pos);
+                                cursor = len;
+                                refreshLine(line_buf[0..len], cursor);
+                                break;
+                            }
+                            const h = history.get(search_pos);
+                            if (saved_len == 0 or (h.len >= saved_len and std.mem.eql(u8, h[0..saved_len], save_buf[0..saved_len]))) {
+                                hist_pos = search_pos;
                                 len = @min(h.len, line_buf.len);
                                 @memcpy(line_buf[0..len], h[0..len]);
+                                cursor = len;
+                                refreshLine(line_buf[0..len], cursor);
+                                break;
                             }
-                            cursor = len;
-                            refreshLine(line_buf[0..len], cursor);
                         }
                     },
                     'C' => {
                         if (cursor < len) {
                             cursor += 1;
                             writeAll("\x1b[C");
+                        } else if (ghost_text.len > 0) {
+                            if (len + ghost_text.len <= line_buf.len) {
+                                @memcpy(line_buf[len..][0..ghost_text.len], ghost_text);
+                                len += ghost_text.len;
+                                cursor = len;
+                                ghost_text = "";
+                                refreshLine(line_buf[0..len], cursor);
+                            }
                         }
                     },
                     'D' => {
@@ -234,15 +260,31 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                         line_buf[cursor] = ch;
                         len += 1;
                         cursor += 1;
-                        if (cursor == len) {
-                            const s: [1]u8 = .{ch};
-                            writeAll(&s);
-                        } else {
-                            refreshLine(line_buf[0..len], cursor);
-                        }
+                        updateGhost(line_buf[0..len]);
+                        refreshLine(line_buf[0..len], cursor);
                     }
                 }
             },
+        }
+    }
+}
+
+var ghost_buf: [4096]u8 = undefined;
+
+fn updateGhost(line: []const u8) void {
+    ghost_text = "";
+    if (line.len < 2) return;
+    if (key_handler) |kh| {
+        if (kh.suggest) |suggest_fn| {
+            if (suggest_fn(line)) |suggestion| {
+                if (suggestion.len > line.len and std.mem.startsWith(u8, suggestion, line)) {
+                    const suffix = suggestion[line.len..];
+                    if (suffix.len <= ghost_buf.len) {
+                        @memcpy(ghost_buf[0..suffix.len], suffix);
+                        ghost_text = ghost_buf[0..suffix.len];
+                    }
+                }
+            }
         }
     }
 }
@@ -251,6 +293,11 @@ fn refreshLine(line: []const u8, cursor: usize) void {
     writeAll("\r\x1b[K");
     writeAll(active_prompt);
     writeAll(line);
+    if (ghost_text.len > 0 and cursor == line.len) {
+        writeAll("\x1b[90m");
+        writeAll(ghost_text);
+        writeAll("\x1b[0m");
+    }
     const total = active_prompt_len + cursor;
     var move_buf: [32]u8 = undefined;
     const move = std.fmt.bufPrint(&move_buf, "\r\x1b[{d}C", .{total}) catch return;

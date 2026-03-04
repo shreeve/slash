@@ -86,6 +86,28 @@ pub const Db = struct {
         return results.items;
     }
 
+    pub fn suggest(self: Db, alloc: std.mem.Allocator, prefix: []const u8) ?[]const u8 {
+        if (prefix.len < 2) return null;
+        var stmt: ?*c.sqlite3_stmt = null;
+        const sql = "SELECT command FROM history WHERE command LIKE ? AND command != ? ORDER BY timestamp DESC LIMIT 1";
+        if (c.sqlite3_prepare_v2(self.handle, sql.ptr, -1, &stmt, null) != c.SQLITE_OK) return null;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        const pattern = std.fmt.allocPrint(alloc, "{s}%", .{prefix}) catch return null;
+        _ = c.sqlite3_bind_text(stmt, 1, @ptrCast(pattern.ptr), @intCast(pattern.len), c.SQLITE_STATIC);
+        _ = c.sqlite3_bind_text(stmt, 2, @ptrCast(prefix.ptr), @intCast(prefix.len), c.SQLITE_STATIC);
+
+        if (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            const text_ptr = c.sqlite3_column_text(stmt, 0);
+            const text_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 0));
+            if (text_ptr) |p| {
+                const s: [*]const u8 = @ptrCast(p);
+                return alloc.dupe(u8, s[0..text_len]) catch null;
+            }
+        }
+        return null;
+    }
+
     pub fn frecency(self: Db, alloc: std.mem.Allocator, query: []const u8, limit: usize) []DirScore {
         var results: std.ArrayList(DirScore) = .empty;
         var stmt: ?*c.sqlite3_stmt = null;
