@@ -157,16 +157,16 @@ pub const Db = struct {
         const sql = "SELECT DISTINCT cwd FROM history WHERE cwd != '' ORDER BY MAX(id) DESC LIMIT 500";
         if (c.sqlite3_prepare_v2(self.handle, sql, -1, &stmt, null) != c.SQLITE_OK) return;
         defer _ = c.sqlite3_finalize(stmt);
-        var dead_buf: [128][4096]u8 = undefined;
+        var dead_buf: [32][512]u8 = undefined;
         var dead_count: usize = 0;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW and dead_count < 128) {
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW and dead_count < 32) {
             const text_ptr = c.sqlite3_column_text(stmt, 0);
             const text_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 0));
             if (text_ptr) |p| {
                 const s: [*]const u8 = @ptrCast(p);
                 const path = s[0..text_len];
                 std.fs.cwd().access(path, .{}) catch {
-                    if (text_len < 4096) {
+                    if (text_len < 512) {
                         @memcpy(dead_buf[dead_count][0..text_len], path);
                         dead_buf[dead_count][text_len] = 0;
                         dead_count += 1;
