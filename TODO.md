@@ -31,26 +31,23 @@ Features not yet implemented, organized by category and priority.
 - [x] Positional args `$1`-`$9`, `$*`, `$#` — arg passing to user commands and scripts
 - [x] `shift` — shifts positional args left, drops $1
 - [x] String interpolation in `"""` and `` ```lang `` heredocs — `$var`, `${var}`, `\$` escape
-
-## Executor
-
 - [x] Glob expansion — *, ?, [a-z], {a,b}, ** recursive, plus regex globs (~|pattern|), sorted output
-- [ ] Regexp expansion - similar but using our new regex types
+- [x] Regexp expansion - similar but using our new regex types
 
-## Interactive (Phase D)
-
-- [ ] Syntax highlighting — live as you type, using the parser
-- [ ] `key` bindings — actual implementation with human-readable combos
-- [ ] Multi-line editing — blank-line continuation for indent blocks, `\` continuation at the prompt
-
-## Persistence (Phase E)
+## Persistence (Phase A)
 
 - [ ] SQLite history — every command stored with timestamp, cwd, exit code
 - [ ] `Ctrl+R` history search
 - [ ] Directory frecency / `j` fuzzy jump
 - [ ] `dirs` interactive picker
 
-## Completion (Phase F)
+## Interactive (Phase B)
+
+- [ ] Syntax highlighting — live as you type, using the parser
+- [ ] `key` bindings — actual implementation with human-readable combos
+- [ ] Multi-line editing — blank-line continuation for indent blocks, `\` continuation at the prompt
+
+## Completion (Phase C)
 
 - [ ] Tab completion engine — context-aware (command, file, variable, flag)
 - [ ] Completion definitions for common commands (git, zig, etc.)
