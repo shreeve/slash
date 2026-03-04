@@ -271,6 +271,7 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
 
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
+        if (std.mem.eql(u8, trimmed, "=")) continue;
 
         if (std.mem.eql(u8, trimmed, "exit")) return;
 
