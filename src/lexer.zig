@@ -1,4 +1,4 @@
-//! Slash Lexer — Shell-specific lexer extensions
+//! Lexer — Shell-specific lexer extensions
 //!
 //! Wraps the generated BaseLexer (from parser.zig) with:
 //!   - Heredoc body collection and margin stripping

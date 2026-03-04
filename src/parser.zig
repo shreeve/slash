@@ -4,7 +4,7 @@
 //! BaseLexer (generic) + Parser. Shell lexer logic in slash_lexer.zig.
 
 const std = @import("std");
-pub const Lexer = @import("slash_lexer.zig").Lexer;
+pub const Lexer = @import("lexer.zig").Lexer;
 const MAX_ARGS: usize = 32;
 
 // SIMD helpers (fallback if simd.zig not available)
