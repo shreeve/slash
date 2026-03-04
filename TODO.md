@@ -2,13 +2,29 @@
 
 Features not yet implemented, organized by category and priority.
 
+## Recently Completed
+
+- [x] `break` / `continue` in loops — flow state unwinding
+- [x] Auto-cd — if sole arg is a directory path, cd to it
+- [x] `..` / `...` / `....` etc. — dynamic dot-counter, unlimited levels
+- [x] Signal handling — shell ignores SIGINT/QUIT/TSTP, children reset to defaults
+- [x] Heredocs — all 3 types (`'''`, `"""`, `` ```lang ``), margin stripping, pipe continuation
+- [x] Herestrings (`<<<`) — pipe content to stdin
+- [x] Process substitution (`<(cmd)`, `>(cmd)`) — /dev/fd/N passing
+- [x] Subshell capture (`$(cmd)`) — fork, pipe, read stdout
+- [x] Redirections — all forms (>, >>, <, 2>, 2>>, &>, 2>&1)
+- [x] Variable expansion — $name, $?, $$, ${name}
+- [x] Math evaluation — f64, all operators, smart formatting
+- [x] `= expr` display command — evaluate and print math
+- [x] No-space math — `=22/7`, `=2^10` via operator spacing retry
+- [x] Comparison evaluation — eq/ne/lt/gt/le/ge with smart numeric/string logic
+- [x] `cmd ???` hook — define, show, delete
+- [x] 233 tests — parse + execution coverage
+
 ## Next Up
 
-- [ ] `break` / `continue` in loops — need error/signal mechanism to unwind loop body
-- [ ] Auto-cd — fallback when command not found and path is a directory
-- [ ] `..` / `...` builtins — shorthand for `cd ..` / `cd ../..`
-- [ ] Signal handling (SIGINT, SIGTSTP, SIGPIPE, SIGCHLD) — Ctrl+C won't kill the shell
-- [ ] Readline / line editing — arrow keys, home/end, delete, history navigation
+- [ ] Readline / line editing — raw terminal mode, arrow keys, history navigation
+- [ ] Rich prompt — directory, git branch, exit code, duration
 
 ## Grammar Engine
 
@@ -21,7 +37,7 @@ Features not yet implemented, organized by category and priority.
 - [ ] `shift` — needs positional argument tracking ($1, $2, etc.)
 - [ ] Positional args `$1`-`$9`, `$*`, `$#` — arg passing to user commands and scripts
 - [ ] String interpolation in `"""` heredocs — `$var` expansion inside body text
-- [ ] `exec` (replace process) — currently evals inner cmd, should execvpe without fork
+- [ ] `exec` (replace process) — should execvpe without fork
 - [ ] Glob expansion — pre-parse filesystem matching (*.zig, file[0-9], {a,b}.txt)
 
 ## Job Control (Phase C)
@@ -33,7 +49,6 @@ Features not yet implemented, organized by category and priority.
 
 ## Interactive (Phase D)
 
-- [ ] Rich prompt — directory, git branch, exit code, duration
 - [ ] Syntax highlighting — live as you type, using the parser
 - [ ] `key` bindings — actual implementation with human-readable combos
 - [ ] Multi-line editing — `\` continuation at the prompt
