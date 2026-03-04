@@ -53,6 +53,9 @@ pub const Shell = struct {
     user_cmds: std.StringHashMap(UserCmd),
     options: std.StringHashMap([]const u8),
 
+    // Positional arguments ($1-$9, $*, $#)
+    args: []const []const u8 = &.{},
+
     // Job control state
     tty_fd: posix.fd_t = posix.STDIN_FILENO,
     shell_pgid: posix.pid_t = 0,
@@ -75,6 +78,10 @@ pub const Shell = struct {
         self.interactive = true;
         _ = libc.setpgid(0, self.shell_pgid);
         _ = libc.tcsetpgrp(self.tty_fd, self.shell_pgid);
+    }
+
+    pub fn setArgs(self: *Shell, script_args: []const []const u8) void {
+        self.args = script_args;
     }
 
     pub fn deinit(self: *Shell) void {
@@ -298,7 +305,7 @@ pub const Shell = struct {
             .key => { self.last_exit = 0; },
             .key_del => { self.last_exit = 0; },
             .eq, .ne, .lt, .gt, .le, .ge, .match, .nomatch => self.evalComparison(tag, args, source),
-            .shift => { self.last_exit = 0; },
+            .shift => self.evalShift(),
             .@"break" => { self.flow = .break_loop; self.last_exit = 0; },
             .@"continue" => { self.flow = .continue_loop; self.last_exit = 0; },
             else => self.dispatchKeyword(tag, args, source),
@@ -347,13 +354,17 @@ pub const Shell = struct {
                 .src => |s| {
                     const text = source[s.pos..][0..s.len];
                     const expanded = self.expandToken(text);
-                    if (argv_list.items.len > 0 and s.pos > 0) {
+                    if (argv_list.items.len > 0 and s.pos > 0 and expanded.ptr == text.ptr) {
                         const prev = argv_list.items[argv_list.items.len - 1];
-                        const prev_start = @intFromPtr(prev.ptr) - @intFromPtr(source.ptr);
-                        const prev_end = prev_start + prev.len;
-                        if (s.pos == prev_end and expanded.ptr == text.ptr) {
-                            argv_list.items[argv_list.items.len - 1] = source[prev_start .. s.pos + s.len];
-                            continue;
+                        const src_start = @intFromPtr(source.ptr);
+                        const prev_addr = @intFromPtr(prev.ptr);
+                        if (prev_addr >= src_start and prev_addr < src_start + source.len) {
+                            const prev_start = prev_addr - src_start;
+                            const prev_end = prev_start + prev.len;
+                            if (s.pos == prev_end) {
+                                argv_list.items[argv_list.items.len - 1] = source[prev_start .. s.pos + s.len];
+                                continue;
+                            }
                         }
                     }
                     argv_list.append(self.allocator, expanded) catch {};
@@ -601,12 +612,43 @@ pub const Shell = struct {
         if (name.len == 0) return "";
         if (std.mem.eql(u8, name, "?")) return self.exitCodeStr();
         if (std.mem.eql(u8, name, "$")) return self.pidStr();
-        if (name[0] >= '0' and name[0] <= '9') return "";
-        if (std.mem.eql(u8, name, "#")) return "0";
-        if (std.mem.eql(u8, name, "*")) return "";
+        if (name.len == 1 and name[0] >= '1' and name[0] <= '9') {
+            const idx = name[0] - '1';
+            return if (idx < self.args.len) self.args[idx] else "";
+        }
+        if (std.mem.eql(u8, name, "#")) return self.argCountStr();
+        if (std.mem.eql(u8, name, "*")) return self.argJoinStr();
+        if (std.mem.eql(u8, name, "0")) return self.vars.get("0") orelse "slash";
         if (std.mem.eql(u8, name, "!")) return "";
         if (self.vars.get(name)) |val| return val;
         return posix.getenv(name) orelse "";
+    }
+
+    fn argCountStr(self: *Shell) []const u8 {
+        const vals = "0\x001\x002\x003\x004\x005\x006\x007\x008\x009";
+        if (self.args.len < 10) return vals[self.args.len * 2 ..][0..1];
+        return std.fmt.allocPrint(self.allocator, "{d}", .{self.args.len}) catch "0";
+    }
+
+    fn argJoinStr(self: *Shell) []const u8 {
+        if (self.args.len == 0) return "";
+        var total: usize = 0;
+        for (self.args) |a| total += a.len + 1;
+        const buf = self.allocator.alloc(u8, total - 1) catch return "";
+        var pos: usize = 0;
+        for (self.args, 0..) |a, i| {
+            if (i > 0) { buf[pos] = ' '; pos += 1; }
+            @memcpy(buf[pos..][0..a.len], a);
+            pos += a.len;
+        }
+        return buf[0..pos];
+    }
+
+    fn evalShift(self: *Shell) void {
+        if (self.args.len > 0) {
+            self.args = self.args[1..];
+        }
+        self.last_exit = 0;
     }
 
     fn exitCodeStr(self: *Shell) []const u8 {
@@ -1283,9 +1325,14 @@ pub const Shell = struct {
     fn invokeUserCmd(self: *Shell, cmd: UserCmd, argv: []const []const u8) void {
         const params = cmd.params;
         const call_args = argv[1..];
+        const saved_args = self.args;
+
+        // Set positional args ($1, $2, ... $#, $*)
+        self.args = call_args;
+
+        // Bind named params
         const saved = self.allocator.alloc(?[]const u8, params.len) catch return;
         defer self.allocator.free(saved);
-
         for (params, 0..) |pname, i| {
             saved[i] = self.vars.get(pname);
             const val = if (i < call_args.len) call_args[i] else "";
@@ -1294,6 +1341,7 @@ pub const Shell = struct {
 
         self.eval(cmd.body, cmd.source);
 
+        // Restore named params
         for (params, 0..) |pname, i| {
             if (saved[i]) |old| {
                 self.vars.put(pname, old) catch {};
@@ -1301,6 +1349,7 @@ pub const Shell = struct {
                 _ = self.vars.remove(pname);
             }
         }
+        self.args = saved_args;
     }
 
     // =========================================================================

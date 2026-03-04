@@ -70,6 +70,8 @@ pub fn main() !void {
             }
         } else if (arg.len > 0 and arg[0] != '-') {
             script_path = arg;
+            i += 1;
+            break; // remaining args are script arguments
         } else {
             std.debug.print("Unknown option: {s}\n", .{arg});
             showHelp();
@@ -111,6 +113,7 @@ pub fn main() !void {
         }
         var ev = exec.Shell.init(alloc);
         defer ev.deinit();
+        if (i < args.len) ev.setArgs(args[i..]);
         ev.execSource(source);
         return;
     }
