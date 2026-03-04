@@ -853,8 +853,18 @@ pub const Shell = struct {
         const name = argv[0];
 
         if (std.mem.eql(u8, name, "cd")) { self.builtinCd(argv); return true; }
-        if (std.mem.eql(u8, name, "..")) { posix.chdir("..") catch {}; self.last_exit = 0; return true; }
-        if (std.mem.eql(u8, name, "...")) { posix.chdir("../..") catch {}; self.last_exit = 0; return true; }
+        if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) {
+            var buf: [128]u8 = undefined;
+            const levels = name.len - 1;
+            var pos: usize = 0;
+            for (0..levels) |j| {
+                if (j > 0 and pos < buf.len) { buf[pos] = '/'; pos += 1; }
+                if (pos + 2 <= buf.len) { buf[pos] = '.'; buf[pos + 1] = '.'; pos += 2; }
+            }
+            if (pos > 0) posix.chdir(buf[0..pos]) catch {};
+            self.last_exit = 0;
+            return true;
+        }
         if (std.mem.eql(u8, name, "echo")) { self.builtinEcho(argv); return true; }
         if (std.mem.eql(u8, name, "true")) { self.last_exit = 0; return true; }
         if (std.mem.eql(u8, name, "false")) { self.last_exit = 1; return true; }
@@ -907,7 +917,8 @@ pub const Shell = struct {
     }
 
     fn isBuiltin(name: []const u8) bool {
-        const builtins = [_][]const u8{ "cd", "..", "...", "echo", "true", "false", "type", "pwd", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
+        if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) return true;
+        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
         for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
         }
