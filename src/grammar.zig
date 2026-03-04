@@ -958,6 +958,13 @@ const LexerGenerator = struct {
             \\    hd_buf_count: u8 = 0,
             \\    hd_buf_pos: u8 = 0,            // replay cursor
             \\
+            \\    // Indent state — emits INDENT/OUTDENT tokens for indentation blocks
+            \\    indent_level: u32 = 0,         // current indent column
+            \\    indent_stack: [64]u32 = .{0} ** 64, // stack of indent levels
+            \\    indent_depth: u8 = 0,          // stack pointer
+            \\    indent_pending: u8 = 0,        // number of OUTDENT tokens to emit
+            \\    indent_queued: ?Token = null,   // queued token to emit next (NEWLINE after OUTDENT)
+            \\
         );
 
         // Init function
@@ -1001,6 +1008,10 @@ const LexerGenerator = struct {
         try self.write("        self.hd_scanned = false;\n");
         try self.write("        self.hd_buf_count = 0;\n");
         try self.write("        self.hd_buf_pos = 0;\n");
+        try self.write("        self.indent_level = 0;\n");
+        try self.write("        self.indent_depth = 0;\n");
+        try self.write("        self.indent_pending = 0;\n");
+        try self.write("        self.indent_queued = null;\n");
         for (self.spec.states.items) |state| {
             try self.print("        self.{s} = {d};\n", .{ state.name, state.initial_value });
         }
@@ -1026,6 +1037,17 @@ const LexerGenerator = struct {
         try self.write(
             \\    /// Get next token
             \\    pub fn next(self: *Lexer) Token {
+            \\        // Emit queued NEWLINE (always follows an OUTDENT)
+            \\        if (self.indent_queued) |q| {
+            \\            self.indent_queued = null;
+            \\            return q;
+            \\        }
+            \\        // Emit pending OUTDENT-NEWLINE pairs (from multi-level indent decrease)
+            \\        if (self.indent_pending > 0) {
+            \\            self.indent_pending -= 1;
+            \\            self.indent_queued = Token{ .cat = .newline, .pre = 0, .pos = @intCast(self.pos), .len = 0 };
+            \\            return Token{ .cat = .outdent, .pre = 0, .pos = @intCast(self.pos), .len = 0 };
+            \\        }
             \\        // Replaying buffered tokens (only after heredoc body is fully collected)
             \\        if (self.hd_type == 0 and self.hd_buf_pos < self.hd_buf_count) {
             \\            const tok = self.hd_buf[self.hd_buf_pos];
@@ -1041,6 +1063,18 @@ const LexerGenerator = struct {
             \\            return self.collectHeredocLine();
             \\        }
             \\        const tok = self.matchRules();
+            \\        // Handle indentation on newlines
+            \\        if (tok.cat == .newline) {
+            \\            return self.handleIndent(tok);
+            \\        }
+            \\        // Emit pending OUTDENT(s) + NEWLINE at EOF
+            \\        if (tok.cat == .eof and self.indent_depth > 0) {
+            \\            if (self.indent_depth > 1) self.indent_pending = self.indent_depth - 1;
+            \\            self.indent_depth = 0;
+            \\            self.indent_level = 0;
+            \\            self.indent_queued = Token{ .cat = .newline, .pre = 0, .pos = @intCast(self.pos), .len = 0 };
+            \\            return Token{ .cat = .outdent, .pre = 0, .pos = @intCast(self.pos), .len = 0 };
+            \\        }
             \\        // Detect heredoc opening — buffer remaining line tokens
             \\        if (tok.cat == .heredoc_sq or tok.cat == .heredoc_dq or tok.cat == .heredoc_bt) {
             \\            self.hd_type = switch (tok.cat) {
@@ -1158,6 +1192,46 @@ const LexerGenerator = struct {
             \\        self.pos = line_end;
             \\        if (self.pos < self.source.len and self.source[self.pos] == '\n') self.pos += 1;
             \\        return Token{ .cat = .heredoc_body, .pre = 0, .pos = @intCast(body_start), .len = @intCast(body_len) };
+            \\    }
+            \\
+            \\    /// Handle indentation changes after a newline.
+            \\    /// Returns NEWLINE (same level), INDENT (deeper), or triggers OUTDENT chain (shallower).
+            \\    fn handleIndent(self: *Lexer, nl_tok: Token) Token {
+            \\        // Measure leading whitespace on the next line
+            \\        var ws: u32 = 0;
+            \\        while (self.pos + ws < self.source.len) {
+            \\            const ch = self.source[self.pos + ws];
+            \\            if (ch == ' ' or ch == '\t') { ws += 1; } else break;
+            \\        }
+            \\        // Blank lines / comment-only lines: emit NEWLINE without indent change
+            \\        if (self.pos + ws >= self.source.len or self.source[self.pos + ws] == '\n' or
+            \\            self.source[self.pos + ws] == '\r' or self.source[self.pos + ws] == '#')
+            \\            return nl_tok;
+            \\        if (ws > self.indent_level) {
+            \\            // Deeper — push indent, emit INDENT
+            \\            if (self.indent_depth < 63) {
+            \\                self.indent_stack[self.indent_depth] = self.indent_level;
+            \\                self.indent_depth += 1;
+            \\            }
+            \\            self.indent_level = ws;
+            \\            return Token{ .cat = .indent, .pre = 0, .pos = @intCast(self.pos), .len = 0 };
+            \\        } else if (ws < self.indent_level) {
+            \\            // Shallower — pop indent(s), emit OUTDENT(s) then NEWLINE
+            \\            var count: u8 = 0;
+            \\            while (self.indent_depth > 0 and self.indent_stack[self.indent_depth - 1] >= ws) {
+            \\                self.indent_depth -= 1;
+            \\                count += 1;
+            \\            }
+            \\            self.indent_level = ws;
+            \\            if (count > 0) {
+            \\                if (count > 1) self.indent_pending = count - 1;
+            \\                self.indent_queued = Token{ .cat = .newline, .pre = 0, .pos = nl_tok.pos, .len = 0 };
+            \\                return Token{ .cat = .outdent, .pre = 0, .pos = @intCast(self.pos), .len = 0 };
+            \\            }
+            \\            return nl_tok;
+            \\        }
+            \\        // Same level — emit NEWLINE as normal
+            \\        return nl_tok;
             \\    }
             \\
             \\
@@ -1388,7 +1462,8 @@ const LexerGenerator = struct {
             \\
             \\                if (rule.skip) continue;
             \\
-            \\                return Token{ .cat = rule.tok, .pre = ws_count, .pos = start, .len = @intCast(best_len) };
+            \\                const final_cat = if (rule.tok == .lparen and ws_count == 0) .lparen_tight else rule.tok;
+            \\                return Token{ .cat = final_cat, .pre = ws_count, .pos = start, .len = @intCast(best_len) };
             \\            }
             \\
             \\            self.pos += 1;

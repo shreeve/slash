@@ -104,6 +104,7 @@ tokens {
 
     # Punctuation
     lparen,         # (
+    lparen_tight,   # ( with no preceding whitespace (pre==0)
     rparen,         # )
     lbrace,         # {
     rbrace,         # }
@@ -607,7 +608,8 @@ brace_item = stmt                           → 1
 # WHITESPACE CONTRACT: `(` touching the name (pre=0) is a parameter list.
 # `(` after a space (pre>0) starts a subshell body. The generated parser
 # must check the LPAREN token's `pre` field when deciding whether to
-# enter the params? branch. The grammar cannot express this distinction.
+# enter the params? branch. LPAREN_TIGHT (pre==0) is a distinct token
+# from LPAREN so the parser can unambiguously enter the params rule.
 
 cmd_def   = CMD MISSING params? block        → (cmd_missing 3 4)
           | CMD MISSING params? stmt        → (cmd_missing 3 4)
@@ -619,7 +621,7 @@ cmd_def   = CMD MISSING params? block        → (cmd_missing 3 4)
           | CMD name                        → (cmd_show 2)
           | CMD                             → (cmd_list)
 
-params    = "(" L(name) ")"                 → 2
+params    = LPAREN_TIGHT L(name) ")"        → 2
 
 # ==============================================================================
 # KEY BINDINGS: key

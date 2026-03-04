@@ -16,19 +16,25 @@ const Parser = parser.Parser;
 
 const Flow = enum { normal, break_loop, continue_loop };
 
+const UserCmd = struct {
+    params: [][]const u8,
+    body: Sexp,
+    source: []const u8,
+};
+
 pub const Shell = struct {
     allocator: Allocator,
     vars: std.StringHashMap([]const u8),
     last_exit: u8 = 0,
     flow: Flow = .normal,
-    user_cmds: std.StringHashMap(Sexp),
+    user_cmds: std.StringHashMap(UserCmd),
     options: std.StringHashMap([]const u8),
 
     pub fn init(alloc: Allocator) Shell {
         return .{
             .allocator = alloc,
             .vars = std.StringHashMap([]const u8).init(alloc),
-            .user_cmds = std.StringHashMap(Sexp).init(alloc),
+            .user_cmds = std.StringHashMap(UserCmd).init(alloc),
             .options = std.StringHashMap([]const u8).init(alloc),
         };
     }
@@ -246,8 +252,8 @@ pub const Shell = struct {
             }
             if (is_builtin) {
                 _ = self.tryBuiltin(argv, source);
-            } else if (self.user_cmds.get(argv[0])) |body| {
-                self.eval(body, source);
+            } else if (self.user_cmds.get(argv[0])) |cmd| {
+                self.invokeUserCmd(cmd, argv);
             }
             if (has_redirs) {
                 if (saved[0] != -1) { posix.dup2(saved[0], posix.STDIN_FILENO) catch {}; posix.close(saved[0]); }
@@ -849,7 +855,48 @@ pub const Shell = struct {
     // =========================================================================
 
     fn evalExec(self: *Shell, args: []const Sexp, source: []const u8) void {
-        self.eval(args[0], source);
+        if (args.len < 1) return;
+
+        var argv_list: std.ArrayList([]const u8) = .empty;
+        defer argv_list.deinit(self.allocator);
+        var redir_list: std.ArrayList(Redirect) = .empty;
+        defer redir_list.deinit(self.allocator);
+
+        const inner = switch (args[0]) {
+            .list => |items| items,
+            else => return,
+        };
+        if (inner.len < 2) return;
+        for (inner[1..]) |arg| {
+            switch (arg) {
+                .src => |s| {
+                    const text = source[s.pos..][0..s.len];
+                    argv_list.append(self.allocator, self.expandToken(text)) catch {};
+                },
+                .list => |items| {
+                    if (items.len >= 2 and items[0] == .tag) {
+                        const tag = items[0].tag;
+                        self.collectRedirect(tag, items[1..], source, &redir_list);
+                    }
+                },
+                else => {},
+            }
+        }
+
+        const argv = argv_list.items;
+        if (argv.len == 0) return;
+
+        applyRedirects(self.allocator, redir_list.items);
+        resetChildSignals();
+        const argv_z = toExecArgs(self.allocator, argv) catch {
+            std.debug.print("slash: exec: allocation failed\n", .{});
+            self.last_exit = 1;
+            return;
+        };
+        const envp = getEnvP();
+        posix.execvpeZ(argv_z[0].?, argv_z, envp) catch {};
+        std.debug.print("slash: exec: {s}: command not found\n", .{argv[0]});
+        posix.exit(127);
     }
 
     // =========================================================================
@@ -933,6 +980,29 @@ pub const Shell = struct {
         return false;
     }
 
+    fn invokeUserCmd(self: *Shell, cmd: UserCmd, argv: []const []const u8) void {
+        const params = cmd.params;
+        const call_args = argv[1..];
+        const saved = self.allocator.alloc(?[]const u8, params.len) catch return;
+        defer self.allocator.free(saved);
+
+        for (params, 0..) |pname, i| {
+            saved[i] = self.vars.get(pname);
+            const val = if (i < call_args.len) call_args[i] else "";
+            self.vars.put(pname, val) catch {};
+        }
+
+        self.eval(cmd.body, cmd.source);
+
+        for (params, 0..) |pname, i| {
+            if (saved[i]) |old| {
+                self.vars.put(pname, old) catch {};
+            } else {
+                _ = self.vars.remove(pname);
+            }
+        }
+    }
+
     // =========================================================================
     // CMD / SET MANAGEMENT
     // =========================================================================
@@ -941,7 +1011,25 @@ pub const Shell = struct {
         if (args.len < 2) return;
         const name_raw = self.sexpToStr(args[0], source) orelse return;
         const name = self.allocator.dupe(u8, name_raw) catch return;
-        self.user_cmds.put(name, args[args.len - 1]) catch {};
+        const source_copy = self.allocator.dupe(u8, source) catch return;
+
+        var params: [][]const u8 = &.{};
+        if (args.len >= 3) {
+            if (args[1] == .list) {
+                const plist = args[1].list;
+                var param_names = self.allocator.alloc([]const u8, plist.len) catch return;
+                for (plist, 0..) |p, i| {
+                    param_names[i] = self.allocator.dupe(u8, self.sexpToStr(p, source) orelse "") catch "";
+                }
+                params = param_names;
+            }
+        }
+
+        self.user_cmds.put(name, .{
+            .params = params,
+            .body = args[args.len - 1],
+            .source = source_copy,
+        }) catch {};
         self.last_exit = 0;
     }
 
