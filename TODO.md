@@ -30,7 +30,6 @@ Features not yet implemented, organized by category and priority.
 ## Grammar Engine
 
 - [ ] Regex `=~` / `!~` — context-sensitive `/` disambiguation in grammar.zig
-- [ ] Heredoc stacking — multiple heredocs per line
 
 ## Executor
 
