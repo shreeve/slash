@@ -262,6 +262,18 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     }
                 }
             },
+            9 => {
+                // Tab: accept ghost suggestion
+                if (ghost_text.len > 0 and cursor == len) {
+                    if (len + ghost_text.len <= line_buf.len) {
+                        @memcpy(line_buf[len..][0..ghost_text.len], ghost_text);
+                        len += ghost_text.len;
+                        cursor = len;
+                        ghost_text = "";
+                        refreshLine(line_buf[0..len], cursor);
+                    }
+                }
+            },
             1 => {
                 cursor = 0;
                 refreshLine(line_buf[0..len], cursor);
