@@ -47,10 +47,10 @@ SQLite foundation — one database powers history, search, and navigation.
 - [x] Up-arrow prefix search — typing `git` then `↑` filters history to git commands only
 - [x] Inline ghost suggestions — show most likely completion in gray, `→` to accept
 - [x] Command palette (`Ctrl+P`) — unified search across history, dirs, user commands; typed results; overlay UI
+- [x] Multi-line editing — blank-line continuation for indent blocks, `\` continuation, `...` prompt
 
 ## Final Touches
 
-- [x] Multi-line editing — blank-line continuation for indent blocks, `\` continuation, `...` prompt
-- [ ] Syntax highlighting — live as you type, using the parser
 - [ ] Tab completion engine — context-aware (command, file, variable, flag)
 - [ ] Completion definitions for common commands (git, zig, etc.)
+- [ ] Syntax highlighting — live as you type, using the parser
