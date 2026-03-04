@@ -342,13 +342,18 @@ fn historySearch(kh: KeyHandler) ?[]const u8 {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+    var first_draw = true;
 
-    // Initial results (empty query = recent)
     results = search_fn(alloc, "", 10);
 
     while (true) {
-        // Clear overlay area and draw
-        writeAll("\r\n\x1b[J"); // newline + clear below
+        if (first_draw) {
+            writeAll("\n");
+            first_draw = false;
+        } else {
+            writeAll("\r");
+        }
+        writeAll("\x1b[J");
         writeAll("\x1b[7m History Search: \x1b[0m ");
         writeAll(query_buf[0..qlen]);
         writeAll("\n");
@@ -358,7 +363,6 @@ fn historySearch(kh: KeyHandler) ?[]const u8 {
             if (i == selected) writeAll("\x1b[0m");
             writeAll("\n");
         }
-        // Move cursor back up to search line
         var up_buf: [16]u8 = undefined;
         const up = std.fmt.bufPrint(&up_buf, "\x1b[{d}A", .{results.len + 1}) catch break;
         writeAll(up);
@@ -445,9 +449,16 @@ fn paletteSearch(kh: KeyHandler) ?PaletteResult {
     const alloc = arena.allocator();
 
     results = palette_fn(alloc, "");
+    var first_draw = true;
 
     while (true) {
-        writeAll("\r\n\x1b[J");
+        if (first_draw) {
+            writeAll("\n");
+            first_draw = false;
+        } else {
+            writeAll("\r");
+        }
+        writeAll("\x1b[J");
         writeAll("\x1b[7m Palette: \x1b[0m ");
         writeAll(query_buf[0..qlen]);
         writeAll("\n");
@@ -528,11 +539,10 @@ fn paletteSearch(kh: KeyHandler) ?PaletteResult {
 }
 
 fn clearOverlay(lines: usize) void {
-    var buf: [16]u8 = undefined;
-    writeAll("\r\n\x1b[J");
-    const up = std.fmt.bufPrint(&buf, "\x1b[{d}A", .{lines}) catch return;
-    writeAll(up);
-    writeAll("\r\x1b[K");
+    _ = lines;
+    writeAll("\r\x1b[J");
+    writeAll("\x1b[A");
+    writeAll("\r");
 }
 
 fn writeAll(data: []const u8) void {
