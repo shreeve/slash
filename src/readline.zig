@@ -32,15 +32,16 @@ pub const History = struct {
     }
 };
 
+var line_buf: [4096]u8 = undefined;
+var save_buf: [4096]u8 = undefined;
+
 pub fn readLine(prompt: []const u8, history: *History) ?[]const u8 {
     const orig = enableRawMode() orelse return null;
     defer disableRawMode(orig);
 
-    var buf: [4096]u8 = undefined;
     var len: usize = 0;
     var cursor: usize = 0;
     var hist_pos: usize = history.count;
-    var saved_line: [4096]u8 = undefined;
     var saved_len: usize = 0;
 
     writeAll(prompt);
@@ -54,12 +55,13 @@ pub fn readLine(prompt: []const u8, history: *History) ?[]const u8 {
             '\r', '\n' => {
                 writeAll("\n");
                 if (len == 0) return "";
-                return buf[0..len];
+                return line_buf[0..len];
             },
             3 => {
                 writeAll("^C\n");
                 len = 0;
                 cursor = 0;
+                hist_pos = history.count;
                 writeAll(prompt);
             },
             4 => {
@@ -70,10 +72,10 @@ pub fn readLine(prompt: []const u8, history: *History) ?[]const u8 {
             },
             127, 8 => {
                 if (cursor > 0) {
-                    std.mem.copyForwards(u8, buf[cursor - 1 ..], buf[cursor..len]);
+                    std.mem.copyForwards(u8, line_buf[cursor - 1 ..], line_buf[cursor..len]);
                     len -= 1;
                     cursor -= 1;
-                    refreshLine(prompt, buf[0..len], cursor);
+                    refreshLine(prompt, line_buf[0..len], cursor);
                 }
             },
             27 => {
@@ -88,15 +90,15 @@ pub fn readLine(prompt: []const u8, history: *History) ?[]const u8 {
                     'A' => {
                         if (hist_pos > 0) {
                             if (hist_pos == history.count) {
-                                @memcpy(saved_line[0..len], buf[0..len]);
+                                @memcpy(save_buf[0..len], line_buf[0..len]);
                                 saved_len = len;
                             }
                             hist_pos -= 1;
                             const h = history.get(hist_pos);
-                            len = @min(h.len, buf.len);
-                            @memcpy(buf[0..len], h[0..len]);
+                            len = @min(h.len, line_buf.len);
+                            @memcpy(line_buf[0..len], h[0..len]);
                             cursor = len;
-                            refreshLine(prompt, buf[0..len], cursor);
+                            refreshLine(prompt, line_buf[0..len], cursor);
                         }
                     },
                     'B' => {
@@ -104,14 +106,14 @@ pub fn readLine(prompt: []const u8, history: *History) ?[]const u8 {
                             hist_pos += 1;
                             if (hist_pos == history.count) {
                                 len = saved_len;
-                                @memcpy(buf[0..len], saved_line[0..len]);
+                                @memcpy(line_buf[0..len], save_buf[0..len]);
                             } else {
                                 const h = history.get(hist_pos);
-                                len = @min(h.len, buf.len);
-                                @memcpy(buf[0..len], h[0..len]);
+                                len = @min(h.len, line_buf.len);
+                                @memcpy(line_buf[0..len], h[0..len]);
                             }
                             cursor = len;
-                            refreshLine(prompt, buf[0..len], cursor);
+                            refreshLine(prompt, line_buf[0..len], cursor);
                         }
                     },
                     'C' => {
@@ -128,19 +130,19 @@ pub fn readLine(prompt: []const u8, history: *History) ?[]const u8 {
                     },
                     'H' => {
                         cursor = 0;
-                        refreshLine(prompt, buf[0..len], cursor);
+                        refreshLine(prompt, line_buf[0..len], cursor);
                     },
                     'F' => {
                         cursor = len;
-                        refreshLine(prompt, buf[0..len], cursor);
+                        refreshLine(prompt, line_buf[0..len], cursor);
                     },
                     '3' => {
                         var extra: [1]u8 = undefined;
                         _ = posix.read(STDIN, &extra) catch {};
                         if (extra[0] == '~' and cursor < len) {
-                            std.mem.copyForwards(u8, buf[cursor..], buf[cursor + 1 .. len]);
+                            std.mem.copyForwards(u8, line_buf[cursor..], line_buf[cursor + 1 .. len]);
                             len -= 1;
-                            refreshLine(prompt, buf[0..len], cursor);
+                            refreshLine(prompt, line_buf[0..len], cursor);
                         }
                     },
                     else => {},
@@ -148,36 +150,36 @@ pub fn readLine(prompt: []const u8, history: *History) ?[]const u8 {
             },
             1 => {
                 cursor = 0;
-                refreshLine(prompt, buf[0..len], cursor);
+                refreshLine(prompt, line_buf[0..len], cursor);
             },
             5 => {
                 cursor = len;
-                refreshLine(prompt, buf[0..len], cursor);
+                refreshLine(prompt, line_buf[0..len], cursor);
             },
             11 => {
                 len = cursor;
-                refreshLine(prompt, buf[0..len], cursor);
+                refreshLine(prompt, line_buf[0..len], cursor);
             },
             21 => {
-                std.mem.copyForwards(u8, buf[0..], buf[cursor..len]);
+                std.mem.copyForwards(u8, line_buf[0..], line_buf[cursor..len]);
                 len -= cursor;
                 cursor = 0;
-                refreshLine(prompt, buf[0..len], cursor);
+                refreshLine(prompt, line_buf[0..len], cursor);
             },
             else => |ch| {
                 if (ch >= 32 and ch < 127) {
-                    if (len < buf.len - 1) {
+                    if (len < line_buf.len - 1) {
                         if (cursor < len) {
-                            std.mem.copyBackwards(u8, buf[cursor + 1 .. len + 1], buf[cursor..len]);
+                            std.mem.copyBackwards(u8, line_buf[cursor + 1 .. len + 1], line_buf[cursor..len]);
                         }
-                        buf[cursor] = ch;
+                        line_buf[cursor] = ch;
                         len += 1;
                         cursor += 1;
                         if (cursor == len) {
                             const s: [1]u8 = .{ch};
                             writeAll(&s);
                         } else {
-                            refreshLine(prompt, buf[0..len], cursor);
+                            refreshLine(prompt, line_buf[0..len], cursor);
                         }
                     }
                 }

@@ -19,11 +19,11 @@ Features not yet implemented, organized by category and priority.
 - [x] No-space math — `=22/7`, `=2^10` via operator spacing retry
 - [x] Comparison evaluation — eq/ne/lt/gt/le/ge with smart numeric/string logic
 - [x] `cmd ???` hook — define, show, delete
+- [x] Readline — raw terminal mode, arrow keys, history (512 entries), Ctrl+A/E/K/U/C/D
 - [x] 233 tests — parse + execution coverage
 
 ## Next Up
 
-- [ ] Readline / line editing — raw terminal mode, arrow keys, history navigation
 - [ ] Rich prompt — directory, git branch, exit code, duration
 
 ## Grammar Engine
