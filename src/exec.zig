@@ -56,6 +56,13 @@ pub const Shell = struct {
     // Positional arguments ($1-$9, $*, $#)
     args: []const []const u8 = &.{},
 
+    // Directory history (MRU, deduplicated)
+    dir_history: [32][]const u8 = .{""} ** 32,
+    dir_count: u8 = 0,
+
+    // Key bindings (key combo → command string)
+    key_bindings: std.StringHashMap([]const u8),
+
     // Job control state
     tty_fd: posix.fd_t = posix.STDIN_FILENO,
     shell_pgid: posix.pid_t = 0,
@@ -69,6 +76,7 @@ pub const Shell = struct {
             .vars = std.StringHashMap([]const u8).init(alloc),
             .user_cmds = std.StringHashMap(UserCmd).init(alloc),
             .options = std.StringHashMap([]const u8).init(alloc),
+            .key_bindings = std.StringHashMap([]const u8).init(alloc),
         };
     }
 
@@ -88,6 +96,7 @@ pub const Shell = struct {
         self.vars.deinit();
         self.user_cmds.deinit();
         self.options.deinit();
+        self.key_bindings.deinit();
     }
 
     // =========================================================================
@@ -302,8 +311,8 @@ pub const Shell = struct {
             .set_reset => self.evalSetReset(args, source),
             .set_show => self.evalSetShow(args, source),
             .set_list => self.evalSetList(),
-            .key => { self.last_exit = 0; },
-            .key_del => { self.last_exit = 0; },
+            .key => self.evalKey(args, source),
+            .key_del => self.evalKeyDel(args, source),
             .eq, .ne, .lt, .gt, .le, .ge, .match, .nomatch => self.evalComparison(tag, args, source),
             .shift => self.evalShift(),
             .@"break" => { self.flow = .break_loop; self.last_exit = 0; },
@@ -462,6 +471,7 @@ pub const Shell = struct {
                         std.debug.print("cd: {s}: {s}\n", .{ name, @errorName(err) });
                         self.last_exit = 1;
                     };
+                    self.recordDir();
                     self.last_exit = 0;
                     self.cleanupProcSubs(procsub_fds.items);
                     return;
@@ -1198,6 +1208,7 @@ pub const Shell = struct {
                 if (pos + 2 <= buf.len) { buf[pos] = '.'; buf[pos + 1] = '.'; pos += 2; }
             }
             if (pos > 0) posix.chdir(buf[0..pos]) catch {};
+            self.recordDir();
             self.last_exit = 0;
             return true;
         }
@@ -1207,6 +1218,7 @@ pub const Shell = struct {
         if (std.mem.eql(u8, name, "type")) { self.builtinType(argv); return true; }
         if (std.mem.eql(u8, name, "pwd")) { self.builtinPwd(); return true; }
         if (std.mem.eql(u8, name, "jobs")) { self.builtinJobs(); return true; }
+        if (std.mem.eql(u8, name, "dirs")) { self.builtinDirs(); return true; }
         if (std.mem.eql(u8, name, "fg")) { self.builtinFg(argv); return true; }
         if (std.mem.eql(u8, name, "bg")) { self.builtinBg(argv); return true; }
 
@@ -1220,7 +1232,28 @@ pub const Shell = struct {
             self.last_exit = 1;
             return;
         };
+        self.recordDir();
         self.last_exit = 0;
+    }
+
+    pub fn recordDir(self: *Shell) void {
+        var buf: [4096]u8 = undefined;
+        const cwd = posix.getcwd(&buf) catch return;
+        // Deduplicate: remove existing entry if present
+        var i: u8 = 0;
+        while (i < self.dir_count) {
+            if (std.mem.eql(u8, self.dir_history[i], cwd)) {
+                var j = i;
+                while (j + 1 < self.dir_count) : (j += 1) self.dir_history[j] = self.dir_history[j + 1];
+                self.dir_count -= 1;
+            } else i += 1;
+        }
+        // Shift down and insert at front
+        if (self.dir_count >= 32) self.dir_count = 31;
+        var k: u8 = self.dir_count;
+        while (k > 0) : (k -= 1) self.dir_history[k] = self.dir_history[k - 1];
+        self.dir_history[0] = self.allocator.dupe(u8, cwd) catch return;
+        self.dir_count += 1;
     }
 
     fn builtinEcho(self: *Shell, argv: []const []const u8) void {
@@ -1312,6 +1345,40 @@ pub const Shell = struct {
         self.last_exit = 0;
     }
 
+    fn builtinDirs(self: *Shell) void {
+        if (self.dir_count == 0) {
+            std.debug.print("(no directory history)\n", .{});
+            self.last_exit = 0;
+            return;
+        }
+        const show = @min(self.dir_count, 9);
+        for (0..show) |i| {
+            std.debug.print("{d} {s}\n", .{ i + 1, self.dir_history[i] });
+        }
+        // Read a single digit
+        std.debug.print("? ", .{});
+        var input: [1]u8 = undefined;
+        const n = posix.read(posix.STDIN_FILENO, &input) catch {
+            self.last_exit = 0;
+            return;
+        };
+        if (n == 0) { self.last_exit = 0; return; }
+        std.debug.print("\n", .{});
+        const digit = input[0];
+        if (digit >= '1' and digit <= '9') {
+            const idx: usize = digit - '1';
+            if (idx < self.dir_count) {
+                posix.chdir(self.dir_history[idx]) catch |err| {
+                    std.debug.print("dirs: {s}: {s}\n", .{ self.dir_history[idx], @errorName(err) });
+                    self.last_exit = 1;
+                    return;
+                };
+                self.recordDir();
+            }
+        }
+        self.last_exit = 0;
+    }
+
     fn builtinType(self: *Shell, argv: []const []const u8) void {
         for (argv[1..]) |name| {
             if (self.user_cmds.contains(name)) {
@@ -1327,7 +1394,7 @@ pub const Shell = struct {
 
     fn isBuiltin(name: []const u8) bool {
         if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) return true;
-        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "jobs", "fg", "bg", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
+        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "jobs", "fg", "bg", "dirs", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
         for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
         }
@@ -1416,6 +1483,25 @@ pub const Shell = struct {
         var it = self.user_cmds.iterator();
         while (it.next()) |entry| std.debug.print("cmd {s}\n", .{entry.key_ptr.*});
         self.last_exit = 0;
+    }
+
+    fn evalKey(self: *Shell, args: []const Sexp, source: []const u8) void {
+        if (args.len < 2) return;
+        const combo = self.allocator.dupe(u8, self.sexpToStr(args[0], source) orelse return) catch return;
+        const command = self.allocator.dupe(u8, self.sexpToStr(args[1], source) orelse return) catch return;
+        self.key_bindings.put(combo, command) catch {};
+        self.last_exit = 0;
+    }
+
+    fn evalKeyDel(self: *Shell, args: []const Sexp, source: []const u8) void {
+        if (args.len < 1) return;
+        const combo = self.sexpToStr(args[0], source) orelse return;
+        _ = self.key_bindings.remove(combo);
+        self.last_exit = 0;
+    }
+
+    pub fn lookupKeyBinding(self: *Shell, combo: []const u8) ?[]const u8 {
+        return self.key_bindings.get(combo);
     }
 
     fn evalSourceCmd(self: *Shell, args: []const Sexp, source: []const u8) void {

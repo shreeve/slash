@@ -33,18 +33,18 @@ Features not yet implemented, organized by category and priority.
 - [x] String interpolation in `"""` and `` ```lang `` heredocs — `$var`, `${var}`, `\$` escape
 - [x] Glob expansion — *, ?, [a-z], {a,b}, ** recursive, plus regex globs (~|pattern|), sorted output
 - [x] Regexp expansion - similar but using our new regex types
+- [x] `dirs` — directory MRU picker, numbered 1-9, type digit to jump
+- [x] `key` bindings — `key esc+= dirs`, ESC+char dispatch from readline
 
 ## Persistence (Phase A)
 
 - [ ] SQLite history — every command stored with timestamp, cwd, exit code
 - [ ] `Ctrl+R` history search
 - [ ] Directory frecency / `j` fuzzy jump
-- [ ] `dirs` interactive picker
 
 ## Interactive (Phase B)
 
 - [ ] Syntax highlighting — live as you type, using the parser
-- [ ] `key` bindings — actual implementation with human-readable combos
 - [ ] Multi-line editing — blank-line continuation for indent blocks, `\` continuation at the prompt
 
 ## Completion (Phase C)

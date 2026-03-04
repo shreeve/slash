@@ -134,12 +134,31 @@ pub fn main() !void {
 // REPL
 // =============================================================================
 
+var repl_shell: ?*exec.Shell = null;
+
+fn keyLookup(combo: []const u8) ?[]const u8 {
+    if (repl_shell) |sh| return sh.lookupKeyBinding(combo);
+    return null;
+}
+
+fn keyExec(cmd: []const u8) void {
+    if (repl_shell) |sh| {
+        const source = sh.allocator.dupeZ(u8, cmd) catch return;
+        defer sh.allocator.free(source);
+        sh.execLine(source);
+    }
+}
+
 fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
     if (std.posix.getenv("HOME")) |home| {
         var path_buf: [4096]u8 = undefined;
         const rc = std.fmt.bufPrint(&path_buf, "{s}/.slashrc", .{home}) catch null;
         if (rc) |p| ev.sourceFile(p);
     }
+
+    repl_shell = ev;
+    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec });
+    ev.recordDir();
 
     var history = readline.History.init(alloc);
     var last_duration_ms: u64 = 0;

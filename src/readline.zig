@@ -37,6 +37,17 @@ var save_buf: [4096]u8 = undefined;
 var active_prompt: []const u8 = "$ ";
 var active_prompt_len: usize = 2;
 
+pub const KeyHandler = struct {
+    lookup: *const fn (combo: []const u8) ?[]const u8,
+    exec: *const fn (cmd: []const u8) void,
+};
+
+var key_handler: ?KeyHandler = null;
+
+pub fn setKeyHandler(handler: KeyHandler) void {
+    key_handler = handler;
+}
+
 pub fn readLineEx(prompt_str: []const u8, prompt_visible_len: usize, history: *History) ?[]const u8 {
     return readLineInner(prompt_str, prompt_visible_len, history);
 }
@@ -95,7 +106,26 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                 var seq: [2]u8 = undefined;
                 const n1 = posix.read(STDIN, seq[0..1]) catch return null;
                 if (n1 == 0) continue;
-                if (seq[0] != '[') continue;
+                if (seq[0] != '[') {
+                    // ESC + char — check key bindings
+                    if (key_handler) |kh| {
+                        var combo_buf: [16]u8 = undefined;
+                        const combo = std.fmt.bufPrint(&combo_buf, "esc+{c}", .{seq[0]}) catch continue;
+                        if (kh.lookup(combo)) |cmd| {
+                            disableRawMode(orig);
+                            writeAll("\n");
+                            kh.exec(cmd);
+                            writeAll(prompt);
+                            const new_orig = enableRawMode() orelse return null;
+                            _ = new_orig;
+                            // Clear and restart line for clean state after command
+                            len = 0;
+                            cursor = 0;
+                            refreshLine(line_buf[0..len], cursor);
+                        }
+                    }
+                    continue;
+                }
                 const n2 = posix.read(STDIN, seq[1..2]) catch return null;
                 if (n2 == 0) continue;
 
