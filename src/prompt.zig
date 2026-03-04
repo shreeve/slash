@@ -211,7 +211,7 @@ fn abbreviateHome(path: []const u8, home: []const u8, buf: *[4096]u8) []const u8
     if (home.len > 0 and std.mem.startsWith(u8, path, home)) {
         buf[0] = '~';
         const rest = path[home.len..];
-        if (rest.len > 0) {
+        if (rest.len > 0 and 1 + rest.len <= buf.len) {
             @memcpy(buf[1 .. 1 + rest.len], rest);
             return buf[0 .. 1 + rest.len];
         }

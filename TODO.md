@@ -30,7 +30,7 @@ Features not yet implemented, organized by category and priority.
 
 ## Refactoring
 
-- [x] Extract slash-specific lexer logic from grammar.zig into slash_lexer.zig — heredoc, indent, regex are shell-specific, not generic grammar engine
+- [x] Extract slash-specific lexer logic from grammar.zig into lexer.zig — heredoc, indent, regex are shell-specific, not generic grammar engine
 
 ## Executor
 

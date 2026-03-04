@@ -175,8 +175,7 @@ fn dumpTokens(source: []const u8, label: []const u8) void {
     var lex = Lexer.init(source);
     while (true) {
         const tok = lex.next();
-        const text = source[tok.pos..][0..tok.len];
-        std.debug.print("{s:>16}  {s}\n", .{ @tagName(tok.cat), text });
+        std.debug.print("{s:>16}  {s}\n", .{ @tagName(tok.cat), lex.text(tok) });
         if (tok.cat == .eof) break;
     }
 }

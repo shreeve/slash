@@ -615,8 +615,9 @@ pub const Shell = struct {
         return "0";
     }
 
-    fn pidStr(_: *Shell) []const u8 {
-        return "0";
+    fn pidStr(self: *Shell) []const u8 {
+        const pid = libc.getpid();
+        return std.fmt.allocPrint(self.allocator, "{d}", .{pid}) catch "0";
     }
 
     // =========================================================================
