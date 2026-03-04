@@ -38,11 +38,17 @@ var active_prompt: []const u8 = "$ ";
 var active_prompt_len: usize = 2;
 var ghost_text: []const u8 = "";
 
+pub const PaletteResult = struct {
+    text: []const u8,
+    kind: enum { history, directory, command },
+};
+
 pub const KeyHandler = struct {
     lookup: *const fn (combo: []const u8) ?[]const u8,
     exec: *const fn (cmd: []const u8) void,
     search: ?*const fn (alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 = null,
     suggest: ?*const fn (prefix: []const u8) ?[]const u8 = null,
+    palette: ?*const fn (alloc: std.mem.Allocator, query: []const u8) []PaletteResult = null,
 };
 
 var key_handler: ?KeyHandler = null;
@@ -233,6 +239,35 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     refreshLine(line_buf[0..len], cursor);
                 }
             },
+            16 => {
+                // Ctrl+P: command palette
+                if (key_handler) |kh| {
+                    if (kh.palette != null) {
+                        disableRawMode(orig);
+                        const result = paletteSearch(kh);
+                        const new_orig = enableRawMode() orelse return null;
+                        _ = new_orig;
+                        if (result) |r| {
+                            switch (r.kind) {
+                                .history, .command => {
+                                    @memcpy(line_buf[0..r.text.len], r.text);
+                                    len = r.text.len;
+                                    cursor = len;
+                                },
+                                .directory => {
+                                    @memcpy(line_buf[0..2], "cd");
+                                    line_buf[2] = ' ';
+                                    @memcpy(line_buf[3..][0..r.text.len], r.text);
+                                    len = 3 + r.text.len;
+                                    cursor = len;
+                                },
+                            }
+                        }
+                        ghost_text = "";
+                        refreshLine(line_buf[0..len], cursor);
+                    }
+                }
+            },
             1 => {
                 cursor = 0;
                 refreshLine(line_buf[0..len], cursor);
@@ -389,6 +424,99 @@ fn historySearch(kh: KeyHandler) ?[]const u8 {
                     selected = 0;
                     _ = arena.reset(.retain_capacity);
                     results = search_fn(alloc, query_buf[0..qlen], 10);
+                }
+            },
+        }
+    }
+    clearOverlay(results.len + 1);
+    return null;
+}
+
+fn paletteSearch(kh: KeyHandler) ?PaletteResult {
+    const palette_fn = kh.palette orelse return null;
+    var query_buf: [256]u8 = undefined;
+    var qlen: usize = 0;
+    var selected: usize = 0;
+    var results: []PaletteResult = &.{};
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    results = palette_fn(alloc, "");
+
+    while (true) {
+        writeAll("\r\n\x1b[J");
+        writeAll("\x1b[7m Palette: \x1b[0m ");
+        writeAll(query_buf[0..qlen]);
+        writeAll("\n");
+        for (results, 0..) |r, i| {
+            if (i == selected) writeAll("\x1b[7m") else writeAll("  ");
+            writeAll(r.text);
+            if (i == selected) writeAll("\x1b[0m");
+            const kind_str = switch (r.kind) {
+                .history => "  \x1b[90m(history)\x1b[0m",
+                .directory => "  \x1b[90m(dir)\x1b[0m",
+                .command => "  \x1b[90m(cmd)\x1b[0m",
+            };
+            writeAll(kind_str);
+            writeAll("\n");
+        }
+        var up_buf: [16]u8 = undefined;
+        const up = std.fmt.bufPrint(&up_buf, "\x1b[{d}A", .{results.len + 1}) catch break;
+        writeAll(up);
+        var col_buf: [16]u8 = undefined;
+        const col = std.fmt.bufPrint(&col_buf, "\r\x1b[{d}C", .{12 + qlen}) catch break;
+        writeAll(col);
+
+        var ch: [1]u8 = undefined;
+        const n = posix.read(STDIN, &ch) catch break;
+        if (n == 0) break;
+
+        switch (ch[0]) {
+            '\r', '\n' => {
+                clearOverlay(results.len + 1);
+                if (selected < results.len) return results[selected];
+                return null;
+            },
+            27 => {
+                var seq: [2]u8 = undefined;
+                const n1 = posix.read(STDIN, seq[0..1]) catch break;
+                if (n1 > 0 and seq[0] == '[') {
+                    const n2 = posix.read(STDIN, seq[1..2]) catch break;
+                    if (n2 > 0) {
+                        if (seq[1] == 'A' and selected > 0) selected -= 1;
+                        if (seq[1] == 'B' and selected + 1 < results.len) selected += 1;
+                    }
+                } else {
+                    clearOverlay(results.len + 1);
+                    return null;
+                }
+            },
+            127, 8 => {
+                if (qlen > 0) {
+                    qlen -= 1;
+                    selected = 0;
+                    _ = arena.reset(.retain_capacity);
+                    results = palette_fn(alloc, query_buf[0..qlen]);
+                }
+            },
+            9 => {
+                // Tab — paste to prompt (same as Enter for palette)
+                clearOverlay(results.len + 1);
+                if (selected < results.len) return results[selected];
+                return null;
+            },
+            3 => {
+                clearOverlay(results.len + 1);
+                return null;
+            },
+            else => |byte| {
+                if (byte >= 32 and byte < 127 and qlen < query_buf.len) {
+                    query_buf[qlen] = byte;
+                    qlen += 1;
+                    selected = 0;
+                    _ = arena.reset(.retain_capacity);
+                    results = palette_fn(alloc, query_buf[0..qlen]);
                 }
             },
         }

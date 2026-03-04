@@ -149,6 +149,35 @@ fn historySuggest(prefix: []const u8) ?[]const u8 {
     return null;
 }
 
+fn paletteFn(alloc: std.mem.Allocator, query: []const u8) []readline.PaletteResult {
+    var results: std.ArrayList(readline.PaletteResult) = .empty;
+    if (repl_shell) |sh| {
+        // History results
+        if (sh.history_db) |hdb| {
+            const hist_results = hdb.search(alloc, query, 5);
+            for (hist_results) |cmd| {
+                results.append(alloc, .{ .text = cmd, .kind = .history }) catch {};
+            }
+        }
+        // Directory results
+        if (sh.history_db) |hdb| {
+            const dir_results = hdb.frecency(alloc, query, 3);
+            for (dir_results) |d| {
+                results.append(alloc, .{ .text = d.path, .kind = .directory }) catch {};
+            }
+        }
+        // User command results
+        var it = sh.user_cmds.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (query.len == 0 or std.mem.indexOf(u8, name, query) != null) {
+                results.append(alloc, .{ .text = name, .kind = .command }) catch {};
+            }
+        }
+    }
+    return results.items;
+}
+
 fn historySearchFn(alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 {
     if (repl_shell) |sh| {
         if (sh.history_db) |hdb| return hdb.search(alloc, query, limit);
@@ -172,7 +201,7 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
     }
 
     repl_shell = ev;
-    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec, .search = &historySearchFn, .suggest = &historySuggest });
+    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec, .search = &historySearchFn, .suggest = &historySuggest, .palette = &paletteFn });
     ev.recordDir();
 
     const hdb = history.Db.open() catch null;
