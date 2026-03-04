@@ -36,11 +36,17 @@ Features not yet implemented, organized by category and priority.
 - [x] `dirs` — directory MRU picker, numbered 1-9, type digit to jump
 - [x] `key` bindings — `key esc+= dirs`, ESC+char dispatch from readline
 
-## Persistence (Phase A)
+## History & Navigation (Phase A)
 
-- [ ] SQLite history — every command stored with timestamp, cwd, exit code
-- [ ] `Ctrl+R` history search
-- [ ] Directory frecency / `j` fuzzy jump
+SQLite foundation — one database powers history, search, and navigation.
+
+- [ ] SQLite history — `~/.slash/history.db`, record command, cwd, timestamp, exit_code, duration
+- [ ] List-based `Ctrl+R` — show filtered results as a list (not Bash single-result cycling), arrow keys to navigate, Enter to select
+- [ ] `j` frecency jump — directory ranking by frequency + recency, `j foo` jumps to best match
+- [ ] Up-arrow prefix search — typing `git` then `↑` filters history to git commands only
+- [ ] Inline ghost suggestions — show most likely completion in gray, `→` to accept
+- [ ] `history` command — query history (`history top`, `history search docker`)
+- [ ] Command palette (`Ctrl+P`) — unified search across history, dirs, aliases, scripts, git branches; fuzzy ranked; preview panel; providers architecture
 
 ## Interactive (Phase B)
 
