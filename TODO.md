@@ -28,6 +28,10 @@ Features not yet implemented, organized by category and priority.
 - [x] Job control — process groups (setpgid), terminal ownership (tcsetpgrp), job table, WUNTRACED for Ctrl+Z, fg/bg/jobs builtins, background reaping
 - [x] Regex literals — `~|pattern|flags` standalone, `/pattern/` after `=~`/`!~`, any delimiter, Oniguruma execution
 
+## Refactoring
+
+- [ ] Extract slash-specific lexer logic from grammar.zig into slash.zig — heredoc, indent, regex are shell-specific, not generic grammar engine
+
 ## Executor
 
 - [ ] `shift` — needs positional argument tracking ($1, $2, etc.)
