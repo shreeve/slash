@@ -92,6 +92,10 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
 
         switch (c[0]) {
             '\r', '\n' => {
+                if (ghost_text.len > 0) {
+                    ghost_text = "";
+                    refreshLine(line_buf[0..len], cursor);
+                }
                 writeAll("\n");
                 if (len == 0) return "";
                 return line_buf[0..len];
@@ -126,7 +130,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     // ESC + char — check key bindings
                     if (key_handler) |kh| {
                         var combo_buf: [16]u8 = undefined;
-                        const combo = std.fmt.bufPrint(&combo_buf, "esc+{c}", .{seq[0]}) catch continue;
+                        const combo = std.fmt.bufPrint(&combo_buf, "esc-{c}", .{seq[0]}) catch continue;
                         if (kh.lookup(combo)) |cmd| {
                             disableRawMode(orig);
                             writeAll("\n");

@@ -635,6 +635,7 @@ params    = LPAREN_TIGHT L(name) ")"        → 2
 
 key_def   = KEY word word                   → (key 2 3)
           | KEY word "-"                    → (key_del 2)
+          | KEY                             → (key_list)
 
 # ==============================================================================
 # SHELL OPTIONS: set

@@ -310,6 +310,7 @@ pub const Shell = struct {
             .set_list => self.evalSetList(),
             .key => self.evalKey(args, source),
             .key_del => self.evalKeyDel(args, source),
+            .key_list => self.evalKeyList(),
             .eq, .ne, .lt, .gt, .le, .ge, .match, .nomatch => self.evalComparison(tag, args, source),
             .shift => self.evalShift(),
             .@"break" => { self.flow = .break_loop; self.last_exit = 0; },
@@ -1561,6 +1562,12 @@ pub const Shell = struct {
         if (args.len < 1) return;
         const combo = self.sexpToStr(args[0], source) orelse return;
         _ = self.key_bindings.remove(combo);
+        self.last_exit = 0;
+    }
+
+    fn evalKeyList(self: *Shell) void {
+        var it = self.key_bindings.iterator();
+        while (it.next()) |entry| std.debug.print("key {s} {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         self.last_exit = 0;
     }
 
