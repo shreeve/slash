@@ -189,8 +189,8 @@ j slash                               # fuzzy jump to frecent match
 /tmp                                  # auto-cd (just type the path)
 ```
 
-Press `Esc-=` for an interactive directory picker showing your most
-recent directories ranked by frecency. Type a number to jump instantly.
+Press `Esc-=` (or type `j`) to list your most recent directories ranked
+by frecency. Type a number at the next prompt to jump.
 
 ### Prompt
 
@@ -214,7 +214,7 @@ instances. `Ctrl+R` opens incremental search with live filtering.
 
 Directory frecency (frequency + recency) is derived from the history table's
 working directory column — no separate tracking needed. The `j` command and
-the interactive directory picker both use this data.
+the `j` directory listing both use this data.
 
 ### Tab Completion
 
@@ -236,7 +236,7 @@ to defaults before `exec` in children.
 Human-readable syntax with `key`:
 
 ```
-key esc-=     dirs                    # interactive directory picker
+key esc-=     "j"                     # list recent directories
 key esc-1     ".."                    # up 1 directory
 key esc-l     "ls -la"               # quick listing
 key ctrl-r    history-search          # incremental search
