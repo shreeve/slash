@@ -33,7 +33,7 @@ Features not yet implemented, organized by category and priority.
 - [x] String interpolation in `"""` and `` ```lang `` heredocs — `$var`, `${var}`, `\$` escape
 - [x] Glob expansion — *, ?, [a-z], {a,b}, ** recursive, plus regex globs (~|pattern|), sorted output
 - [x] Regexp expansion - similar but using our new regex types
-- [x] `dirs` — directory MRU picker, numbered 1-9, type digit to jump
+- [x] `j` — directory jump: frecency from SQLite, `j foo` matches, `j` shows picker (replaces dirs)
 - [x] `key` bindings — `key esc+= dirs`, ESC+char dispatch from readline
 
 ## History & Navigation

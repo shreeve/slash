@@ -253,7 +253,6 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
 
     repl_shell = ev;
     readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec, .search = &historySearchFn, .suggest = &historySuggest, .palette = &paletteFn, .eval_math = &evalMathPreview });
-    ev.recordDir();
 
     const hdb = history.Db.open() catch null;
     defer if (hdb) |h| h.close();

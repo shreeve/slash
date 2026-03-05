@@ -56,10 +56,6 @@ pub const Shell = struct {
     // Positional arguments ($1-$9, $*, $#)
     args: []const []const u8 = &.{},
 
-    // Directory history (MRU, deduplicated)
-    dir_history: [32][]const u8 = .{""} ** 32,
-    dir_count: u8 = 0,
-
     // Key bindings (key combo → command string)
     key_bindings: std.StringHashMap([]const u8),
 
@@ -474,7 +470,6 @@ pub const Shell = struct {
                         std.debug.print("cd: {s}: {s}\n", .{ name, @errorName(err) });
                         self.last_exit = 1;
                     };
-                    self.recordDir();
                     self.last_exit = 0;
                     self.cleanupProcSubs(procsub_fds.items);
                     return;
@@ -1242,7 +1237,6 @@ pub const Shell = struct {
                 if (pos + 2 <= buf.len) { buf[pos] = '.'; buf[pos + 1] = '.'; pos += 2; }
             }
             if (pos > 0) posix.chdir(buf[0..pos]) catch {};
-            self.recordDir();
             self.last_exit = 0;
             return true;
         }
@@ -1252,7 +1246,6 @@ pub const Shell = struct {
         if (std.mem.eql(u8, name, "type")) { self.builtinType(argv); return true; }
         if (std.mem.eql(u8, name, "pwd")) { self.builtinPwd(); return true; }
         if (std.mem.eql(u8, name, "jobs")) { self.builtinJobs(); return true; }
-        if (std.mem.eql(u8, name, "dirs")) { self.builtinDirs(); return true; }
         if (std.mem.eql(u8, name, "history")) { self.builtinHistory(argv); return true; }
         if (std.mem.eql(u8, name, "j")) { self.builtinJ(argv); return true; }
         if (std.mem.eql(u8, name, "fg")) { self.builtinFg(argv); return true; }
@@ -1268,29 +1261,9 @@ pub const Shell = struct {
             self.last_exit = 1;
             return;
         };
-        self.recordDir();
         self.last_exit = 0;
     }
 
-    pub fn recordDir(self: *Shell) void {
-        var buf: [4096]u8 = undefined;
-        const cwd = posix.getcwd(&buf) catch return;
-        // Deduplicate: remove existing entry if present
-        var i: u8 = 0;
-        while (i < self.dir_count) {
-            if (std.mem.eql(u8, self.dir_history[i], cwd)) {
-                var j = i;
-                while (j + 1 < self.dir_count) : (j += 1) self.dir_history[j] = self.dir_history[j + 1];
-                self.dir_count -= 1;
-            } else i += 1;
-        }
-        // Shift down and insert at front
-        if (self.dir_count >= 32) self.dir_count = 31;
-        var k: u8 = self.dir_count;
-        while (k > 0) : (k -= 1) self.dir_history[k] = self.dir_history[k - 1];
-        self.dir_history[0] = self.allocator.dupe(u8, cwd) catch return;
-        self.dir_count += 1;
-    }
 
     fn builtinEcho(self: *Shell, argv: []const []const u8) void {
         const stdout = std.fs.File.stdout();
@@ -1409,7 +1382,6 @@ pub const Shell = struct {
                     self.last_exit = 1;
                     return;
                 };
-                self.recordDir();
             }
         }
         self.last_exit = 0;
@@ -1447,7 +1419,6 @@ pub const Shell = struct {
                 self.last_exit = 1;
                 return;
             };
-            self.recordDir();
             self.last_exit = 0;
             return;
         }
@@ -1467,7 +1438,6 @@ pub const Shell = struct {
                     self.last_exit = 1;
                     return;
                 };
-                self.recordDir();
             }
         }
         self.last_exit = 0;
@@ -1488,7 +1458,7 @@ pub const Shell = struct {
 
     fn isBuiltin(name: []const u8) bool {
         if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) return true;
-        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "jobs", "fg", "bg", "dirs", "history", "j", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
+        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "jobs", "fg", "bg", "history", "j", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
         for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
         }
