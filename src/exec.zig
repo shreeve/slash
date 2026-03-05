@@ -1259,7 +1259,15 @@ pub const Shell = struct {
     }
 
     fn builtinCd(self: *Shell, argv: []const []const u8) void {
-        const target = if (argv.len > 1) argv[1] else posix.getenv("HOME") orelse "/";
+        const raw = if (argv.len > 1) argv[1] else posix.getenv("HOME") orelse "/";
+        var expand_buf: [4096]u8 = undefined;
+        const target = if (raw.len >= 2 and raw[0] == '~' and raw[1] == '/') blk: {
+            const home = posix.getenv("HOME") orelse break :blk raw;
+            break :blk std.fmt.bufPrint(&expand_buf, "{s}{s}", .{ home, raw[1..] }) catch raw;
+        } else if (raw.len == 1 and raw[0] == '~')
+            posix.getenv("HOME") orelse "/"
+        else
+            raw;
         posix.chdir(target) catch |err| {
             std.debug.print("cd: {s}: {s}\n", .{ target, @errorName(err) });
             self.last_exit = 1;

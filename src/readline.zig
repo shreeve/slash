@@ -319,15 +319,24 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
             },
             else => |ch| {
                 if (ch >= 32 and ch < 127) {
-                    if (len < line_buf.len - 1) {
-                        if (cursor < len) {
-                            std.mem.copyBackwards(u8, line_buf[cursor + 1 .. len + 1], line_buf[cursor..len]);
-                        }
-                        line_buf[cursor] = ch;
-                        len += 1;
-                        cursor += 1;
+                    // Space after dir completion: replace trailing / with space
+                    if (ch == ' ' and completed_dir_slash and cursor > 0 and cursor == len and line_buf[cursor - 1] == '/') {
+                        line_buf[cursor - 1] = ' ';
+                        completed_dir_slash = false;
                         updateGhost(line_buf[0..len]);
                         refreshLine(line_buf[0..len], cursor);
+                    } else {
+                        completed_dir_slash = false;
+                        if (len < line_buf.len - 1) {
+                            if (cursor < len) {
+                                std.mem.copyBackwards(u8, line_buf[cursor + 1 .. len + 1], line_buf[cursor..len]);
+                            }
+                            line_buf[cursor] = ch;
+                            len += 1;
+                            cursor += 1;
+                            updateGhost(line_buf[0..len]);
+                            refreshLine(line_buf[0..len], cursor);
+                        }
                     }
                 }
             },
@@ -336,6 +345,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
 }
 
 var ghost_buf: [4096]u8 = undefined;
+var completed_dir_slash = false;
 var complete_buf: [4096]u8 = undefined;
 var complete_list_buf: [32][]const u8 = undefined;
 var complete_match_count: usize = 0;
@@ -421,13 +431,19 @@ fn completePath(prefix: []const u8, word_start: usize) TabResult {
     if (match_count == 1) {
         // Check if it's a directory — append /
         const name = complete_list_buf[0];
-        const check_path = if (std.mem.eql(u8, dir_path, ".") and dir_part.len == 0) name else name;
+        // Expand ~ for stat check
+        var stat_path_buf: [4096]u8 = undefined;
+        const check_path = if (name.len >= 2 and name[0] == '~' and name[1] == '/') blk: {
+            const home = std.posix.getenv("HOME") orelse break :blk name;
+            break :blk std.fmt.bufPrint(&stat_path_buf, "{s}{s}", .{ home, name[1..] }) catch name;
+        } else name;
         const stat = std.fs.cwd().statFile(check_path) catch null;
         if (stat != null and stat.?.kind == .directory) {
             const trail_len = name.len + 1;
             if (trail_len < 128) {
                 @memcpy(complete_buf[3968..][0..name.len], name);
                 complete_buf[3968 + name.len] = '/';
+                completed_dir_slash = true;
                 return .{ .replacement = complete_buf[3968..][0..trail_len], .word_start = word_start, .matches = 1 };
             }
         }
