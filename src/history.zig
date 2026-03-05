@@ -95,7 +95,7 @@ pub const Db = struct {
     pub fn recentDirs(self: Db, alloc: std.mem.Allocator, limit: usize) [][]const u8 {
         var results: std.ArrayList([]const u8) = .empty;
         var stmt: ?*c.sqlite3_stmt = null;
-        const sql = "SELECT DISTINCT cwd FROM history WHERE cwd != '' ORDER BY MAX(timestamp) DESC LIMIT ?";
+        const sql = "SELECT cwd FROM history WHERE cwd != '' GROUP BY cwd ORDER BY MAX(timestamp) DESC LIMIT ?";
         if (c.sqlite3_prepare_v2(self.handle, sql.ptr, -1, &stmt, null) != c.SQLITE_OK) return results.items;
         defer _ = c.sqlite3_finalize(stmt);
         _ = c.sqlite3_bind_int(stmt, 1, @intCast(limit));
@@ -176,7 +176,7 @@ pub const Db = struct {
         self.exec("DELETE FROM history WHERE id NOT IN (SELECT id FROM history ORDER BY timestamp DESC LIMIT 50000)");
         // Remove entries with directories that no longer exist (check top 500 distinct dirs)
         var stmt: ?*c.sqlite3_stmt = null;
-        const sql = "SELECT DISTINCT cwd FROM history WHERE cwd != '' ORDER BY MAX(id) DESC LIMIT 500";
+        const sql = "SELECT cwd FROM history WHERE cwd != '' GROUP BY cwd ORDER BY MAX(id) DESC LIMIT 500";
         if (c.sqlite3_prepare_v2(self.handle, sql, -1, &stmt, null) != c.SQLITE_OK) return;
         defer _ = c.sqlite3_finalize(stmt);
         var dead_buf: [32][512]u8 = undefined;
