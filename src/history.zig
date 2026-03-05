@@ -88,6 +88,24 @@ pub const Db = struct {
         return results.items;
     }
 
+    pub fn recentDirs(self: Db, alloc: std.mem.Allocator, limit: usize) [][]const u8 {
+        var results: std.ArrayList([]const u8) = .empty;
+        var stmt: ?*c.sqlite3_stmt = null;
+        const sql = "SELECT DISTINCT cwd FROM history WHERE cwd != '' ORDER BY MAX(timestamp) DESC LIMIT ?";
+        if (c.sqlite3_prepare_v2(self.handle, sql.ptr, -1, &stmt, null) != c.SQLITE_OK) return results.items;
+        defer _ = c.sqlite3_finalize(stmt);
+        _ = c.sqlite3_bind_int(stmt, 1, @intCast(limit));
+        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+            const text_ptr = c.sqlite3_column_text(stmt, 0);
+            const text_len: usize = @intCast(c.sqlite3_column_bytes(stmt, 0));
+            if (text_ptr) |p| {
+                const s: [*]const u8 = @ptrCast(p);
+                results.append(alloc, alloc.dupe(u8, s[0..text_len]) catch continue) catch {};
+            }
+        }
+        return results.items;
+    }
+
     pub fn suggest(self: Db, alloc: std.mem.Allocator, prefix: []const u8) ?[]const u8 {
         if (prefix.len < 2) return null;
         var stmt: ?*c.sqlite3_stmt = null;

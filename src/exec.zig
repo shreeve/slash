@@ -1410,20 +1410,20 @@ pub const Shell = struct {
     }
 
     fn builtinJ(self: *Shell, argv: []const []const u8) void {
-        const hdb = self.history_db orelse {
+        const HistoryDb = @import("history.zig").Db;
+        const hdb: HistoryDb = self.history_db orelse {
             std.debug.print("j: database not available\n", .{});
             self.last_exit = 1;
             return;
         };
-        const query = if (argv.len > 1) argv[1] else "";
-        const results = hdb.frecency(self.allocator, query, 9);
-        if (results.len == 0) {
-            std.debug.print("j: no matches\n", .{});
-            self.last_exit = 1;
-            return;
-        }
-        // j foo — jump to best match
+        // j foo — jump to best frecency match
         if (argv.len > 1) {
+            const results = hdb.frecency(self.allocator, argv[1], 1);
+            if (results.len == 0) {
+                std.debug.print("j: no matches for '{s}'\n", .{argv[1]});
+                self.last_exit = 1;
+                return;
+            }
             posix.chdir(results[0].path) catch |err| {
                 std.debug.print("j: {s}: {s}\n", .{ results[0].path, @errorName(err) });
                 self.last_exit = 1;
@@ -1432,12 +1432,18 @@ pub const Shell = struct {
             self.last_exit = 0;
             return;
         }
-        // j — list top 9, store for digit jump
+        // j — list 9 most recent unique dirs
+        const dirs = hdb.recentDirs(self.allocator, 9);
+        if (dirs.len == 0) {
+            std.debug.print("j: no directory history\n", .{});
+            self.last_exit = 0;
+            return;
+        }
         self.j_count = 0;
-        for (results, 0..) |r, i| {
-            std.debug.print("{d} {s}\n", .{ i + 1, r.path });
+        for (dirs, 0..) |path, i| {
+            std.debug.print("{d} {s}\n", .{ i + 1, path });
             if (i < 9) {
-                self.j_list[i] = self.allocator.dupe(u8, r.path) catch "";
+                self.j_list[i] = path;
                 self.j_count += 1;
             }
         }
