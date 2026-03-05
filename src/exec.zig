@@ -168,7 +168,7 @@ pub const Shell = struct {
         // Reap any finished background children (use raw C waitpid to handle ECHILD gracefully)
         while (true) {
             var status: i32 = 0;
-            const pid = libc.waitpid(-1, &status, 1);
+            const pid = libc.waitpid(-1, &status, libc.WNOHANG);
             if (pid <= 0) break;
             const result_status: u32 = @bitCast(status);
             for (&self.jobs) |*slot| {
@@ -1485,8 +1485,20 @@ pub const Shell = struct {
     }
 
     fn isBuiltin(name: []const u8) bool {
+        // Authoritative list of all builtin command names. Two dispatch layers:
+        //   tryBuiltin()       — runtime builtins, arrive as (cmd "name" ...)
+        //   dispatch/Keyword() — parser keywords with own s-expression tags
+        // Control-flow keywords (if/for/while/unless/until/try/else) and
+        // operator keywords (and/or/not/xor/in) are syntax, not commands,
+        // and are intentionally excluded.
         if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) return true;
-        const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "jobs", "fg", "bg", "history", "j", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue" };
+        const builtins = [_][]const u8{
+            "cd",      "echo",    "true",    "false",   "type",    "pwd",
+            "jobs",    "fg",      "bg",      "history", "j",
+            "exec",    "exit",    "source",
+            "set",     "cmd",     "key",
+            "test",    "shift",   "break",   "continue",
+        };
         for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
         }
