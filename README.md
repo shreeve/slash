@@ -69,15 +69,16 @@ make || echo failed      # or: make or echo failed
 name = "steve"
 count = 42
 PATH = "$PATH:/usr/local/bin"
-name = -                              # unset (bare minus)
+name = -      # unset (bare minus)
 ```
 
 **Inline math** — no `$(( ))` syntax, no calling `bc`:
 
 ```
-x = 10 + 4                           # x is 14
-y = $x * 3                           # y is 42
-1 + 2 * 8                            # prints 17
+x = 10 + 4    # x is 14
+y = $x * 3    # y is 42
+2 ** 10       # 1024 (also: 2^10)
+1 + 2 * 8     # prints 17
 ```
 
 **Conditionals** with `if` / `unless` / `else`:

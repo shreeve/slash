@@ -25,6 +25,7 @@ state beg = 1
 state heredoc = 0
 state paren = 0
 state brace = 0
+state math = 0
 
 # ==============================================================================
 # TOKEN TYPES
@@ -154,9 +155,9 @@ defaults {
 # line continuation — the lexer skips both and continues.
 
 "\\\n"                                      → skip         # line continuation
-"\r\n"                                      → newline, {beg = 1}
-'\n'                                        → newline, {beg = 1}
-'\r'                                        → newline, {beg = 1}
+"\r\n"                                      → newline, {beg = 1}, {math = 0}
+'\n'                                        → newline, {beg = 1}, {math = 0}
+'\r'                                        → newline, {beg = 1}, {math = 0}
 
 # ==============================================================================
 # STRING LITERALS
@@ -316,7 +317,7 @@ defaults {
 '*'                                         → star
 '/'                                         → slash
 '%'                                         → percent
-'='                                         → assign
+'='                                         → assign, {math = 1}
 '('                                         → lparen, {paren++}
 ')'                                         → rparen, {paren--}
 '{'                                         → lbrace, {brace++}
@@ -340,6 +341,10 @@ defaults {
 # expands globs to filename lists, and the parser sees only the expanded
 # IDENT tokens. The lexer still tokenizes *, ?, [, ] for syntax
 # highlighting, but these tokens do not appear in the argument rule.
+
+# Note: / and ^ in math context are handled by lexer.zig, not here.
+# After assign (=), the math state is set, and lexer.zig intercepts
+# / as division and ^ as power before the ident patterns can grab them.
 
 [a-zA-Z_][\w./-]*                           → ident
 [./~][\w./-]*                               → ident   # paths: /usr/bin, ./foo, ~/bar

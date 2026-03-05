@@ -120,6 +120,7 @@ pub const BaseLexer = struct {
     heredoc: i32,
     paren: i32,
     brace: i32,
+    math: i32,
 
 
     pub fn init(source: []const u8) BaseLexer {
@@ -130,6 +131,7 @@ pub const BaseLexer = struct {
             .heredoc = 0,
             .paren = 0,
             .brace = 0,
+            .math = 0,
         };
     }
 
@@ -148,6 +150,7 @@ pub const BaseLexer = struct {
         self.heredoc = 0;
         self.paren = 0;
         self.brace = 0;
+        self.math = 0;
     }
 
     /// Peek at current character (0 if at end)
@@ -175,9 +178,9 @@ pub const BaseLexer = struct {
     const rules = [_]Rule{
         .{ .pat = "#[^\\n]*"                              , .tok = .comment },
         .{ .pat = "\\\\\\n"                               , .tok = .skip },
-        .{ .pat = "\\r\\n"                                , .tok = .newline, .acts = &.{.{ .v = 0, .k = .set, .n = 1 }} },
-        .{ .pat = "\\n"                                   , .tok = .newline, .acts = &.{.{ .v = 0, .k = .set, .n = 1 }} },
-        .{ .pat = "\\r"                                   , .tok = .newline, .acts = &.{.{ .v = 0, .k = .set, .n = 1 }} },
+        .{ .pat = "\\r\\n"                                , .tok = .newline, .acts = &.{.{ .v = 0, .k = .set, .n = 1 }, .{ .v = 4, .k = .set, .n = 0 }} },
+        .{ .pat = "\\n"                                   , .tok = .newline, .acts = &.{.{ .v = 0, .k = .set, .n = 1 }, .{ .v = 4, .k = .set, .n = 0 }} },
+        .{ .pat = "\\r"                                   , .tok = .newline, .acts = &.{.{ .v = 0, .k = .set, .n = 1 }, .{ .v = 4, .k = .set, .n = 0 }} },
         .{ .pat = "\"([^\"\\\\$\\n]|\\\\.|\\$)*\""        , .tok = .string_dq },
         .{ .pat = "'([^'\\n]|'')*'"                       , .tok = .string_sq },
         .{ .pat = "'''"                                   , .tok = .heredoc_sq },
@@ -226,7 +229,7 @@ pub const BaseLexer = struct {
         .{ .pat = "\\*"                                   , .tok = .star },
         .{ .pat = "/"                                     , .tok = .slash },
         .{ .pat = "%"                                     , .tok = .percent },
-        .{ .pat = "="                                     , .tok = .assign },
+        .{ .pat = "="                                     , .tok = .assign, .acts = &.{.{ .v = 4, .k = .set, .n = 1 }} },
         .{ .pat = "\\("                                   , .tok = .lparen, .acts = &.{.{ .v = 2, .k = .inc, .n = 0 }} },
         .{ .pat = "\\)"                                   , .tok = .rparen, .acts = &.{.{ .v = 2, .k = .dec, .n = 0 }} },
         .{ .pat = "\\{"                                   , .tok = .lbrace, .acts = &.{.{ .v = 3, .k = .inc, .n = 0 }} },
@@ -391,7 +394,7 @@ pub const BaseLexer = struct {
                 const rule = rules[best_rule];
 
                 for (rule.acts) |act| {
-                    const states = [_]*i32{&self.beg, &self.heredoc, &self.paren, &self.brace};
+                    const states = [_]*i32{&self.beg, &self.heredoc, &self.paren, &self.brace, &self.math};
                     switch (act.k) {
                         .set => states[act.v].* = act.n,
                         .inc => states[act.v].* += 1,

@@ -33,6 +33,7 @@ context-sensitive tokenization using state variables.
 | `heredoc` | 0 | Heredoc mode (0 = none, 1 = literal, 2 = interpolated, 3 = backtick) |
 | `paren` | 0 | Parenthesis nesting depth |
 | `brace` | 0 | Brace nesting depth |
+| `math` | 0 | Math context (1 = after `=`; `/` is division, `^` is power) |
 
 ### Token Types
 
@@ -115,7 +116,7 @@ context-sensitive tokenization using state variables.
 | `star` | `*` | Multiplication |
 | `slash` | `/` | Division |
 | `percent` | `%` | Modulo |
-| `power` | `**` | Exponentiation |
+| `power` | `**`, `^` | Exponentiation (`^` is power, not XOR) |
 
 **Assignment and Default**
 
@@ -230,7 +231,7 @@ Keywords are recognized from `ident` tokens via `@as` directives:
 | `shift` | `kw_shift` | Shift positional arguments |
 
 Operator word aliases (`and`/`&&`, `or`/`||`, `not`/`!`) are interchangeable.
-`xor` is word-form only.
+`xor` is word-form only — `^` is used for exponentiation, not XOR.
 
 ---
 

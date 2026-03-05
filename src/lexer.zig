@@ -126,6 +126,21 @@ pub const Lexer = struct {
             }
         }
 
+        // Math context: after = (assign), treat / as division and ^ as power
+        if (self.base.math != 0) {
+            var mp: u32 = self.base.pos;
+            while (mp < self.base.source.len and (self.base.source[mp] == ' ' or self.base.source[mp] == '\t')) mp += 1;
+            if (mp < self.base.source.len) {
+                const mch = self.base.source[mp];
+                if (mch == '/' or mch == '^') {
+                    const ws_pre: u8 = @intCast(@min(mp - self.base.pos, 255));
+                    self.base.pos = mp + 1;
+                    self.last_cat = if (mch == '/') .slash else .power;
+                    return Token{ .cat = self.last_cat, .pre = ws_pre, .pos = @intCast(mp), .len = 1 };
+                }
+            }
+        }
+
         const tok = self.base.matchRules();
         self.last_cat = tok.cat;
 
