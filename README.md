@@ -7,13 +7,13 @@
 Slash is a clean, fast, modern shell written entirely in Zig. It uses a
 grammar-driven LALR(1) parser that emits s-expressions — no hand-rolled
 parsing, no AST, no intermediate representations. The parser is generated
-from a formal grammar by the same Zig-based engine used in the
-[em](https://github.com/pep-lang/em) MUMPS runtime.
+from a formal grammar by a powerful Zig-based engine used in several commercial
+projects.
 
-Slash is **not** a programming language. It runs commands, composes them with
-pipes and redirects, manages processes and jobs, navigates the filesystem, and
-gets out of your way. When you need real computation, call a real language.
-Slash executes it.
+Slash is **not** a programming language, it is a **shell**. It runs commands,
+composes them with pipes and redirects, manages processes and jobs, navigates
+the filesystem, and gets out of your way. When you need real computation, call
+a real language. Slash executes it.
 
 ---
 

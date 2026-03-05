@@ -2,6 +2,10 @@
 //!
 //! Stores command history in ~/.slash/history.db with:
 //!   command, cwd, timestamp, exit_code, duration_ms
+//!
+//! Note: SQLITE_STATIC is used for bind_text because all bound strings
+//! remain valid through sqlite3_step. SQLITE_TRANSIENT would be safer but
+//! Zig's type system prevents casting the C macro ((destructor_type)-1).
 
 const std = @import("std");
 const posix = std.posix;

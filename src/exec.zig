@@ -19,7 +19,7 @@ const Sexp = parser.Sexp;
 const Tag = parser.Tag;
 const Parser = parser.Parser;
 
-const Flow = enum { normal, break_loop, continue_loop };
+const Flow = enum { normal, break_loop, continue_loop, exit_cmd };
 
 const UserCmd = struct {
     params: [][]const u8,
@@ -229,6 +229,8 @@ pub const Shell = struct {
         self.execSource(content);
     }
 
+    pub var exit_requested: bool = false;
+
     pub fn execLine(self: *Shell, source: []const u8) void {
         var p = Parser.init(self.allocator, source);
         defer p.deinit();
@@ -239,6 +241,10 @@ pub const Shell = struct {
             return;
         };
         self.eval(sexp, source);
+        if (self.flow == .exit_cmd) {
+            self.flow = .normal;
+            exit_requested = true;
+        }
     }
 
     fn retryMathSpaced(self: *Shell, source: []const u8) bool {
@@ -265,6 +271,10 @@ pub const Shell = struct {
             return;
         };
         self.eval(sexp, source);
+        if (self.flow == .exit_cmd) {
+            self.flow = .normal;
+            exit_requested = true;
+        }
     }
 
     // =========================================================================
@@ -622,7 +632,13 @@ pub const Shell = struct {
         }
 
         if (text.len >= 2 and text[0] == '"' and text[text.len - 1] == '"') {
-            return text[1 .. text.len - 1];
+            const inner = text[1 .. text.len - 1];
+            if (std.mem.indexOfScalar(u8, inner, '$') != null or std.mem.indexOfScalar(u8, inner, '\\') != null) {
+                var buf: std.ArrayListUnmanaged(u8) = .{};
+                self.expandInto(&buf, inner);
+                return buf.toOwnedSlice(self.allocator) catch inner;
+            }
+            return inner;
         }
 
         if (text.len >= 2 and text[0] == '\'' and text[text.len - 1] == '\'') {
@@ -648,10 +664,10 @@ pub const Shell = struct {
         return posix.getenv(name) orelse "";
     }
 
+    var argc_str_buf: [10]u8 = undefined;
+
     fn argCountStr(self: *Shell) []const u8 {
-        const vals = "0\x001\x002\x003\x004\x005\x006\x007\x008\x009";
-        if (self.args.len < 10) return vals[self.args.len * 2 ..][0..1];
-        return std.fmt.allocPrint(self.allocator, "{d}", .{self.args.len}) catch "0";
+        return std.fmt.bufPrint(&argc_str_buf, "{d}", .{self.args.len}) catch "0";
     }
 
     fn argJoinStr(self: *Shell) []const u8 {
@@ -675,10 +691,10 @@ pub const Shell = struct {
         self.last_exit = 0;
     }
 
+    var exit_str_buf: [3]u8 = undefined;
+
     fn exitCodeStr(self: *Shell) []const u8 {
-        const vals = "0\x001\x002\x003\x004\x005\x006\x007\x008\x009";
-        if (self.last_exit < 10) return vals[self.last_exit * 2 ..][0..1];
-        return "0";
+        return std.fmt.bufPrint(&exit_str_buf, "{d}", .{self.last_exit}) catch "0";
     }
 
     fn pidStr(self: *Shell) []const u8 {
@@ -1030,10 +1046,13 @@ pub const Shell = struct {
     fn evalAssign(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
         const name_raw = self.sexpToStr(args[0], source) orelse return;
-        const value_raw = self.sexpToExpandedStr(args[1], source);
-        const name = self.allocator.dupe(u8, name_raw) catch return;
-        const value = self.allocator.dupe(u8, value_raw) catch return;
-        self.vars.put(name, value) catch return;
+        const value = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch return;
+        if (self.vars.getPtr(name_raw)) |slot| {
+            slot.* = value;
+        } else {
+            const name = self.allocator.dupe(u8, name_raw) catch return;
+            self.vars.put(name, value) catch return;
+        }
         self.last_exit = 0;
     }
 
@@ -1366,39 +1385,6 @@ pub const Shell = struct {
         self.last_exit = 0;
     }
 
-    fn builtinDirs(self: *Shell) void {
-        if (self.dir_count == 0) {
-            std.debug.print("(no directory history)\n", .{});
-            self.last_exit = 0;
-            return;
-        }
-        const show = @min(self.dir_count, 9);
-        for (0..show) |i| {
-            std.debug.print("{d} {s}\n", .{ i + 1, self.dir_history[i] });
-        }
-        // Read a single digit
-        std.debug.print("? ", .{});
-        var input: [1]u8 = undefined;
-        const n = posix.read(posix.STDIN_FILENO, &input) catch {
-            self.last_exit = 0;
-            return;
-        };
-        if (n == 0) { self.last_exit = 0; return; }
-        std.debug.print("\n", .{});
-        const digit = input[0];
-        if (digit >= '1' and digit <= '9') {
-            const idx: usize = digit - '1';
-            if (idx < self.dir_count) {
-                posix.chdir(self.dir_history[idx]) catch |err| {
-                    std.debug.print("dirs: {s}: {s}\n", .{ self.dir_history[idx], @errorName(err) });
-                    self.last_exit = 1;
-                    return;
-                };
-            }
-        }
-        self.last_exit = 0;
-    }
-
     fn builtinHistory(self: *Shell, argv: []const []const u8) void {
         const hdb = self.history_db orelse {
             std.debug.print("history: database not available\n", .{});
@@ -1484,22 +1470,23 @@ pub const Shell = struct {
         self.last_exit = 0;
     }
 
+    // Authoritative list of all builtin command names. Two dispatch layers:
+    //   tryBuiltin()       — runtime builtins, arrive as (cmd "name" ...)
+    //   dispatch/Keyword() — parser keywords with own s-expression tags
+    // Control-flow keywords (if/for/while/unless/until/try/else) and
+    // operator keywords (and/or/not/xor/in) are syntax, not commands,
+    // and are intentionally excluded.
+    pub const builtin_names = [_][]const u8{
+        "cd",      "echo",    "true",    "false",   "type",    "pwd",
+        "jobs",    "fg",      "bg",      "history", "j",
+        "exec",    "exit",    "source",
+        "set",     "cmd",     "key",
+        "test",    "shift",   "break",   "continue",
+    };
+
     fn isBuiltin(name: []const u8) bool {
-        // Authoritative list of all builtin command names. Two dispatch layers:
-        //   tryBuiltin()       — runtime builtins, arrive as (cmd "name" ...)
-        //   dispatch/Keyword() — parser keywords with own s-expression tags
-        // Control-flow keywords (if/for/while/unless/until/try/else) and
-        // operator keywords (and/or/not/xor/in) are syntax, not commands,
-        // and are intentionally excluded.
         if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) return true;
-        const builtins = [_][]const u8{
-            "cd",      "echo",    "true",    "false",   "type",    "pwd",
-            "jobs",    "fg",      "bg",      "history", "j",
-            "exec",    "exit",    "source",
-            "set",     "cmd",     "key",
-            "test",    "shift",   "break",   "continue",
-        };
-        for (builtins) |b| {
+        for (builtin_names) |b| {
             if (std.mem.eql(u8, name, b)) return true;
         }
         return false;
@@ -1523,6 +1510,7 @@ pub const Shell = struct {
         }
 
         self.eval(cmd.body, cmd.source);
+        if (self.flow == .exit_cmd) self.flow = .normal;
 
         // Restore named params
         for (params, 0..) |pname, i| {
@@ -1591,9 +1579,14 @@ pub const Shell = struct {
 
     fn evalKey(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
-        const combo = self.allocator.dupe(u8, self.sexpToStr(args[0], source) orelse return) catch return;
+        const combo_raw = self.sexpToStr(args[0], source) orelse return;
         const command = self.allocator.dupe(u8, self.sexpToStr(args[1], source) orelse return) catch return;
-        self.key_bindings.put(combo, command) catch {};
+        if (self.key_bindings.getPtr(combo_raw)) |slot| {
+            slot.* = command;
+        } else {
+            const combo = self.allocator.dupe(u8, combo_raw) catch return;
+            self.key_bindings.put(combo, command) catch {};
+        }
         self.last_exit = 0;
     }
 
@@ -1620,7 +1613,7 @@ pub const Shell = struct {
         self.execSource(content);
     }
 
-    fn evalExit(_: *Shell, args: []const Sexp, source: []const u8) void {
+    fn evalExit(self: *Shell, args: []const Sexp, source: []const u8) void {
         var code: u8 = 0;
         if (args.len >= 1) {
             switch (args[0]) {
@@ -1631,16 +1624,20 @@ pub const Shell = struct {
                 else => {},
             }
         }
-        posix.exit(code);
+        self.last_exit = code;
+        self.flow = .exit_cmd;
     }
 
     fn evalSet(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
         const name_raw = self.sexpToStr(args[0], source) orelse return;
-        const value_raw = self.sexpToExpandedStr(args[1], source);
-        const name = self.allocator.dupe(u8, name_raw) catch return;
-        const value = self.allocator.dupe(u8, value_raw) catch return;
-        self.options.put(name, value) catch return;
+        const value = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch return;
+        if (self.options.getPtr(name_raw)) |slot| {
+            slot.* = value;
+        } else {
+            const name = self.allocator.dupe(u8, name_raw) catch return;
+            self.options.put(name, value) catch return;
+        }
         self.last_exit = 0;
     }
 
@@ -1738,6 +1735,7 @@ pub const Shell = struct {
                     'n' => buf.append(self.allocator, '\n') catch {},
                     't' => buf.append(self.allocator, '\t') catch {},
                     '\\' => buf.append(self.allocator, '\\') catch {},
+                    '"' => buf.append(self.allocator, '"') catch {},
                     '$' => buf.append(self.allocator, '$') catch {},
                     else => {
                         buf.append(self.allocator, '\\') catch {};

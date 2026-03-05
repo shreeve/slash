@@ -157,21 +157,12 @@ fn historySuggest(prefix: []const u8) ?[]const u8 {
 fn paletteFn(alloc: std.mem.Allocator, query: []const u8) []readline.PaletteResult {
     var results: std.ArrayList(readline.PaletteResult) = .empty;
     if (repl_shell) |sh| {
-        // History results
         if (sh.history_db) |hdb| {
-            const hist_results = hdb.search(alloc, query, 5);
-            for (hist_results) |cmd| {
+            for (hdb.search(alloc, query, 5)) |cmd|
                 results.append(alloc, .{ .text = cmd, .kind = .history }) catch {};
-            }
-        }
-        // Directory results
-        if (sh.history_db) |hdb| {
-            const dir_results = hdb.frecency(alloc, query, 3);
-            for (dir_results) |d| {
+            for (hdb.frecency(alloc, query, 3)) |d|
                 results.append(alloc, .{ .text = d.path, .kind = .directory }) catch {};
-            }
         }
-        // User command results
         var it = sh.user_cmds.iterator();
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
@@ -219,18 +210,17 @@ fn needsContinuation(line: []const u8) bool {
     // "else" at end of line (after closing brace or standalone)
     if (std.mem.endsWith(u8, trimmed, " else") or std.mem.eql(u8, trimmed, "else")) return true;
 
-    // cmd definition with params: cmd name(...) or cmd name
+    // cmd definition: "cmd name" or "cmd name(params)" needs continuation,
+    // but "cmd name body..." (one-liner with a space after the name) is complete.
     if (trimmed.len > 4 and std.mem.startsWith(u8, trimmed, "cmd ")) {
         if (trimmed[trimmed.len - 1] == ')') return true;
-        // cmd name (no body on this line — check it's not cmd name -)
-        if (trimmed[trimmed.len - 1] != '-') {
-            const after_cmd = std.mem.trimLeft(u8, trimmed[4..], " \t");
-            // If it's just "cmd name" with no operators, it needs a body
-            for (after_cmd) |ch| {
-                if (ch == '{' or ch == ';' or ch == '|') return false;
-            }
-            return true;
-        }
+        if (trimmed[trimmed.len - 1] == '-') return false;
+        const after_cmd = std.mem.trimLeft(u8, trimmed[4..], " \t");
+        // If after_cmd contains a space, there's a name AND a body — complete one-liner
+        if (std.mem.indexOfScalar(u8, after_cmd, ' ') != null) return false;
+        if (std.mem.indexOfScalar(u8, after_cmd, '\t') != null) return false;
+        // Just "cmd name" with no body — needs continuation
+        return after_cmd.len > 0;
     }
 
     return false;
@@ -312,6 +302,8 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
             ev.execLine(source);
         const t1 = std.time.milliTimestamp();
         last_duration_ms = @intCast(@max(0, t1 - t0));
+
+        if (exec.Shell.exit_requested) return;
 
         if (hdb) |h| {
             var cwd_buf: [4096]u8 = undefined;

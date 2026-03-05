@@ -7,6 +7,7 @@ const std = @import("std");
 const posix = std.posix;
 const parser = @import("parser.zig");
 const TokenCat = parser.TokenCat;
+const Shell = @import("exec.zig").Shell;
 
 const STDIN = posix.STDIN_FILENO;
 const STDOUT = posix.STDOUT_FILENO;
@@ -40,9 +41,11 @@ var active_prompt: []const u8 = "$ ";
 var active_prompt_len: usize = 2;
 var ghost_text: []const u8 = "";
 
+pub const ResultKind = enum { history, directory, command };
+
 pub const PaletteResult = struct {
     text: []const u8,
-    kind: enum { history, directory, command },
+    kind: ResultKind,
 };
 
 pub const KeyHandler = struct {
@@ -460,12 +463,12 @@ var cmd_match_buf: [32][128]u8 = undefined;
 var cmd_match_count: usize = 0;
 
 fn completeCommand(prefix: []const u8, word_start: usize) TabResult {
-    const builtins = [_][]const u8{ "cd", "echo", "true", "false", "type", "pwd", "jobs", "fg", "bg", "dirs", "history", "j", "exit", "source", "set", "cmd", "key", "test", "shift", "break", "continue", "exec", "if", "unless", "for", "while", "until", "try" };
+    const control_flow = [_][]const u8{ "if", "unless", "for", "while", "until", "try" };
 
     cmd_match_count = 0;
     var common_len: usize = 0;
 
-    for (builtins) |b| {
+    for (Shell.builtin_names ++ control_flow) |b| {
         if (std.mem.startsWith(u8, b, prefix)) {
             if (cmd_match_count < 32 and b.len < 128) {
                 @memcpy(cmd_match_buf[cmd_match_count][0..b.len], b);
@@ -676,152 +679,40 @@ fn writeColorized(line: []const u8) void {
     }
 }
 
-fn historySearch(kh: KeyHandler) ?[]const u8 {
-    const search_fn = kh.search orelse return null;
+const OverlayItem = struct { text: []const u8, suffix: []const u8, kind: ResultKind = .history };
+
+fn overlaySearch(
+    title: []const u8,
+    title_width: usize,
+    searchFn: *const fn (std.mem.Allocator, []const u8) []OverlayItem,
+) ?OverlayItem {
     var query_buf: [256]u8 = undefined;
     var qlen: usize = 0;
     var selected: usize = 0;
-    var results: [][]const u8 = &.{};
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+    var results = searchFn(alloc, "");
     var first_draw = true;
 
-    results = search_fn(alloc, "", 10);
-
     while (true) {
-        if (first_draw) {
-            writeAll("\n");
-            first_draw = false;
-        } else {
-            writeAll("\r");
-        }
+        if (first_draw) { writeAll("\n"); first_draw = false; } else writeAll("\r");
         writeAll("\x1b[J");
-        writeAll("\x1b[7m History Search: \x1b[0m ");
+        writeAll(title);
         writeAll(query_buf[0..qlen]);
         writeAll("\n");
-        for (results, 0..) |cmd, i| {
+        for (results, 0..) |item, i| {
             if (i == selected) writeAll("\x1b[7m") else writeAll("  ");
-            writeAll(cmd);
+            writeAll(item.text);
             if (i == selected) writeAll("\x1b[0m");
+            writeAll(item.suffix);
             writeAll("\n");
         }
         var up_buf: [16]u8 = undefined;
         const up = std.fmt.bufPrint(&up_buf, "\x1b[{d}A", .{results.len + 1}) catch break;
         writeAll(up);
         var col_buf: [16]u8 = undefined;
-        const col = std.fmt.bufPrint(&col_buf, "\r\x1b[{d}C", .{19 + qlen}) catch break;
-        writeAll(col);
-
-        // Read input
-        var ch: [1]u8 = undefined;
-        const n = posix.read(STDIN, &ch) catch break;
-        if (n == 0) break;
-
-        switch (ch[0]) {
-            '\r', '\n' => {
-                // Accept selection
-                clearOverlay(results.len + 1);
-                if (selected < results.len) {
-                    const r = alloc.dupe(u8, results[selected]) catch return null;
-                    @memcpy(save_buf[0..r.len], r);
-                    return save_buf[0..r.len];
-                }
-                return null;
-            },
-            27 => {
-                // ESC or arrow keys
-                var seq: [2]u8 = undefined;
-                const n1 = posix.read(STDIN, seq[0..1]) catch break;
-                if (n1 > 0 and seq[0] == '[') {
-                    const n2 = posix.read(STDIN, seq[1..2]) catch break;
-                    if (n2 > 0) {
-                        if (seq[1] == 'A' and selected > 0) selected -= 1; // up
-                        if (seq[1] == 'B' and selected + 1 < results.len) selected += 1; // down
-                    }
-                } else {
-                    // Plain ESC — cancel
-                    clearOverlay(results.len + 1);
-                    return null;
-                }
-            },
-            127, 8 => {
-                if (qlen > 0) {
-                    qlen -= 1;
-                    selected = 0;
-                    _ = arena.reset(.retain_capacity);
-                    results = search_fn(alloc, query_buf[0..qlen], 10);
-                }
-            },
-            3 => {
-                // Ctrl+C — cancel
-                clearOverlay(results.len + 1);
-                return null;
-            },
-            else => |byte| {
-                if (byte >= 32 and byte < 127 and qlen < query_buf.len) {
-                    query_buf[qlen] = byte;
-                    qlen += 1;
-                    selected = 0;
-                    _ = arena.reset(.retain_capacity);
-                    results = search_fn(alloc, query_buf[0..qlen], 10);
-                }
-            },
-        }
-    }
-    clearOverlay(results.len + 1);
-    return null;
-}
-
-var palette_buf: [4096]u8 = undefined;
-
-fn stablePaletteResult(r: PaletteResult) PaletteResult {
-    const len = @min(r.text.len, palette_buf.len);
-    @memcpy(palette_buf[0..len], r.text[0..len]);
-    return .{ .text = palette_buf[0..len], .kind = r.kind };
-}
-
-fn paletteSearch(kh: KeyHandler) ?PaletteResult {
-    const palette_fn = kh.palette orelse return null;
-    var query_buf: [256]u8 = undefined;
-    var qlen: usize = 0;
-    var selected: usize = 0;
-    var results: []PaletteResult = &.{};
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    results = palette_fn(alloc, "");
-    var first_draw = true;
-
-    while (true) {
-        if (first_draw) {
-            writeAll("\n");
-            first_draw = false;
-        } else {
-            writeAll("\r");
-        }
-        writeAll("\x1b[J");
-        writeAll("\x1b[7m Palette: \x1b[0m ");
-        writeAll(query_buf[0..qlen]);
-        writeAll("\n");
-        for (results, 0..) |r, i| {
-            if (i == selected) writeAll("\x1b[7m") else writeAll("  ");
-            writeAll(r.text);
-            if (i == selected) writeAll("\x1b[0m");
-            const kind_str = switch (r.kind) {
-                .history => "  \x1b[90m(history)\x1b[0m",
-                .directory => "  \x1b[90m(dir)\x1b[0m",
-                .command => "  \x1b[90m(cmd)\x1b[0m",
-            };
-            writeAll(kind_str);
-            writeAll("\n");
-        }
-        var up_buf: [16]u8 = undefined;
-        const up = std.fmt.bufPrint(&up_buf, "\x1b[{d}A", .{results.len + 1}) catch break;
-        writeAll(up);
-        var col_buf: [16]u8 = undefined;
-        const col = std.fmt.bufPrint(&col_buf, "\r\x1b[{d}C", .{12 + qlen}) catch break;
+        const col = std.fmt.bufPrint(&col_buf, "\r\x1b[{d}C", .{title_width + qlen}) catch break;
         writeAll(col);
 
         var ch: [1]u8 = undefined;
@@ -829,9 +720,9 @@ fn paletteSearch(kh: KeyHandler) ?PaletteResult {
         if (n == 0) break;
 
         switch (ch[0]) {
-            '\r', '\n' => {
-                clearOverlay(results.len + 1);
-                if (selected < results.len) return stablePaletteResult(results[selected]);
+            '\r', '\n', 9 => {
+                clearOverlay();
+                if (selected < results.len) return results[selected];
                 return null;
             },
             27 => {
@@ -844,7 +735,7 @@ fn paletteSearch(kh: KeyHandler) ?PaletteResult {
                         if (seq[1] == 'B' and selected + 1 < results.len) selected += 1;
                     }
                 } else {
-                    clearOverlay(results.len + 1);
+                    clearOverlay();
                     return null;
                 }
             },
@@ -853,36 +744,77 @@ fn paletteSearch(kh: KeyHandler) ?PaletteResult {
                     qlen -= 1;
                     selected = 0;
                     _ = arena.reset(.retain_capacity);
-                    results = palette_fn(alloc, query_buf[0..qlen]);
+                    results = searchFn(alloc, query_buf[0..qlen]);
                 }
             },
-            9 => {
-                // Tab — paste to prompt (same as Enter for palette)
-                clearOverlay(results.len + 1);
-                if (selected < results.len) return stablePaletteResult(results[selected]);
-                return null;
-            },
-            3 => {
-                clearOverlay(results.len + 1);
-                return null;
-            },
+            3 => { clearOverlay(); return null; },
             else => |byte| {
                 if (byte >= 32 and byte < 127 and qlen < query_buf.len) {
                     query_buf[qlen] = byte;
                     qlen += 1;
                     selected = 0;
                     _ = arena.reset(.retain_capacity);
-                    results = palette_fn(alloc, query_buf[0..qlen]);
+                    results = searchFn(alloc, query_buf[0..qlen]);
                 }
             },
         }
     }
-    clearOverlay(results.len + 1);
+    clearOverlay();
     return null;
 }
 
-fn clearOverlay(lines: usize) void {
-    _ = lines;
+var overlay_items_buf: [32]OverlayItem = undefined;
+
+fn historySearch(kh: KeyHandler) ?[]const u8 {
+    const search_fn = kh.search orelse return null;
+    const wrapper = struct {
+        var saved_fn: *const fn (std.mem.Allocator, []const u8, usize) [][]const u8 = undefined;
+        fn search(alloc: std.mem.Allocator, query: []const u8) []OverlayItem {
+            const results = saved_fn(alloc, query, 10);
+            for (results, 0..) |text, i| {
+                if (i >= 32) break;
+                overlay_items_buf[i] = .{ .text = text, .suffix = "" };
+            }
+            return overlay_items_buf[0..@min(results.len, 32)];
+        }
+    };
+    wrapper.saved_fn = search_fn;
+    const result = overlaySearch("\x1b[7m History Search: \x1b[0m ", 19, &wrapper.search) orelse return null;
+    @memcpy(save_buf[0..result.text.len], result.text);
+    return save_buf[0..result.text.len];
+}
+
+var palette_buf: [4096]u8 = undefined;
+
+fn paletteSearch(kh: KeyHandler) ?PaletteResult {
+    const palette_fn = kh.palette orelse return null;
+    const wrapper = struct {
+        var saved_fn: *const fn (std.mem.Allocator, []const u8) []PaletteResult = undefined;
+        fn search(alloc: std.mem.Allocator, query: []const u8) []OverlayItem {
+            const results = saved_fn(alloc, query);
+            for (results, 0..) |r, i| {
+                if (i >= 32) break;
+                overlay_items_buf[i] = .{
+                    .text = r.text,
+                    .kind = r.kind,
+                    .suffix = switch (r.kind) {
+                        .history => "  \x1b[90m(history)\x1b[0m",
+                        .directory => "  \x1b[90m(dir)\x1b[0m",
+                        .command => "  \x1b[90m(cmd)\x1b[0m",
+                    },
+                };
+            }
+            return overlay_items_buf[0..@min(results.len, 32)];
+        }
+    };
+    wrapper.saved_fn = palette_fn;
+    const result = overlaySearch("\x1b[7m Palette: \x1b[0m ", 12, &wrapper.search) orelse return null;
+    const len = @min(result.text.len, palette_buf.len);
+    @memcpy(palette_buf[0..len], result.text[0..len]);
+    return .{ .text = palette_buf[0..len], .kind = result.kind };
+}
+
+fn clearOverlay() void {
     writeAll("\r\x1b[J");
     writeAll("\x1b[A");
     writeAll("\r");
