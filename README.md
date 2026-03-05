@@ -87,6 +87,7 @@ y = $x * 3    # y is 42
 if git diff --quiet { echo clean } else { echo dirty }
 if $count == 0 { echo "nothing" }
 if $file =~ /\.zig$/ { echo "zig source" }
+if $name =~ ~|^test|i { echo "test file" }
 if $x > 0 and $x < 100 { echo "in range" }
 ```
 

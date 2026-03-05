@@ -46,7 +46,7 @@ context-sensitive tokenization using state variables.
 | `real` | `3.14`, `.5` | Decimal literal |
 | `string_sq` | `'hello'` | Single-quoted string (literal, no interpolation) |
 | `string_dq` | `"hello $name"` | Double-quoted string (interpolated) |
-| `regex` | `/pattern/i` | Regex literal with optional flags |
+| `regex` | `/pattern/i`, `~\|pattern\|i` | Regex literal with optional flags (any delimiter after `~`) |
 | `glob` | `*.zig` | Glob pattern |
 
 **Variable References**
@@ -171,7 +171,10 @@ lexer.
 
 **Numbers.** Reals are matched before integers (longer match first).
 
-**Regex literals.** `/pattern/flags` where flags are from `[gimsux]`.
+**Regex literals.** Two forms: `/pattern/flags` after `=~`/`!~` operators, and
+`~<delim>pattern<delim>flags` anywhere (standalone). The `~` prefix with any
+non-alphanumeric, non-slash delimiter (e.g., `~|pattern|i`) avoids ambiguity
+with paths (`~/foo`) and division (`22/7`). Flags: `[gimsux]`.
 
 **Variable references.** `$name` for named variables, `$0`-`$9` for positional,
 `$?`, `$$`, `$!`, `$#`, `$*` for specials. `${...}` for braced forms including
@@ -192,13 +195,31 @@ emits `indent`/`outdent` tokens. In interactive mode with braces, it emits
 `lbrace`/`rbrace` instead. The grammar accepts both forms uniformly via the
 `block` rule.
 
-### Regex Disambiguation
+### Regex Syntax
 
-The `/` character is ambiguous: division or the start of a regex. The lexer
-uses the preceding token to decide:
+Two regex literal forms:
 
-- After `ident`, `integer`, `real`, `string_*`, `rparen`, `variable` → **division**
-- After everything else (`=~`, `!~`, `==`, `(`, `and`, etc.) → **regex**
+**After `=~` / `!~`:** any non-alphanumeric character works as the delimiter.
+The lexer knows it's regex context because the previous token was `match` or
+`nomatch`. `/pattern/flags` is the conventional form, but `~|pattern|flags`
+or any other delimiter also works.
+
+```
+if $file =~ /\.zig$/ { echo yes }
+if $file =~ ~|\.zig$| { echo yes }
+```
+
+**Standalone `~<delim>`:** `~` followed by any non-alphanumeric, non-slash
+delimiter signals a regex literal anywhere in a command. The executor expands
+these against directory contents (regex glob). `~/` is excluded because it's
+a home path; `~letter` is excluded because it's a username path.
+
+```
+ls ~|\.zig$|          # files matching regex
+ls ~|test|i           # case-insensitive
+```
+
+The `~` prefix was chosen to avoid all ambiguity with paths and division.
 
 ---
 
@@ -634,7 +655,8 @@ raw tokens through, expansion happens at runtime:
 
 | Feature | Where |
 |---------|-------|
-| Glob expansion (`*.zig`, `file[0-9]`) | Expander stitches adjacent `pre=0` tokens, does filesystem matching |
+| Glob expansion (`*.zig`, `file[0-9]`) | Expander converts glob to regex, matches against directory entries |
+| Regex glob expansion (`~\|pattern\|`) | Expander compiles Oniguruma regex, matches against directory entries |
 | Brace expansion (`{a,b,c}`) | Expander checks `pre=0` on LBRACE to distinguish from block syntax |
 | Variable interpolation in strings | Expander parses `$name` inside `string_dq` tokens |
 | Tilde expansion (`~/foo`) | Expander handles `~` prefix in idents |
@@ -649,6 +671,6 @@ in `grammar.zig`:
 
 | Feature | What's Needed |
 |---------|---------------|
-| Regex literals `/pattern/flags` | Context-sensitive lexer heuristic — preceding token determines if `/` is regex or division |
+| Regex literals | After `=~`/`!~`: any delimiter works. Standalone: `~<delim>pattern<delim>flags` where delim is non-alnum, non-slash. Handled in `lexer.zig`. |
 | Else after OUTDENT | Lexer must not emit NEWLINE between OUTDENT and ELSE |
 | `cmd name(params)` vs `cmd name (body)` | Parser checks LPAREN's `pre` field — `pre=0` means params, `pre>0` means subshell |
