@@ -366,6 +366,8 @@ fn tabComplete(line: []const u8, cursor: usize) TabResult {
     return completePath(prefix, word_start);
 }
 
+var tilde_buf: [4096]u8 = undefined;
+
 fn completePath(prefix: []const u8, word_start: usize) TabResult {
     // Split into directory and file prefix
     var dir_end: usize = 0;
@@ -374,7 +376,14 @@ fn completePath(prefix: []const u8, word_start: usize) TabResult {
     }
     const dir_part = if (dir_end > 0) prefix[0..dir_end] else "";
     const file_prefix = prefix[dir_end..];
-    const dir_path = if (dir_part.len > 0) dir_part else ".";
+    // Expand ~ to $HOME
+    const dir_path = if (dir_part.len > 0) blk: {
+        if (dir_part.len >= 2 and dir_part[0] == '~' and dir_part[1] == '/') {
+            const home = std.posix.getenv("HOME") orelse break :blk dir_part;
+            break :blk std.fmt.bufPrint(&tilde_buf, "{s}{s}", .{ home, dir_part[1..] }) catch dir_part;
+        }
+        break :blk dir_part;
+    } else ".";
 
     var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch
         return .{ .replacement = "", .word_start = word_start, .matches = 0 };
