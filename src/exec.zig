@@ -56,6 +56,10 @@ pub const Shell = struct {
     // Positional arguments ($1-$9, $*, $#)
     args: []const []const u8 = &.{},
 
+    // Last j listing (for bare digit jump)
+    j_list: [9][]const u8 = .{""} ** 9,
+    j_count: u8 = 0,
+
     // Key bindings (key combo → command string)
     key_bindings: std.StringHashMap([]const u8),
 
@@ -1227,6 +1231,11 @@ pub const Shell = struct {
         _ = source;
         const name = argv[0];
 
+        // Bare digit 1-9: jump to j-list entry
+        if (name.len == 1 and name[0] >= '1' and name[0] <= '9' and argv.len == 1) {
+            self.builtinJumpTo(name[0] - '1');
+            return true;
+        }
         if (std.mem.eql(u8, name, "cd")) { self.builtinCd(argv); return true; }
         if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) {
             var buf: [128]u8 = undefined;
@@ -1413,6 +1422,7 @@ pub const Shell = struct {
             self.last_exit = 1;
             return;
         }
+        // j foo — jump to best match
         if (argv.len > 1) {
             posix.chdir(results[0].path) catch |err| {
                 std.debug.print("j: {s}: {s}\n", .{ results[0].path, @errorName(err) });
@@ -1422,24 +1432,29 @@ pub const Shell = struct {
             self.last_exit = 0;
             return;
         }
+        // j — list top 9, store for digit jump
+        self.j_count = 0;
         for (results, 0..) |r, i| {
             std.debug.print("{d} {s}\n", .{ i + 1, r.path });
-        }
-        std.debug.print("? ", .{});
-        var input: [1]u8 = undefined;
-        const n = posix.read(posix.STDIN_FILENO, &input) catch { self.last_exit = 0; return; };
-        if (n == 0) { self.last_exit = 0; return; }
-        std.debug.print("\n", .{});
-        if (input[0] >= '1' and input[0] <= '9') {
-            const idx: usize = input[0] - '1';
-            if (idx < results.len) {
-                posix.chdir(results[idx].path) catch |err| {
-                    std.debug.print("j: {s}: {s}\n", .{ results[idx].path, @errorName(err) });
-                    self.last_exit = 1;
-                    return;
-                };
+            if (i < 9) {
+                self.j_list[i] = self.allocator.dupe(u8, r.path) catch "";
+                self.j_count += 1;
             }
         }
+        self.last_exit = 0;
+    }
+
+    fn builtinJumpTo(self: *Shell, idx: usize) void {
+        if (idx >= self.j_count) {
+            std.debug.print("j: no entry {d}\n", .{idx + 1});
+            self.last_exit = 1;
+            return;
+        }
+        posix.chdir(self.j_list[idx]) catch |err| {
+            std.debug.print("j: {s}: {s}\n", .{ self.j_list[idx], @errorName(err) });
+            self.last_exit = 1;
+            return;
+        };
         self.last_exit = 0;
     }
 
