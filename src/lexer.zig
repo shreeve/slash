@@ -133,14 +133,13 @@ pub const Lexer = struct {
             while (mp < self.base.source.len and (self.base.source[mp] == ' ' or self.base.source[mp] == '\t')) mp += 1;
             if (mp < self.base.source.len) {
                 const mch = self.base.source[mp];
+                const ws_pre: u8 = @intCast(@min(mp - self.base.pos, 255));
                 if (mch == '/' or mch == '^') {
-                    const ws_pre: u8 = @intCast(@min(mp - self.base.pos, 255));
                     self.base.pos = mp + 1;
                     self.last_cat = if (mch == '/') .slash else .power;
                     return Token{ .cat = self.last_cat, .pre = ws_pre, .pos = @intCast(mp), .len = 1 };
                 }
                 if (mch == '*') {
-                    const ws_pre: u8 = @intCast(@min(mp - self.base.pos, 255));
                     if (mp + 1 < self.base.source.len and self.base.source[mp + 1] == '*') {
                         self.base.pos = mp + 2;
                         self.last_cat = .power;
@@ -150,12 +149,9 @@ pub const Lexer = struct {
                     self.last_cat = .star;
                     return Token{ .cat = .star, .pre = ws_pre, .pos = @intCast(mp), .len = 1 };
                 }
-                // Consume bare integers so glob patterns (e.g. [\w]*[*?]) can't grab "2**8"
                 if (mch >= '0' and mch <= '9') {
-                    const ws_pre: u8 = @intCast(@min(mp - self.base.pos, 255));
                     var end = mp + 1;
                     while (end < self.base.source.len and self.base.source[end] >= '0' and self.base.source[end] <= '9') end += 1;
-                    // Check for decimal point
                     if (end < self.base.source.len and self.base.source[end] == '.' and
                         end + 1 < self.base.source.len and self.base.source[end + 1] >= '0' and self.base.source[end + 1] <= '9')
                     {
