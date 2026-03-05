@@ -1295,7 +1295,6 @@ pub const Shell = struct {
         self.last_exit = 0;
     }
 
-
     fn builtinEcho(self: *Shell, argv: []const []const u8) void {
         const stdout = std.fs.File.stdout();
         for (argv[1..], 0..) |arg, i| {
