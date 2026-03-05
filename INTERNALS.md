@@ -400,7 +400,11 @@ a parameter list. `cmd name (body)` with a space (pre>0) means subshell body.
 key combo action      → (key combo action)
 key combo "command"   → (key combo command)
 key combo -           → (key_del combo)
+key                   → (key_list)
 ```
+
+Combo names use hyphens: `esc-l`, `esc-=`, `esc-1`. Quoted command
+values are stored with quotes stripped so they re-parse as command lines.
 
 ### Shell Options
 
@@ -452,7 +456,7 @@ Every construct maps to a tagged list:
 | `cmd g git $*` | `(cmd_def g nil (cmd git $*))` |
 | `cmd mkcd(dir) ...` | `(cmd_def mkcd (dir) ...)` |
 | `cmd foo -` | `(cmd_del foo)` |
-| `key esc-l "ls -la"` | `(key esc-l "ls -la")` |
+| `key esc-l "ls -la"` | `(key esc-l ls -la)` |
 | `set prompt-git true` | `(set prompt-git true)` |
 | `test -f $file` | `(test -f $file)` |
 | `exit 1` | `(exit 1)` |

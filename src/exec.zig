@@ -1548,7 +1548,7 @@ pub const Shell = struct {
     fn evalKey(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
         const combo_raw = self.sexpToStr(args[0], source) orelse return;
-        const command = self.allocator.dupe(u8, self.sexpToStr(args[1], source) orelse return) catch return;
+        const command = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch return;
         if (self.key_bindings.getPtr(combo_raw)) |slot| {
             slot.* = command;
         } else {
