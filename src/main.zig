@@ -275,6 +275,12 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
             continue;
         }
 
+        // Bare digit 1-9: jump to j-list entry
+        if (trimmed.len == 1 and trimmed[0] >= '1' and trimmed[0] <= '9') {
+            ev.builtinJumpTo(trimmed[0] - '1');
+            continue;
+        }
+
         if (std.mem.eql(u8, trimmed, "exit")) return;
 
         // Multi-line continuation: if line needs a block, collect more lines until blank

@@ -1231,11 +1231,6 @@ pub const Shell = struct {
         _ = source;
         const name = argv[0];
 
-        // Bare digit 1-9: jump to j-list entry
-        if (name.len == 1 and name[0] >= '1' and name[0] <= '9' and argv.len == 1) {
-            self.builtinJumpTo(name[0] - '1');
-            return true;
-        }
         if (std.mem.eql(u8, name, "cd")) { self.builtinCd(argv); return true; }
         if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) {
             var buf: [128]u8 = undefined;
@@ -1410,47 +1405,51 @@ pub const Shell = struct {
     }
 
     fn builtinJ(self: *Shell, argv: []const []const u8) void {
-        const HistoryDb = @import("history.zig").Db;
-        const hdb: HistoryDb = self.history_db orelse {
+        const hdb = self.history_db orelse {
             std.debug.print("j: database not available\n", .{});
             self.last_exit = 1;
             return;
         };
-        // j foo — jump to best frecency match
-        if (argv.len > 1) {
-            const results = hdb.frecency(self.allocator, argv[1], 1);
-            if (results.len == 0) {
-                std.debug.print("j: no matches for '{s}'\n", .{argv[1]});
-                self.last_exit = 1;
-                return;
+        const query = if (argv.len > 1) argv[1] else "";
+        const dirs = hdb.recentDirs(self.allocator, if (query.len > 0) 50 else 9);
+        // Filter by query if provided
+        var filtered: [9][]const u8 = .{""} ** 9;
+        var count: u8 = 0;
+        for (dirs) |path| {
+            if (count >= 9) break;
+            if (query.len == 0 or std.mem.indexOf(u8, path, query) != null) {
+                filtered[count] = path;
+                count += 1;
             }
-            posix.chdir(results[0].path) catch |err| {
-                std.debug.print("j: {s}: {s}\n", .{ results[0].path, @errorName(err) });
+        }
+        if (count == 0) {
+            if (query.len > 0)
+                std.debug.print("j: no matches for '{s}'\n", .{query})
+            else
+                std.debug.print("j: no directory history\n", .{});
+            self.last_exit = 1;
+            return;
+        }
+        // j foo — jump to first match
+        if (argv.len > 1) {
+            posix.chdir(filtered[0]) catch |err| {
+                std.debug.print("j: {s}: {s}\n", .{ filtered[0], @errorName(err) });
                 self.last_exit = 1;
                 return;
             };
             self.last_exit = 0;
             return;
         }
-        // j — list 9 most recent unique dirs
-        const dirs = hdb.recentDirs(self.allocator, 9);
-        if (dirs.len == 0) {
-            std.debug.print("j: no directory history\n", .{});
-            self.last_exit = 0;
-            return;
-        }
-        self.j_count = 0;
-        for (dirs, 0..) |path, i| {
+        // j — list and store for digit jump
+        self.j_count = count;
+        for (filtered[0..count], 0..) |path, i| {
             std.debug.print("{d} {s}\n", .{ i + 1, path });
-            if (i < 9) {
-                self.j_list[i] = path;
-                self.j_count += 1;
-            }
+            self.j_list[i] = path;
         }
         self.last_exit = 0;
     }
 
-    fn builtinJumpTo(self: *Shell, idx: usize) void {
+    pub fn builtinJumpTo(self: *Shell, idx: usize) void {
         if (idx >= self.j_count) {
             std.debug.print("j: no entry {d}\n", .{idx + 1});
             self.last_exit = 1;
