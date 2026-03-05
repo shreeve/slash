@@ -1,7 +1,14 @@
-# Slash Grammar Reference
+# Slash Internals
 
-This document describes the formal grammar for the Slash shell. The grammar
-is defined in `slash.grammar` and processed by `src/grammar.zig` to generate
+Technical reference for the Slash grammar, parser, executor, and runtime.
+This document covers implementation details too low-level for the README
+but essential for contributors working on the parser or executor.
+
+---
+
+## Grammar and Parser
+
+Slash uses a Zig-based grammar engine that reads `slash.grammar` and generates
 `src/parser.zig` — a high-performance LALR(1) parser that emits s-expressions.
 
 ```
@@ -13,12 +20,12 @@ walks and executes as shell commands.
 
 ---
 
-## 1. Lexer
+## Lexer
 
 The lexer converts source text into a stream of tokens. It handles
 context-sensitive tokenization using state variables.
 
-### 1.1 State Variables
+### State Variables
 
 | Variable | Initial | Purpose |
 |----------|---------|---------|
@@ -27,14 +34,14 @@ context-sensitive tokenization using state variables.
 | `paren` | 0 | Parenthesis nesting depth |
 | `brace` | 0 | Brace nesting depth |
 
-### 1.2 Token Types
+### Token Types
 
 **Literals**
 
 | Token | Example | Description |
 |-------|---------|-------------|
 | `ident` | `ls`, `foo_bar` | Bare word (command, argument, variable name) |
-| `integer` | `0`, `42`, `1000` | Integer literal |
+| `integer` | `0`, `42` | Integer literal |
 | `real` | `3.14`, `.5` | Decimal literal |
 | `string_sq` | `'hello'` | Single-quoted string (literal, no interpolation) |
 | `string_dq` | `"hello $name"` | Double-quoted string (interpolated) |
@@ -121,10 +128,10 @@ context-sensitive tokenization using state variables.
 
 | Token | Symbol | Description |
 |-------|--------|-------------|
-| `lparen` | `(` | Open parenthesis (increments `paren`) |
-| `rparen` | `)` | Close parenthesis (decrements `paren`) |
-| `lbrace` | `{` | Open brace (increments `brace`) |
-| `rbrace` | `}` | Close brace (decrements `brace`) |
+| `lparen` | `(` | Open parenthesis |
+| `rparen` | `)` | Close parenthesis |
+| `lbrace` | `{` | Open brace |
+| `rbrace` | `}` | Close brace |
 | `comma` | `,` | Comma (parameter lists) |
 | `backslash` | `\` | Line continuation |
 | `dollar` | `$` | Dollar sign (expansion context) |
@@ -138,15 +145,13 @@ context-sensitive tokenization using state variables.
 | `newline` | | Line terminator |
 | `comment` | `# ...` | Comment (to end of line) |
 | `eof` | | End of input |
-| `err` | | Lexer error (unrecognized character) |
 
-### 1.3 Lexer Rules
+### Lexer Rules
 
 Rules are matched in order. Longer patterns are listed first to prevent
 partial matches.
 
-**Comments.** `#` starts a comment that runs to end of line. SIMD-accelerated
-scan to newline. Allowed everywhere including the interactive prompt.
+**Comments.** `#` starts a comment that runs to end of line.
 
 **Newlines and line continuation.** `\` before a newline is a line continuation
 — the lexer skips both and continues on the next line. CRLF is treated as a
@@ -163,19 +168,13 @@ an interpolated heredoc. `` ```lang `` opens a syntax-highlighted heredoc
 body collection and margin stripping are handled by the executor, not the
 lexer.
 
-**Herestrings.** `<<<` feeds a single string as stdin to a command.
-
 **Numbers.** Reals are matched before integers (longer match first).
-`[0-9]*.[0-9]+` matches reals, `[0-9]+` matches integers.
 
 **Regex literals.** `/pattern/flags` where flags are from `[gimsux]`.
-Disambiguation from division requires context: regex is valid after
-operators, keywords, and at expression start — never after a value token.
-This is handled in generated code.
 
-**Variable references.** `$name` for named variables, `$0`-`$9` for
-positional, `$?`, `$$`, `$!`, `$#`, `$*` for specials. `${...}` for braced
-forms including `${name ?? default}`.
+**Variable references.** `$name` for named variables, `$0`-`$9` for positional,
+`$?`, `$$`, `$!`, `$#`, `$*` for specials. `${...}` for braced forms including
+`${name ?? default}`.
 
 **Operators.** Multi-character operators are matched before single-character
 to prevent partial matches. Order: `|&` before `|`, `&&` before `&`,
@@ -185,30 +184,24 @@ to prevent partial matches. Order: `|&` before `|`, `&&` before `&`,
 patterns `[a-zA-Z_./~][a-zA-Z0-9_./-]*`. Keywords are recognized by the
 parser via `@as` directives, not the lexer.
 
-### 1.4 Indentation Handling
+### Indentation Handling
 
 In script mode (`.slash` files), the lexer tracks indentation levels and
 emits `indent`/`outdent` tokens. In interactive mode with braces, it emits
 `lbrace`/`rbrace` instead. The grammar accepts both forms uniformly via the
 `block` rule.
 
-### 1.5 Regex Disambiguation
+### Regex Disambiguation
 
-The `/` character is ambiguous: it could be division or the start of a regex.
-The lexer uses the preceding token to decide:
+The `/` character is ambiguous: division or the start of a regex. The lexer
+uses the preceding token to decide:
 
-- After `ident`, `integer`, `real`, `string_*`, `rparen`, `variable` → division
-- After everything else (`=~`, `!~`, `==`, `(`, `and`, etc.) → regex
+- After `ident`, `integer`, `real`, `string_*`, `rparen`, `variable` → **division**
+- After everything else (`=~`, `!~`, `==`, `(`, `and`, etc.) → **regex**
 
 ---
 
-## 2. Parser
-
-The parser is LALR(1), generated from grammar rules that produce
-s-expressions. Each rule defines a non-terminal with one or more alternatives,
-each with an optional s-expression output transform.
-
-### 2.1 Keywords
+## Keywords
 
 Keywords are recognized from `ident` tokens via `@as` directives:
 
@@ -236,42 +229,21 @@ Keywords are recognized from `ident` tokens via `@as` directives:
 | `continue` | `kw_continue` | Continue to next iteration |
 | `shift` | `kw_shift` | Shift positional arguments |
 
-### 2.2 Operator Word Aliases
-
-Symbol and word forms are interchangeable:
-
-| Word | Symbol |
-|------|--------|
-| `and` | `&&` |
-| `or` | `\|\|` |
-| `not` | `!` |
-| `xor` | (word form only) |
-
-### 2.3 Parser Aliases
-
-Zero-cost aliases expanded at compile time:
-
-| Alias | Expansion |
-|-------|-----------|
-| `name` | `IDENT` |
-| `word` | `IDENT \| STRING_SQ \| STRING_DQ \| INTEGER \| REAL \| VARIABLE \| VAR_BRACED` |
-| `cmd_name` | `IDENT \| STRING_SQ \| STRING_DQ` |
+Operator word aliases (`and`/`&&`, `or`/`||`, `not`/`!`) are interchangeable.
+`xor` is word-form only.
 
 ---
 
-## 3. Grammar Rules
+## Grammar Rules
 
-### 3.1 Program Structure
+### Program Structure
 
 ```
 program  = line*
 line     = stmt NEWLINE | NEWLINE | COMMENT NEWLINE
 ```
 
-A program is a sequence of lines. Empty lines and comment-only lines
-produce no output (nil).
-
-### 3.2 Statements
+### Statements
 
 ```
 stmt = cmd_def | key_def | set_stmt | assignment
@@ -279,10 +251,7 @@ stmt = cmd_def | key_def | set_stmt | assignment
      | pipeline
 ```
 
-Definitions (`cmd`, `key`, `set`) and assignments are checked before
-general pipelines.
-
-### 3.3 Pipelines and Command Lists
+### Pipelines and Command Lists
 
 ```
 cmdlist  = pipeline && cmdlist    → (and L R)
@@ -297,7 +266,7 @@ pipeline = command |& pipeline    → (pipe_err L R)
          | command
 ```
 
-### 3.4 Commands
+### Commands
 
 ```
 command     = ! command            → (not cmd)
@@ -308,7 +277,7 @@ simple_cmd  = cmd_word (argument | redirect)* [heredoc]
                                    → (cmd name args heredoc)
 ```
 
-### 3.5 Arguments and Redirections
+### Arguments and Redirections
 
 ```
 argument          = word | proc_sub | subshell_capture
@@ -326,7 +295,7 @@ redirect = >   word    → (redir_out file)
          | <<< word    → (herestring value)
 ```
 
-### 3.6 Heredocs
+### Heredocs
 
 ```
 heredoc = ''' body* '''           → (heredoc_literal lines...)
@@ -334,23 +303,19 @@ heredoc = ''' body* '''           → (heredoc_literal lines...)
         | ```lang body* ```       → (heredoc_lang tag lines...)
 ```
 
-Heredoc bodies are collected line by line. The closing delimiter's
-indentation defines the left margin. All content lines are dedented by
-that amount. Piping and stacking are supported — the pipe can appear on
-the opening line or after the closing delimiter. Multiple heredocs on one
-command line match their bodies in order.
+The closing delimiter's indentation defines the left margin. All content
+lines are dedented by that amount. Piping and stacking are supported.
 
-### 3.7 Variable Assignment
+### Variable Assignment
 
 ```
 assignment = name = -       → (unset name)
            | name = expr    → (assign name value)
 ```
 
-Bare `-` on the right side of `=` means unset (remove the variable).
-Quoted `"-"` is the literal string minus.
+Bare `-` means unset. Quoted `"-"` is the literal string minus.
 
-### 3.8 Conditionals
+### Conditionals
 
 ```
 if_stmt     = if condition block else_clause?     → (if cond body else)
@@ -365,10 +330,7 @@ comparison  = expr op expr     → (op L R)
             | ( comparison )
 ```
 
-Comparison operators: `==`, `!=`, `<`, `>`, `<=`, `>=`, `=~`, `!~`.
-Boolean connectors: `and`, `or`, `not` (with parentheses for grouping).
-
-### 3.9 Loops
+### Loops
 
 ```
 for_stmt   = for name in wordlist block    → (for var list body)
@@ -376,9 +338,7 @@ while_stmt = while condition block         → (while cond body)
 until_stmt = until condition block         → (until cond body)
 ```
 
-`break` exits the innermost loop. `continue` skips to the next iteration.
-
-### 3.10 Pattern Matching
+### Pattern Matching
 
 ```
 try_stmt  = try expr try_block             → (try value arms)
@@ -388,21 +348,16 @@ try_arm   = "string" block                 → (arm pattern body)
           | else block                     → (arm_else body)
 ```
 
-Matches the value against each arm in order. String matches are exact.
-Regex matches use `/pattern/flags` syntax. `else` is the catch-all.
-
-### 3.11 Blocks
+### Blocks
 
 ```
 block = { stmt* }             → (block stmts...)
       | INDENT stmt* OUTDENT  → (block stmts...)
 ```
 
-Both forms are semantically identical. Braces for one-liners at the
-prompt, indentation for scripts and multi-line work. The lexer handles
-the difference; the grammar sees the same `block` rule either way.
+Both forms are semantically identical.
 
-### 3.12 User Commands
+### User Commands
 
 ```
 cmd name params? block    → (cmd_def name params body)
@@ -414,13 +369,10 @@ cmd                       → (cmd_list)
 params = ( name, name, ... )
 ```
 
-One-line and multi-line forms. Named parameters capture positional
-arguments. `$*` refers to remaining arguments. If no positional variables
-appear in a one-liner body, `$*` is implicitly appended.
+**Parsing rule:** `cmd name(params)` with `(` touching the name (pre=0) means
+a parameter list. `cmd name (body)` with a space (pre>0) means subshell body.
 
-The special name `???` defines the command-not-found hook.
-
-### 3.13 Key Bindings
+### Key Bindings
 
 ```
 key combo action      → (key combo action)
@@ -428,9 +380,7 @@ key combo "command"   → (key combo command)
 key combo -           → (key_del combo)
 ```
 
-Bare word = readline action. Quoted string = execute as command.
-
-### 3.14 Shell Options
+### Shell Options
 
 ```
 set name value    → (set name value)
@@ -439,7 +389,7 @@ set name          → (set_show name)
 set               → (set_list)
 ```
 
-### 3.15 Expressions
+### Expressions
 
 ```
 expr   = term ((+ | -) term)*
@@ -451,10 +401,9 @@ atom   = VARIABLE | VAR_BRACED | INTEGER | REAL | STRING | capture
 expr  |= expr ?? expr    → (default value fallback)
 ```
 
-Standard arithmetic precedence. `**` is right-associative. The `??`
-operator provides a default value when the left side is unset or empty.
+Standard arithmetic precedence. `**` is right-associative.
 
-### 3.16 File Tests
+### File Tests
 
 ```
 test -flag path    → (test flag path)
@@ -463,25 +412,11 @@ test -flag path    → (test flag path)
 Flags: `-e` (exists), `-f` (file), `-d` (directory), `-s` (non-empty),
 `-r` (readable), `-w` (writable), `-x` (executable), `-L` (symlink).
 
-### 3.17 Special Builtins
-
-```
-exit [N]       → (exit code)
-break          → (break)
-continue       → (continue)
-shift          → (shift)
-source file    → (source path)
-```
-
-`exit` is context-sensitive: exits the innermost context (command, script,
-or shell) with an optional numeric exit code (default 0).
-
 ---
 
-## 4. S-Expression Output
+## S-Expression Output
 
-The parser produces s-expressions that the executor walks. Every construct
-maps to a tagged list:
+Every construct maps to a tagged list:
 
 | Input | S-Expression |
 |-------|-------------|
@@ -506,12 +441,11 @@ maps to a tagged list:
 | `sleep 10 &` | `(bg (cmd sleep 10))` |
 | `(cd /tmp; ls)` | `(subshell (seq (cmd cd /tmp) (cmd ls)))` |
 
-The `--sexpr` flag dumps the parsed s-expression for any input, useful for
-debugging and development.
+Use `--sexp` (or `-s`) to dump the parsed s-expression for any input.
 
 ---
 
-## 5. Compilation Pipeline
+## Compilation Pipeline
 
 ```
 source text → lexer → tokens → parser → s-expressions → executor → execution
@@ -519,7 +453,7 @@ source text → lexer → tokens → parser → s-expressions → executor → e
 
 1. **Lexer** tokenizes input with context-sensitive state
 2. **Parser** builds s-expressions from the token stream (LALR(1))
-3. **Evaluator** pattern-matches on s-expression heads and dispatches:
+3. **Executor** pattern-matches on s-expression heads and dispatches:
    - `cmd` → fork/exec or builtin dispatch
    - `pipe` → pipe creation, fork both sides
    - `if`/`for`/`while`/`try` → control flow
@@ -530,87 +464,190 @@ source text → lexer → tokens → parser → s-expressions → executor → e
    - `bg` → background job management
    - `subshell` → fork and execute in child
 
-No AST node types, no visitor pattern. S-expressions are lists.
-The executor is a recursive function that switches on the head tag.
+No AST node types, no visitor pattern. S-expressions are lists. The executor
+is a recursive function that switches on the head tag.
 
 ---
 
-## 6. Coverage Matrix
+## Job Control
 
-Every language feature from SLASH.md traced against `slash.grammar`.
+Job control follows the POSIX model precisely.
 
-### 6.1 Fully Covered (lexer + parser)
+### Process Groups and Sessions
 
-| Feature | Example |
-|---------|---------|
-| Simple commands | `ls -la /tmp` |
-| Pipelines | `ls \| grep zig \| sort` |
-| Pipe stderr | `make \|& grep error` |
-| Standard redirects | `> >> < 2> 2>> &> 2>&1` |
-| Numbered fd redirects | `3> file`, `1>&3` |
-| Herestrings | `<<< "hello"` |
-| Heredocs (all 3 types) | `'''`, `"""`, `` ```lang `` |
-| Boolean operators | `&& \|\| xor` |
-| Word-form booleans | `and or not xor` |
-| Semicolons | `mkdir build; cd build` |
-| Background | `sleep 10 &` |
-| Subshell grouping | `(cd /tmp; ls)` |
-| Comments (inline too) | `ls -la # show all` |
-| Variable assignment | `name = "steve"` |
-| Variable unset | `name = -` |
-| Inline math | `x = 10 + 4`, `y = $x * 3` |
-| Math at prompt | `1 + 2 * 8` |
-| Special variables | `$?`, `$$`, `$!`, `$#`, `$*`, `$0` |
-| Braced variables | `${name}`, `${1 ?? "default"}` |
-| Default values | `$1 ?? 8080` |
-| Subshell capture | `$(git branch --show-current)` |
-| Process substitution | `<(sort a.txt)`, `>(cmd)` |
-| if/unless/else chains | All forms |
-| Comparisons | `== != < > <= >= =~ !~` |
-| Boolean conditions | `$x > 0 and $x < 100` |
-| Grouped conditions | `($a == 1 or $b == 2) and $c == 3` |
-| for/while/until loops | All forms |
-| break/continue | Both |
-| try/pattern matching | String and word arms |
-| Blocks (braces) | `{ echo hi }` |
-| Blocks (indentation) | `INDENT ... OUTDENT` |
-| test with flags | `test -f $file` |
-| cmd define (one-line) | `cmd g git $*` |
-| cmd define (multi-line) | `cmd serve(port) ...` |
-| cmd show/delete/list | `cmd foo`, `cmd foo -`, `cmd` |
-| cmd ??? hook | `cmd ???(name) ...` |
-| key bindings | `key esc-l "ls -la"` |
-| key delete | `key combo -` |
-| set/show/reset/list | All forms |
-| exit with code | `exit 1` |
-| source / exec / shift | `source file`, `exec ls`, `shift` |
-| Flags as arguments | `-la`, `--verbose` |
-| Bare minus as argument | `cat -`, `cd -` |
-| Glob chars in arguments | `*`, `?`, `[`, `]`, `,` |
-| Line continuation | `\` before newline |
+Slash is the session leader. Every pipeline runs in its own process group.
+`Ctrl+C` sends `SIGINT` to the entire pipeline group — all processes die,
+Slash survives.
 
-### 6.2 Requires Grammar Engine Implementation
+### Spawning a Foreground Job
 
-These features are correctly specified in the grammar file (tokens declared,
-rules documented, disambiguation contracts written) but need implementation
-in `grammar.zig`:
+```zig
+const pid = try std.posix.fork();
+if (pid == 0) {
+    // Child
+    try std.posix.setpgid(0, 0);
+    try std.posix.tcsetpgrp(shell_tty, std.posix.getpid());
+    resetSignalsToDefaults();
+    try std.posix.execve(path, argv, envp);
+} else {
+    // Parent
+    try std.posix.setpgid(pid, pid);      // race condition prevention
+    waitForJob(pid);
+    try std.posix.tcsetpgrp(shell_tty, shell_pgid);
+}
+```
 
-| Feature | What's Needed |
-|---------|---------------|
-| Regex literals `/pattern/flags` | Context-sensitive lexer heuristic in `matchRules()`. The preceding token determines whether `/` starts a regex or is division. Disambiguation rules are specified in the grammar's regex section. |
-| Else after OUTDENT | The lexer's indentation handler must not emit NEWLINE between OUTDENT and ELSE. Documented as a contract in the grammar's conditionals section. |
-| `cmd name(params)` vs `cmd name (body)` | The generated parser must check LPAREN's `pre` field (whitespace count). `pre=0` means parameter list, `pre>0` means subshell body. Documented in the grammar's cmd section. |
+Both parent and child call `setpgid`. The second call is a no-op. This closes
+the race window where the parent might try to give the terminal to a process
+not yet in the right group.
 
-### 6.3 Executor/Expander Concerns (not grammar)
+### Signal Handling
 
-These features are handled post-parse by the executor and expander, not by
-the grammar. The grammar passes the raw tokens through; expansion happens
-at runtime.
+Slash sets these signals to `SIG_IGN` at startup in `main.zig`:
 
-| Feature | Where It Lives |
-|---------|---------------|
-| Glob expansion (`*.zig`, `file[0-9]`) | Expander stitches adjacent `pre=0` tokens into patterns, does filesystem matching |
+| Signal | Slash | Child |
+|--------|-------|-------|
+| `SIGINT` | Ignore | Default (terminate) |
+| `SIGQUIT` | Ignore | Default |
+| `SIGTSTP` | Ignore | Default (stop) |
+| `SIGTTOU` | Ignore | Default |
+| `SIGTTIN` | Ignore | Default |
+
+There is no `SIGCHLD` handler — background job reaping is done by polling
+with `waitpid(-1, WNOHANG)` in `reapAndReport()` at each prompt cycle.
+`SIGPIPE` is not explicitly handled by the shell; children get the kernel
+default.
+
+Children must have all signals reset to defaults before `exec`.
+
+### Terminal Ownership Transfer
+
+```
+Ctrl+Z pressed:
+  1. SIGTSTP delivered to foreground pgid
+  2. Processes stop
+  3. waitpid returns with WIFSTOPPED
+  4. Slash calls tcsetpgrp(tty, slash_pgid)  -- reclaim terminal
+  5. Slash redraws prompt
+
+fg command:
+  1. Slash calls tcsetpgrp(tty, job_pgid)    -- give terminal to job
+  2. Slash calls kill(job_pgid, SIGCONT)      -- resume job
+  3. Slash calls waitpid(job_pgid)            -- wait for it
+  4. On return, tcsetpgrp(tty, slash_pgid)    -- reclaim
+```
+
+### Job Table
+
+Up to 64 jobs. Each job tracks its process group and up to 8 PIDs:
+
+```zig
+const Job = struct {
+    id: u16,                    // [1], [2]
+    pgid: posix.pid_t,
+    state: JobState,            // running, stopped, done
+    exit_code: u8,
+    command: []const u8,        // original command string for display
+    pids: [8]posix.pid_t,       // individual PIDs in the pipeline
+    pid_count: u8,
+};
+```
+
+---
+
+## File Descriptor Handling
+
+### Standard Redirections
+
+```
+cmd > file          # stdout → file (truncate)
+cmd >> file         # stdout → file (append)
+cmd < file          # stdin ← file
+cmd 2> file         # stderr → file
+cmd &> file         # stdout and stderr → file
+cmd 2>&1            # stderr → stdout
+```
+
+### Pipeline FD Wiring
+
+For `A | B | C`, two pipes are created:
+
+```
+pipe1: A_stdout → B_stdin
+pipe2: B_stdout → C_stdin
+```
+
+After forking each process:
+- A: close read end of pipe1, close both ends of pipe2, dup pipe1 write → stdout
+- B: close write end of pipe1, close read end of pipe2, dup pipe1 read → stdin, dup pipe2 write → stdout
+- C: close both ends of pipe1, close write end of pipe2, dup pipe2 read → stdin
+
+All unused pipe ends are closed before exec. Failure to close them causes
+`SIGPIPE` never to be delivered and pipelines to hang.
+
+### Process Substitution
+
+`diff <(sort a.txt) <(sort b.txt)` — implemented with pipes and `/dev/fd/N`.
+Slash creates a pipe, forks a child to run the substituted command writing to
+the write end, and passes the read end's path as an argument to the outer
+command.
+
+---
+
+## Builtins
+
+Commands implemented inside Slash (they affect shell state):
+
+These are registered in `isBuiltin()` in `exec.zig`:
+
+| Command | Description |
+|---------|-------------|
+| `cd` | Change directory (file-aware), record in frecency DB |
+| `..` / `...` / `....` | Go up 1, 2, 3, ... directories (dynamic dot-counter) |
+| `echo` | Print arguments |
+| `true` / `false` | Exit 0 / Exit 1 |
+| `type` | Show whether a name is a builtin, command, or external |
+| `pwd` | Print working directory |
+| `jobs` | List all jobs |
+| `fg` / `bg` | Job control (foreground / background) |
+| `history` | Search/display command history |
+| `j` | Fuzzy jump to frecency-ranked directory match |
+| `exit` | Exit current context (command, script, or shell) |
+| `source` | Execute a script in current shell context |
+| `set` | Set, show, reset, or list shell options |
+| `cmd` | Define, show, delete, or list user commands |
+| `key` | Define key bindings |
+| `test` | File tests (`-f`, `-d`, `-e`, `-s`, `-r`, `-w`, `-x`, `-L`) |
+| `shift` | Shift positional arguments |
+| `break` / `continue` | Loop control flow |
+
+`exec` is handled at the s-expression dispatch level (tag `.exec`), not
+through `tryBuiltin()` — it replaces the shell process via `execvpeZ`.
+
+---
+
+## Executor/Expander Concerns
+
+These features are handled post-parse by the executor — the grammar passes
+raw tokens through, expansion happens at runtime:
+
+| Feature | Where |
+|---------|-------|
+| Glob expansion (`*.zig`, `file[0-9]`) | Expander stitches adjacent `pre=0` tokens, does filesystem matching |
 | Brace expansion (`{a,b,c}`) | Expander checks `pre=0` on LBRACE to distinguish from block syntax |
 | Variable interpolation in strings | Expander parses `$name` inside `string_dq` tokens |
 | Tilde expansion (`~/foo`) | Expander handles `~` prefix in idents |
 | Auto-cd (`/tmp` as command) | Executor fallback when command not found |
+
+---
+
+## Grammar Engine Implementation Notes
+
+These features are specified in the grammar but require specific implementation
+in `grammar.zig`:
+
+| Feature | What's Needed |
+|---------|---------------|
+| Regex literals `/pattern/flags` | Context-sensitive lexer heuristic — preceding token determines if `/` is regex or division |
+| Else after OUTDENT | Lexer must not emit NEWLINE between OUTDENT and ELSE |
+| `cmd name(params)` vs `cmd name (body)` | Parser checks LPAREN's `pre` field — `pre=0` means params, `pre>0` means subshell |
