@@ -1,6 +1,6 @@
 # Slash
 
-A modern shell written in Zig. Grammar-driven lexer and LALR(1) parser that
+A modern shell written in Zig. Grammar-driven lexer and SLR(1) parser that
 emits s-expressions — no AST, no intermediate representation. The executor
 walks s-expressions recursively and dispatches on the head tag.
 

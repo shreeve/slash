@@ -5,7 +5,7 @@
 ## A modern shell built on Unix fundamentals
 
 Slash is a clean, fast, modern shell written entirely in Zig. It uses a
-grammar-driven LALR(1) parser that emits s-expressions — no hand-rolled
+grammar-driven SLR(1) parser that emits s-expressions — no hand-rolled
 parsing, no AST, no intermediate representations. The parser is generated
 from a formal grammar by a powerful Zig-based engine used in several commercial
 projects.
@@ -250,7 +250,7 @@ key ctrl-x-e  edit-in-editor          # open in $EDITOR
 ## Architecture
 
 ```
-slash.grammar  →  grammar.zig  →  parser.zig  (lexer + LALR parser)
+slash.grammar  →  grammar.zig  →  parser.zig  (lexer + SLR parser)
                                                (tags + keywords generated inline)
 exec.zig                                       (s-expression executor: fork/exec/pipe)
 main.zig                                       (CLI + REPL)

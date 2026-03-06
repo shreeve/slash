@@ -9,7 +9,7 @@ but essential for contributors working on the parser or executor.
 ## Grammar and Parser
 
 Slash uses a Zig-based grammar engine that reads `slash.grammar` and generates
-`src/parser.zig` — a high-performance LALR(1) parser that emits s-expressions.
+`src/parser.zig` — a high-performance SLR(1) parser that emits s-expressions.
 
 ```
 slash.grammar  →  grammar.zig  →  src/parser.zig
@@ -166,8 +166,10 @@ sequences (`\n`, `\t`, `\\`, `\"`, etc.).
 **Heredoc delimiters.** `'''` opens/closes a literal heredoc. `"""` opens/closes
 an interpolated heredoc. `` ```lang `` opens a syntax-highlighted heredoc
 (the language tag is captured in the token text). `` ``` `` closes it. Heredoc
-body collection and margin stripping are handled by the executor, not the
-lexer.
+body collection and margin stripping are handled by the wrapper lexer
+(`src/lexer.zig`), which collects body lines and strips indentation before
+the parser sees them. The executor then concatenates and interpolates the
+already-tokenized body.
 
 **Numbers.** Reals are matched before integers (longer match first).
 
@@ -478,7 +480,7 @@ source text → lexer → tokens → parser → s-expressions → executor → e
 ```
 
 1. **Lexer** tokenizes input with context-sensitive state
-2. **Parser** builds s-expressions from the token stream (LALR(1))
+2. **Parser** builds s-expressions from the token stream (SLR(1))
 3. **Executor** pattern-matches on s-expression heads and dispatches:
    - `cmd` → fork/exec or builtin dispatch
    - `pipe` → pipe creation, fork both sides
