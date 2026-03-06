@@ -108,6 +108,7 @@ check "unset variable"          "name = -"                  "(unset name)"
 check "simple pipe"             "ls | wc"                   "(pipe (cmd ls) (cmd wc))"
 check "multi pipe"              "ls | grep zig | sort"      "(pipe (cmd ls) (pipe (cmd grep zig) (cmd sort)))"
 check "pipe stderr"             "make |& grep error"        "(pipe_err (cmd make) (cmd grep error))"
+check "pipe stderr exec"        '/bin/sh -c "echo out; echo err 1>&2" |& wc -l' "" "       2"
 
 # ==========================================================================
 # BOOLEAN OPERATORS (symbol and word forms)
@@ -196,6 +197,7 @@ check "until loop"             "until true { echo y }"     "(until (cmd true) (b
 # ==========================================================================
 check "try with arms"          'try $x { "a" { echo a } "b" { echo b } }'  '(try $x ((arm "a" (block (cmd echo a))) (arm "b" (block (cmd echo b)))))'
 check "try with else"          'try $x { "a" { echo a } else { echo z } }' '(try $x ((arm "a" (block (cmd echo a))) (arm_else (block (cmd echo z)))))'
+check "try regex exec"         'try "test" { /te.*/ { echo yes } else { echo no } }' "" "yes"
 
 # ==========================================================================
 # NESTED CONSTRUCTS
@@ -372,6 +374,10 @@ check_script "exec if false else" \
     "$(printf 'if false { echo y } else { echo n }\n')" \
     "n"
 
+check_script "exec indent if else" \
+    "$(printf 'if true\n    echo yes\nelse\n    echo no\n')" \
+    "yes"
+
 check_script "exec unless" \
     "$(printf 'unless false { echo ok }\n')" \
     "ok"
@@ -439,6 +445,14 @@ check_script "exec herestring var" \
     "$(printf 'cat <<< $HOME\n')" \
     "$HOME"
 
+check_script "exec braced default" \
+    "$(printf 'echo ${__SLASH_MISSING__ ?? "."}\n')" \
+    "."
+
+check_script "exec uppercase export" \
+    "$(printf 'FOO = \"bar\"\n/usr/bin/printenv FOO\n')" \
+    "bar"
+
 check_script "exec nested capture" \
     "$(printf 'echo $(echo $(echo deep))\n')" \
     "deep"
@@ -493,7 +507,11 @@ check_script "exec redirect both" \
     "$(printf 'echo hello &> /tmp/_sl_both.txt\ncat /tmp/_sl_both.txt\n')" \
     "hello"
 
-rm -f /tmp/_sl_app.txt /tmp/_sl_err.txt /tmp/_sl_both.txt
+check_script "exec redirect fd out" \
+    "$(printf "python3 -c 'import os; os.write(3, b\"hello\\\\n\")' 3> /tmp/_sl_fd3.txt\ncat /tmp/_sl_fd3.txt\n")" \
+    "hello"
+
+rm -f /tmp/_sl_app.txt /tmp/_sl_err.txt /tmp/_sl_both.txt /tmp/_sl_fd3.txt
 
 # ==========================================================================
 # EXECUTION: SUBSHELL ISOLATION
@@ -566,6 +584,70 @@ check_script "heredoc lang tag" \
 check_script "exec procsub pipeline" \
     "$(printf 'cat <(echo hello | tr h H)\n')" \
     "Hello"
+
+# ==========================================================================
+# EXECUTION: TEST BUILTIN (extended)
+# ==========================================================================
+
+check_script "exec test -r" \
+    "$(printf 'if test -r build.zig { echo readable }\n')" \
+    "readable"
+
+check_script "exec test -w" \
+    "$(printf 'if test -w build.zig { echo writable }\n')" \
+    "writable"
+
+check_script "exec test -x dir" \
+    "$(printf 'if test -x src { echo executable }\n')" \
+    "executable"
+
+check_script "exec test unknown flag" \
+    "$(printf 'if test -z foo { echo bad } else { echo ok }\n')" \
+    "ok"
+
+# ==========================================================================
+# EXECUTION: INDENTED CONTROL STRUCTURES
+# ==========================================================================
+
+check_script "exec indent for" \
+    "$(printf 'for x in a b c\n    echo $x\n')" \
+    "$(printf 'a\nb\nc')"
+
+check_script "exec indent while" \
+    "$(printf 'x = 0\nwhile $x < 3\n    echo $x\n    x = $x + 1\n')" \
+    "$(printf '0\n1\n2')"
+
+check_script "exec indent if else false" \
+    "$(printf 'if false\n    echo y\nelse\n    echo n\n')" \
+    "n"
+
+# ==========================================================================
+# EXECUTION: TRY PATTERN MATCHING
+# ==========================================================================
+
+check_script "exec try string match" \
+    "$(printf 'x = "hello"\ntry $x { "hello" { echo yes } else { echo no } }\n')" \
+    "yes"
+
+check_script "exec try regex match" \
+    "$(printf 'x = "hello"\ntry $x { ~|^hel| { echo yes } else { echo no } }\n')" \
+    "yes"
+
+check_script "exec try else fallthrough" \
+    "$(printf 'x = "other"\ntry $x { "hello" { echo h } else { echo fallback } }\n')" \
+    "fallback"
+
+# ==========================================================================
+# EXECUTION: CMD DEFINE AND INVOKE
+# ==========================================================================
+
+check_script "exec cmd with params" \
+    "$(printf 'cmd greet(name) echo hello $name\ngreet world\n')" \
+    "hello world"
+
+check_script "exec cmd with defaults" \
+    "$(printf 'cmd serve(port)\n    port = $port ?? 8080\n    echo $port\nserve\n')" \
+    "8080"
 
 # ==========================================================================
 # RESULTS
