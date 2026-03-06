@@ -13,7 +13,7 @@
 //!   Data
 //!     %t          time (HH:MM:SS)         %u          username
 //!     %h          hostname (short)        %d          directory (~ abbreviated)
-//!     %g          git branch + dirty      %e          exit code (non-zero only)
+//!     %g          git branch              %e          exit code (non-zero only)
 //!     %D          command duration (if > 1s)
 //!
 //!   Literal
@@ -257,14 +257,18 @@ fn abbreviateHome(path: []const u8, home: []const u8, buf: *[4096]u8) []const u8
 }
 
 /// Reads .git/HEAD to get branch name, walks up from cwd.
-/// Returns "branch *" if dirty (index modified), "branch" if clean, "" if not a repo.
+/// Returns branch name or short hash for detached HEAD, "" if not a repo.
 fn getGitInfo(buf: *[256]u8, cwd: []const u8) []const u8 {
     var path_buf: [4096]u8 = undefined;
 
-    // Walk up directory tree to find .git
     var dir = cwd;
     while (true) {
-        const head = openGitHead(&path_buf, dir) orelse {
+        const suffix = "/.git/HEAD";
+        if (dir.len + suffix.len > path_buf.len) break;
+        @memcpy(path_buf[0..dir.len], dir);
+        @memcpy(path_buf[dir.len..][0..suffix.len], suffix);
+
+        const head = std.fs.openFileAbsolute(path_buf[0 .. dir.len + suffix.len], .{}) catch {
             if (std.mem.lastIndexOfScalar(u8, dir, '/')) |sep| {
                 if (sep == 0) break;
                 dir = dir[0..sep];
@@ -282,47 +286,15 @@ fn getGitInfo(buf: *[256]u8, cwd: []const u8) []const u8 {
         const branch = if (std.mem.startsWith(u8, content, ref_prefix))
             content[ref_prefix.len..]
         else if (content.len >= 8)
-            content[0..8] // detached HEAD — show short hash
+            content[0..8]
         else
             return "";
 
-        // Check for dirty state: .git/index mtime vs HEAD mtime
-        const dirty = checkDirty(&path_buf, dir);
-        const suffix: []const u8 = if (dirty) " *" else "";
-
-        if (branch.len + suffix.len > buf.len) return "";
+        if (branch.len > buf.len) return "";
         @memcpy(buf[0..branch.len], branch);
-        @memcpy(buf[branch.len..][0..suffix.len], suffix);
-        return buf[0 .. branch.len + suffix.len];
+        return buf[0..branch.len];
     }
     return "";
-}
-
-fn openGitHead(path_buf: *[4096]u8, dir: []const u8) ?std.fs.File {
-    const suffix = "/.git/HEAD";
-    if (dir.len + suffix.len > path_buf.len) return null;
-    @memcpy(path_buf[0..dir.len], dir);
-    @memcpy(path_buf[dir.len..][0..suffix.len], suffix);
-    return std.fs.openFileAbsolute(path_buf[0 .. dir.len + suffix.len], .{}) catch null;
-}
-
-/// Dirty check: index mtime differs from HEAD mtime indicates staged changes.
-fn checkDirty(path_buf: *[4096]u8, git_dir: []const u8) bool {
-    const head_suffix = "/.git/HEAD";
-    if (git_dir.len + head_suffix.len > path_buf.len) return false;
-    @memcpy(path_buf[0..git_dir.len], git_dir);
-    @memcpy(path_buf[git_dir.len..][0..head_suffix.len], head_suffix);
-    const head_file = std.fs.openFileAbsolute(path_buf[0 .. git_dir.len + head_suffix.len], .{}) catch return false;
-    defer head_file.close();
-    const head_stat = head_file.stat() catch return false;
-
-    const idx_suffix = "/.git/index";
-    @memcpy(path_buf[git_dir.len..][0..idx_suffix.len], idx_suffix);
-    const idx_file = std.fs.openFileAbsolute(path_buf[0 .. git_dir.len + idx_suffix.len], .{}) catch return false;
-    defer idx_file.close();
-    const idx_stat = idx_file.stat() catch return false;
-
-    return idx_stat.mtime != head_stat.mtime;
 }
 
 fn formatDuration(buf: *[16]u8, ms: u64) []const u8 {

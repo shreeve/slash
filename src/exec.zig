@@ -1066,55 +1066,115 @@ pub const Shell = struct {
         self.last_exit = statusToExit(result.status);
     }
 
+    const PipeSegment = struct { sexp: Sexp, pipe_stderr: bool };
+    const MAX_PIPE_SEGMENTS = 16;
+
+    fn flattenPipeline(args: []const Sexp, pipe_stderr: bool, buf: *[MAX_PIPE_SEGMENTS]PipeSegment) u8 {
+        if (args.len < 2) return 0;
+        var count: u8 = 0;
+
+        buf[0] = .{ .sexp = args[0], .pipe_stderr = pipe_stderr };
+        count = 1;
+
+        var right = args[1];
+        while (true) {
+            if (count >= MAX_PIPE_SEGMENTS) break;
+            switch (right) {
+                .list => |items| {
+                    if (items.len >= 3 and items[0] == .tag) {
+                        const tag = items[0].tag;
+                        if (tag == .pipe or tag == .pipe_err) {
+                            buf[count] = .{ .sexp = items[1], .pipe_stderr = (tag == .pipe_err) };
+                            count += 1;
+                            right = items[2];
+                            continue;
+                        }
+                    }
+                },
+                else => {},
+            }
+            buf[count] = .{ .sexp = right, .pipe_stderr = false };
+            count += 1;
+            break;
+        }
+        return count;
+    }
+
     fn evalPipe(self: *Shell, args: []const Sexp, source: []const u8, pipe_stderr: bool) void {
         if (args.len < 2) {
             if (args.len == 1) self.eval(args[0], source);
             return;
         }
-        const pipe_fds = posix.pipe() catch { self.last_exit = 1; return; };
 
-        const pid1 = posix.fork() catch { self.last_exit = 1; return; };
-        if (pid1 == 0) {
-            if (self.interactive) _ = libc.setpgid(0, 0);
-            posix.close(pipe_fds[0]);
-            posix.dup2(pipe_fds[1], posix.STDOUT_FILENO) catch posix.exit(1);
-            if (pipe_stderr) posix.dup2(pipe_fds[1], posix.STDERR_FILENO) catch posix.exit(1);
-            posix.close(pipe_fds[1]);
-            resetChildSignals();
-            self.eval(args[0], source);
-            posix.exit(self.last_exit);
+        var seg_buf: [MAX_PIPE_SEGMENTS]PipeSegment = undefined;
+        const n = flattenPipeline(args, pipe_stderr, &seg_buf);
+        if (n < 2) {
+            if (n == 1) self.eval(seg_buf[0].sexp, source);
+            return;
+        }
+        const segments = seg_buf[0..n];
+
+        var pipe_fds: [MAX_PIPE_SEGMENTS - 1][2]posix.fd_t = undefined;
+        for (0..n - 1) |i| {
+            pipe_fds[i] = posix.pipe() catch {
+                for (0..i) |j| { posix.close(pipe_fds[j][0]); posix.close(pipe_fds[j][1]); }
+                self.last_exit = 1;
+                return;
+            };
         }
 
-        if (self.interactive) _ = libc.setpgid(pid1, pid1);
+        var child_pids: [MAX_PIPE_SEGMENTS]posix.pid_t = .{0} ** MAX_PIPE_SEGMENTS;
+        var pgid: posix.pid_t = 0;
 
-        const pid2 = posix.fork() catch { self.last_exit = 1; return; };
-        if (pid2 == 0) {
-            if (self.interactive) _ = libc.setpgid(0, pid1);
-            posix.close(pipe_fds[1]);
-            posix.dup2(pipe_fds[0], posix.STDIN_FILENO) catch posix.exit(1);
-            posix.close(pipe_fds[0]);
-            resetChildSignals();
-            self.eval(args[1], source);
-            posix.exit(self.last_exit);
+        for (segments, 0..) |seg, i| {
+            const pid = posix.fork() catch {
+                self.last_exit = 1;
+                break;
+            };
+
+            if (pid == 0) {
+                if (self.interactive) _ = libc.setpgid(0, if (pgid != 0) pgid else 0);
+                resetChildSignals();
+
+                if (i > 0) {
+                    posix.dup2(pipe_fds[i - 1][0], posix.STDIN_FILENO) catch posix.exit(1);
+                }
+                if (i < n - 1) {
+                    posix.dup2(pipe_fds[i][1], posix.STDOUT_FILENO) catch posix.exit(1);
+                    if (seg.pipe_stderr)
+                        posix.dup2(pipe_fds[i][1], posix.STDERR_FILENO) catch posix.exit(1);
+                }
+
+                for (0..n - 1) |j| {
+                    posix.close(pipe_fds[j][0]);
+                    posix.close(pipe_fds[j][1]);
+                }
+
+                self.eval(seg.sexp, source);
+                posix.exit(self.last_exit);
+            }
+
+            if (i == 0) pgid = pid;
+            if (self.interactive) _ = libc.setpgid(pid, pgid);
+            child_pids[i] = pid;
         }
 
-        if (self.interactive) _ = libc.setpgid(pid2, pid1);
-
-        posix.close(pipe_fds[0]);
-        posix.close(pipe_fds[1]);
+        for (0..n - 1) |i| {
+            posix.close(pipe_fds[i][0]);
+            posix.close(pipe_fds[i][1]);
+        }
 
         if (self.interactive) {
-            const pids = [_]posix.pid_t{ pid1, pid2 };
             const cmd_text = self.allocator.dupe(u8, source[0..@min(source.len, 80)]) catch "";
-            const job_id = self.addJob(pid1, .running, cmd_text, &pids);
-            _ = libc.tcsetpgrp(self.tty_fd, pid1);
-            self.waitForForegroundJob(pid1, 2);
+            const job_id = self.addJob(pgid, .running, cmd_text, child_pids[0..n]);
+            _ = libc.tcsetpgrp(self.tty_fd, pgid);
+            self.waitForForegroundJob(pgid, @intCast(n));
             if (self.findJobById(job_id)) |job| {
                 if (job.state != .stopped) self.removeJob(job_id);
             }
         } else {
-            _ = posix.waitpid(pid1, 0);
-            const result = posix.waitpid(pid2, 0);
+            for (0..n - 1) |i| _ = posix.waitpid(child_pids[i], 0);
+            const result = posix.waitpid(child_pids[n - 1], 0);
             self.last_exit = statusToExit(result.status);
         }
     }

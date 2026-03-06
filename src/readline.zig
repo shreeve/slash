@@ -493,6 +493,49 @@ fn completePath(prefix: []const u8, word_start: usize) TabResult {
 var cmd_match_buf: [32][128]u8 = undefined;
 var cmd_match_count: usize = 0;
 
+const PathCache = struct {
+    names: [][]const u8 = &.{},
+    path_hash: u64 = 0,
+    alloc: std.mem.Allocator = std.heap.page_allocator,
+
+    fn refresh(self: *PathCache) void {
+        const path_env = std.posix.getenv("PATH") orelse "";
+        const hash = std.hash.Fnv1a_64.hash(path_env);
+        if (hash == self.path_hash and self.names.len > 0) return;
+        self.path_hash = hash;
+
+        for (self.names) |n| self.alloc.free(n);
+        if (self.names.len > 0) self.alloc.free(self.names);
+
+        var list: std.ArrayList([]const u8) = .empty;
+        var seen = std.StringHashMap(void).init(self.alloc);
+        defer seen.deinit();
+
+        var path_iter = std.mem.splitScalar(u8, path_env, ':');
+        while (path_iter.next()) |dir_path| {
+            var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
+            defer dir.close();
+            var iter = dir.iterate();
+            while (iter.next() catch null) |entry| {
+                if (entry.kind != .file and entry.kind != .sym_link) continue;
+                if (seen.contains(entry.name)) continue;
+                const name = self.alloc.dupe(u8, entry.name) catch continue;
+                list.append(self.alloc, name) catch continue;
+                seen.put(name, {}) catch {};
+            }
+        }
+
+        self.names = list.toOwnedSlice(self.alloc) catch &.{};
+        std.mem.sort([]const u8, self.names, {}, lessThanStr);
+    }
+};
+
+var path_cache: PathCache = .{};
+
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
 fn completeCommand(prefix: []const u8, word_start: usize) TabResult {
     cmd_match_count = 0;
     var common_len: usize = 0;
@@ -512,27 +555,18 @@ fn completeCommand(prefix: []const u8, word_start: usize) TabResult {
         }
     }
 
-    const path_env = std.posix.getenv("PATH") orelse "";
-    var path_iter = std.mem.splitScalar(u8, path_env, ':');
-    while (path_iter.next()) |dir_path| {
+    path_cache.refresh();
+    for (path_cache.names) |name| {
         if (cmd_match_count >= 32) break;
-        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
-        defer dir.close();
-        var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            if (entry.kind != .file and entry.kind != .sym_link) continue;
-            if (std.mem.startsWith(u8, entry.name, prefix) and entry.name.len < 128) {
-                if (cmd_match_count < 32) {
-                    @memcpy(cmd_match_buf[cmd_match_count][0..entry.name.len], entry.name);
-                    complete_list_buf[cmd_match_count] = cmd_match_buf[cmd_match_count][0..entry.name.len];
-                    if (cmd_match_count == 0) common_len = entry.name.len else {
-                        var cl: usize = 0;
-                        while (cl < common_len and cl < entry.name.len and cmd_match_buf[0][cl] == entry.name[cl]) cl += 1;
-                        common_len = cl;
-                    }
-                    cmd_match_count += 1;
-                }
+        if (std.mem.startsWith(u8, name, prefix) and name.len < 128) {
+            @memcpy(cmd_match_buf[cmd_match_count][0..name.len], name);
+            complete_list_buf[cmd_match_count] = cmd_match_buf[cmd_match_count][0..name.len];
+            if (cmd_match_count == 0) common_len = name.len else {
+                var cl: usize = 0;
+                while (cl < common_len and cl < name.len and cmd_match_buf[0][cl] == name[cl]) cl += 1;
+                common_len = cl;
             }
+            cmd_match_count += 1;
         }
     }
 
