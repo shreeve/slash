@@ -226,6 +226,38 @@ fn needsContinuation(line: []const u8) bool {
     return false;
 }
 
+var user_cmd_names_buf: [64][]const u8 = undefined;
+
+fn getUserCmdNames() []const []const u8 {
+    if (repl_shell) |sh| {
+        var it = sh.user_cmds.iterator();
+        var i: usize = 0;
+        while (it.next()) |entry| {
+            if (i >= 64) break;
+            user_cmd_names_buf[i] = entry.key_ptr.*;
+            i += 1;
+        }
+        return user_cmd_names_buf[0..i];
+    }
+    return &.{};
+}
+
+var shell_var_names_buf: [64][]const u8 = undefined;
+
+fn getShellVarNames() []const []const u8 {
+    if (repl_shell) |sh| {
+        var it = sh.vars.iterator();
+        var i: usize = 0;
+        while (it.next()) |entry| {
+            if (i >= 64) break;
+            shell_var_names_buf[i] = entry.key_ptr.*;
+            i += 1;
+        }
+        return shell_var_names_buf[0..i];
+    }
+    return &.{};
+}
+
 fn keyExec(cmd: []const u8) void {
     if (repl_shell) |sh| {
         const source = sh.allocator.dupeZ(u8, cmd) catch return;
@@ -242,7 +274,7 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
     }
 
     repl_shell = ev;
-    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec, .search = &historySearchFn, .suggest = &historySuggest, .palette = &paletteFn, .eval_math = &evalMathPreview });
+    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec, .search = &historySearchFn, .suggest = &historySuggest, .palette = &paletteFn, .eval_math = &evalMathPreview, .user_cmd_names = &getUserCmdNames, .shell_var_names = &getShellVarNames });
 
     const hdb = history.Db.open() catch null;
     defer if (hdb) |h| h.close();
@@ -308,7 +340,7 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
         if (hdb) |h| {
             var cwd_buf: [4096]u8 = undefined;
             const cwd = std.posix.getcwd(&cwd_buf) catch "";
-            h.record(trimmed, cwd, ev.last_exit, last_duration_ms);
+            h.record(full_line, cwd, ev.last_exit, last_duration_ms);
         }
     }
 }

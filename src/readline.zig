@@ -13,7 +13,8 @@ const STDIN = posix.STDIN_FILENO;
 const STDOUT = posix.STDOUT_FILENO;
 
 pub const History = struct {
-    lines: [512][]const u8 = .{""} ** 512,
+    const CAPACITY = 512;
+    lines: [CAPACITY][]const u8 = .{""} ** CAPACITY,
     count: usize = 0,
     alloc: std.mem.Allocator,
 
@@ -23,15 +24,20 @@ pub const History = struct {
 
     pub fn add(self: *History, line: []const u8) void {
         if (line.len == 0) return;
-        if (self.count > 0 and std.mem.eql(u8, self.lines[(self.count - 1) % 512], line)) return;
+        if (self.count > 0 and std.mem.eql(u8, self.lines[(self.count - 1) % CAPACITY], line)) return;
         const copy = self.alloc.dupe(u8, line) catch return;
-        self.lines[self.count % 512] = copy;
+        const slot = self.count % CAPACITY;
+        if (self.count >= CAPACITY and self.lines[slot].len > 0) {
+            self.alloc.free(self.lines[slot]);
+        }
+        self.lines[slot] = copy;
         self.count += 1;
     }
 
     pub fn get(self: *const History, idx: usize) []const u8 {
         if (idx >= self.count) return "";
-        return self.lines[idx % 512];
+        if (self.count > CAPACITY and idx < self.count - CAPACITY) return "";
+        return self.lines[idx % CAPACITY];
     }
 };
 
@@ -55,6 +61,8 @@ pub const KeyHandler = struct {
     suggest: ?*const fn (prefix: []const u8) ?[]const u8 = null,
     palette: ?*const fn (alloc: std.mem.Allocator, query: []const u8) []PaletteResult = null,
     eval_math: ?*const fn (expr: []const u8) ?[]const u8 = null,
+    user_cmd_names: ?*const fn () []const []const u8 = null,
+    shell_var_names: ?*const fn () []const []const u8 = null,
 };
 
 var key_handler: ?KeyHandler = null;
@@ -325,7 +333,26 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                 refreshLine(line_buf[0..len], cursor);
             },
             else => |ch| {
-                if (ch >= 32 and ch < 127) {
+                if (ch < 32) {
+                    if (key_handler) |kh| {
+                        var ctrl_buf: [16]u8 = undefined;
+                        const ctrl_name = std.fmt.bufPrint(&ctrl_buf, "ctrl-{c}", .{ch + 'a' - 1}) catch "";
+                        if (ctrl_name.len > 0) {
+                            if (kh.lookup(ctrl_name)) |cmd_str| {
+                                disableRawMode(orig);
+                                writeAll("\n");
+                                kh.exec(cmd_str);
+                                writeAll(prompt);
+                                const new_orig = enableRawMode() orelse return null;
+                                _ = new_orig;
+                                len = 0;
+                                cursor = 0;
+                                refreshLine(line_buf[0..len], cursor);
+                                continue;
+                            }
+                        }
+                    }
+                } else if (ch >= 32 and ch < 127) {
                     // Space after dir completion: replace trailing / with space
                     if (ch == ' ' and completed_dir_slash and cursor > 0 and cursor == len and line_buf[cursor - 1] == '/') {
                         line_buf[cursor - 1] = ' ';
@@ -467,12 +494,10 @@ var cmd_match_buf: [32][128]u8 = undefined;
 var cmd_match_count: usize = 0;
 
 fn completeCommand(prefix: []const u8, word_start: usize) TabResult {
-    const control_flow = [_][]const u8{ "if", "unless", "for", "while", "until", "try" };
-
     cmd_match_count = 0;
     var common_len: usize = 0;
 
-    for (Shell.builtin_names ++ control_flow) |b| {
+    for (Shell.builtin_names ++ Shell.keyword_names) |b| {
         if (std.mem.startsWith(u8, b, prefix)) {
             if (cmd_match_count < 32 and b.len < 128) {
                 @memcpy(cmd_match_buf[cmd_match_count][0..b.len], b);
@@ -503,6 +528,24 @@ fn completeCommand(prefix: []const u8, word_start: usize) TabResult {
                     if (cmd_match_count == 0) common_len = entry.name.len else {
                         var cl: usize = 0;
                         while (cl < common_len and cl < entry.name.len and cmd_match_buf[0][cl] == entry.name[cl]) cl += 1;
+                        common_len = cl;
+                    }
+                    cmd_match_count += 1;
+                }
+            }
+        }
+    }
+
+    if (key_handler) |kh| {
+        if (kh.user_cmd_names) |get_cmds| {
+            for (get_cmds()) |name| {
+                if (cmd_match_count >= 32) break;
+                if (std.mem.startsWith(u8, name, prefix) and name.len < 128) {
+                    @memcpy(cmd_match_buf[cmd_match_count][0..name.len], name);
+                    complete_list_buf[cmd_match_count] = cmd_match_buf[cmd_match_count][0..name.len];
+                    if (cmd_match_count == 0) common_len = name.len else {
+                        var cl: usize = 0;
+                        while (cl < common_len and cl < name.len and cmd_match_buf[0][cl] == name[cl]) cl += 1;
                         common_len = cl;
                     }
                     cmd_match_count += 1;
@@ -550,6 +593,27 @@ fn completeVariable(prefix: []const u8, word_start: usize) TabResult {
                     if (match_count == 0) first_match = full;
                     if (match_count < 32) complete_list_buf[match_count] = full;
                     match_count += 1;
+                }
+            }
+        }
+    }
+
+    if (var_prefix.len > 0) {
+        if (key_handler) |kh| {
+            if (kh.shell_var_names) |get_vars| {
+                for (get_vars()) |name| {
+                    if (match_count >= 32) break;
+                    if (std.mem.startsWith(u8, name, var_prefix)) {
+                        const full_len = 1 + name.len;
+                        if (full_len < 128) {
+                            complete_buf[match_count * 128] = '$';
+                            @memcpy(complete_buf[match_count * 128 + 1 ..][0..name.len], name);
+                            const full = complete_buf[match_count * 128 ..][0..full_len];
+                            if (match_count == 0) first_match = full;
+                            if (match_count < 32) complete_list_buf[match_count] = full;
+                            match_count += 1;
+                        }
+                    }
                 }
             }
         }
@@ -625,10 +689,8 @@ fn showMathPreview(line: []const u8) bool {
     return false;
 }
 
-const keywords = [_][]const u8{ "if", "unless", "else", "for", "in", "while", "until", "try", "and", "or", "not", "xor", "cmd", "key", "set", "test", "source", "exit", "exec", "break", "continue", "shift" };
-
 fn isKeyword(word: []const u8) bool {
-    for (keywords) |kw| {
+    for (Shell.keyword_names) |kw| {
         if (std.mem.eql(u8, word, kw)) return true;
     }
     return false;
@@ -656,11 +718,11 @@ fn tokenColor(cat: TokenCat, text: []const u8) ?[]const u8 {
 fn writeColorized(line: []const u8) void {
     if (line.len == 0) return;
 
-    var lex = parser.BaseLexer.init(line);
+    var lex = parser.Lexer.init(line);
     var pos: usize = 0;
 
     while (true) {
-        const tok = lex.matchRules();
+        const tok = lex.next();
         const tok_start: usize = tok.pos;
         const tok_end: usize = @min(tok_start + tok.len, line.len);
 
@@ -671,7 +733,7 @@ fn writeColorized(line: []const u8) void {
             break;
         }
 
-        const text = line[tok_start..tok_end];
+        const text = lex.text(tok);
         if (tokenColor(tok.cat, text)) |color| {
             writeAll(color);
             writeAll(text);

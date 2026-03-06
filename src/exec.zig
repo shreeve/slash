@@ -72,6 +72,7 @@ pub const Shell = struct {
     interactive: bool = false,
     jobs: [MAX_JOBS]?Job = .{null} ** MAX_JOBS,
     next_job_id: u16 = 1,
+    last_bg_pid: posix.pid_t = 0,
 
     pub fn init(alloc: Allocator) Shell {
         return .{
@@ -96,9 +97,42 @@ pub const Shell = struct {
     }
 
     pub fn deinit(self: *Shell) void {
+        {
+            var it = self.vars.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.value_ptr.*);
+            }
+        }
         self.vars.deinit();
+        {
+            var it = self.user_cmds.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                const cmd = entry.value_ptr.*;
+                self.allocator.free(cmd.source);
+                if (cmd.params.len > 0) {
+                    for (cmd.params) |p| self.allocator.free(p);
+                    self.allocator.free(cmd.params);
+                }
+            }
+        }
         self.user_cmds.deinit();
+        {
+            var it = self.options.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.value_ptr.*);
+            }
+        }
         self.options.deinit();
+        {
+            var it = self.key_bindings.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+                self.allocator.free(entry.value_ptr.*);
+            }
+        }
         self.key_bindings.deinit();
     }
 
@@ -282,7 +316,8 @@ pub const Shell = struct {
         switch (tag) {
             .program, .block => self.evalSequence(args, source),
             .cmd => self.evalCmd(args, source),
-            .pipe, .pipe_err => self.evalPipe(args, source),
+            .pipe => self.evalPipe(args, source, false),
+            .pipe_err => self.evalPipe(args, source, true),
             .@"and" => self.evalAnd(args, source),
             .@"or" => self.evalOr(args, source),
             .xor => self.evalXor(args, source),
@@ -338,7 +373,9 @@ pub const Shell = struct {
 
     const Redirect = struct {
         tag: Tag,
-        target: []const u8,
+        target: []const u8 = "",
+        src_fd: posix.fd_t = -1,
+        dest_fd: posix.fd_t = -1,
     };
 
     const ProcSubFd = struct {
@@ -519,7 +556,30 @@ pub const Shell = struct {
 
     fn collectRedirect(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, list: *std.ArrayList(Redirect)) void {
         if (tag == .redir_dup) {
-            list.append(self.allocator, .{ .tag = tag, .target = "" }) catch {};
+            list.append(self.allocator, .{ .tag = tag, .src_fd = posix.STDERR_FILENO, .dest_fd = posix.STDOUT_FILENO }) catch {};
+            return;
+        }
+        if (tag == .redir_fd_dup) {
+            if (args.len < 1) return;
+            const token = self.sexpToStr(args[0], source) orelse return;
+            const parsed = parseFdDupToken(token) orelse return;
+            list.append(self.allocator, .{
+                .tag = tag,
+                .src_fd = parsed.src_fd,
+                .dest_fd = parsed.dest_fd,
+            }) catch {};
+            return;
+        }
+        if (tag == .redir_fd_out or tag == .redir_fd_in) {
+            if (args.len < 2) return;
+            const fd_token = self.sexpToStr(args[0], source) orelse return;
+            const fd = parseFdToken(fd_token) orelse return;
+            const target = self.sexpToStr(args[1], source) orelse return;
+            list.append(self.allocator, .{
+                .tag = tag,
+                .target = target,
+                .src_fd = fd,
+            }) catch {};
             return;
         }
         if (args.len < 1) return;
@@ -542,7 +602,9 @@ pub const Shell = struct {
                     openAndDup(alloc, r.target, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644, posix.STDOUT_FILENO);
                     posix.dup2(posix.STDOUT_FILENO, posix.STDERR_FILENO) catch {};
                 },
-                .redir_dup => { posix.dup2(posix.STDOUT_FILENO, posix.STDERR_FILENO) catch {}; },
+                .redir_dup, .redir_fd_dup => { posix.dup2(r.dest_fd, r.src_fd) catch {}; },
+                .redir_fd_out => openAndDup(alloc, r.target, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644, r.src_fd),
+                .redir_fd_in => openAndDup(alloc, r.target, .{ .ACCMODE = .RDONLY }, 0, r.src_fd),
                 .herestring => {
                     const hs_pipe = posix.pipe() catch continue;
                     _ = posix.write(hs_pipe[1], r.target) catch 0;
@@ -579,7 +641,7 @@ pub const Shell = struct {
             resetChildSignals();
             applyRedirects(self.allocator, redirs);
             const argv_z = toExecArgs(self.allocator, argv) catch posix.exit(127);
-            const envp = getEnvP();
+            const envp = buildEnvP(self.allocator, self);
             posix.execvpeZ(argv_z[0].?, argv_z, envp) catch {};
             std.debug.print("slash: {s}: command not found\n", .{argv[0]});
             posix.exit(127);
@@ -610,7 +672,7 @@ pub const Shell = struct {
         if (text[0] == '$') {
             if (text.len >= 2 and text[1] == '{') {
                 const inner = if (text.len > 3) text[2 .. text.len - 1] else return "";
-                return self.lookupVar(inner);
+                return self.resolveBracedVar(inner);
             }
             const name = text[1..];
             return self.lookupVar(name);
@@ -644,9 +706,32 @@ pub const Shell = struct {
         if (std.mem.eql(u8, name, "#")) return self.argCountStr();
         if (std.mem.eql(u8, name, "*")) return self.argJoinStr();
         if (std.mem.eql(u8, name, "0")) return self.vars.get("0") orelse "slash";
-        if (std.mem.eql(u8, name, "!")) return "";
+        if (std.mem.eql(u8, name, "!")) return self.lastBgPidStr();
         if (self.vars.get(name)) |val| return val;
         return posix.getenv(name) orelse "";
+    }
+
+    fn resolveBracedVar(self: *Shell, inner_raw: []const u8) []const u8 {
+        const inner = std.mem.trim(u8, inner_raw, " \t");
+        if (std.mem.indexOf(u8, inner, "??")) |idx| {
+            const name = std.mem.trim(u8, inner[0..idx], " \t");
+            const fallback = std.mem.trim(u8, inner[idx + 2 ..], " \t");
+            const value = self.lookupVar(name);
+            if (value.len > 0) return value;
+            return self.expandDefaultValue(fallback);
+        }
+        return self.lookupVar(inner);
+    }
+
+    fn expandDefaultValue(self: *Shell, raw: []const u8) []const u8 {
+        if (raw.len == 0) return "";
+        if (raw[0] == '$') return self.expandToken(raw);
+        if (raw.len >= 2 and ((raw[0] == '"' and raw[raw.len - 1] == '"') or
+            (raw[0] == '\'' and raw[raw.len - 1] == '\'')))
+        {
+            return self.expandToken(raw);
+        }
+        return raw;
     }
 
     var argc_str_buf: [10]u8 = undefined;
@@ -685,6 +770,13 @@ pub const Shell = struct {
     fn pidStr(self: *Shell) []const u8 {
         const pid = libc.getpid();
         return std.fmt.allocPrint(self.allocator, "{d}", .{pid}) catch "0";
+    }
+
+    var last_bg_pid_buf: [10]u8 = undefined;
+
+    fn lastBgPidStr(self: *Shell) []const u8 {
+        if (self.last_bg_pid == 0) return "";
+        return std.fmt.bufPrint(&last_bg_pid_buf, "{d}", .{self.last_bg_pid}) catch "";
     }
 
     // =========================================================================
@@ -814,9 +906,16 @@ pub const Shell = struct {
 
         if (tag == .match or tag == .nomatch) {
             const rhs_raw = self.sexpToStr(args[1], source) orelse "";
-            const pattern = parseRegexLiteral(rhs_raw);
-            const re = Regex.compile(pattern) catch {
-                std.debug.print("slash: invalid regex: {s}\n", .{pattern});
+            const spec = parseRegexSpec(rhs_raw) orelse {
+                std.debug.print("slash: invalid regex: {s}\n", .{rhs_raw});
+                self.last_exit = 2;
+                return;
+            };
+            const re = (if (spec.ignore_case)
+                Regex.compileIgnoreCase(spec.pattern)
+            else
+                Regex.compile(spec.pattern)) catch {
+                std.debug.print("slash: invalid regex: {s}\n", .{spec.pattern});
                 self.last_exit = 2;
                 return;
             };
@@ -839,19 +938,29 @@ pub const Shell = struct {
         self.last_exit = if (result) 0 else 1;
     }
 
-    fn parseRegexLiteral(raw: []const u8) []const u8 {
-        if (raw.len < 2) return raw;
+    fn parseRegexSpec(raw: []const u8) ?struct { pattern: []const u8, ignore_case: bool } {
+        if (raw.len < 2) return null;
         var start: usize = 0;
-        // Skip ~ prefix if present
         if (raw[0] == '~') start = 1;
-        // The first char after optional ~ is the delimiter
+        if (start >= raw.len) return null;
         const delim = raw[start];
         start += 1;
-        // Find closing delimiter from the end (before flags)
-        var end = raw.len;
-        while (end > start and std.ascii.isAlphabetic(raw[end - 1])) end -= 1;
-        if (end > start and raw[end - 1] == delim) end -= 1;
-        return raw[start..end];
+        var end = start;
+        while (end < raw.len) {
+            if (raw[end] == '\\' and end + 1 < raw.len) {
+                end += 2;
+                continue;
+            }
+            if (raw[end] == delim) break;
+            end += 1;
+        }
+        if (end >= raw.len) return null;
+        var ignore_case = false;
+        var fi = end + 1;
+        while (fi < raw.len and std.ascii.isAlphabetic(raw[fi])) : (fi += 1) {
+            if (raw[fi] == 'i') ignore_case = true;
+        }
+        return .{ .pattern = raw[start..end], .ignore_case = ignore_case };
     }
 
     fn numCmp(a: []const u8, b: []const u8) std.math.Order {
@@ -934,6 +1043,7 @@ pub const Shell = struct {
             posix.exit(self.last_exit);
         }
         if (self.interactive) _ = libc.setpgid(pid, pid);
+        self.last_bg_pid = pid;
         const pids = [_]posix.pid_t{pid};
         const job_id = self.addJob(pid, .running, cmd_text, &pids);
         std.debug.print("[{d}] {d}\n", .{ job_id, pid });
@@ -956,7 +1066,7 @@ pub const Shell = struct {
         self.last_exit = statusToExit(result.status);
     }
 
-    fn evalPipe(self: *Shell, args: []const Sexp, source: []const u8) void {
+    fn evalPipe(self: *Shell, args: []const Sexp, source: []const u8, pipe_stderr: bool) void {
         if (args.len < 2) {
             if (args.len == 1) self.eval(args[0], source);
             return;
@@ -968,6 +1078,7 @@ pub const Shell = struct {
             if (self.interactive) _ = libc.setpgid(0, 0);
             posix.close(pipe_fds[0]);
             posix.dup2(pipe_fds[1], posix.STDOUT_FILENO) catch posix.exit(1);
+            if (pipe_stderr) posix.dup2(pipe_fds[1], posix.STDERR_FILENO) catch posix.exit(1);
             posix.close(pipe_fds[1]);
             resetChildSignals();
             self.eval(args[0], source);
@@ -1017,6 +1128,7 @@ pub const Shell = struct {
         const name_raw = self.sexpToStr(args[0], source) orelse return;
         const value = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch return;
         if (self.vars.getPtr(name_raw)) |slot| {
+            self.allocator.free(slot.*);
             slot.* = value;
         } else {
             const name = self.allocator.dupe(u8, name_raw) catch return;
@@ -1028,7 +1140,10 @@ pub const Shell = struct {
     fn evalUnset(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
         const name = self.sexpToStr(args[0], source) orelse return;
-        _ = self.vars.remove(name);
+        if (self.vars.fetchRemove(name)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
         self.last_exit = 0;
     }
 
@@ -1105,31 +1220,53 @@ pub const Shell = struct {
         if (args.len < 2) return;
         const value = self.sexpToExpandedStr(args[0], source);
 
-        for (args[1..]) |arm_sexp| {
-            switch (arm_sexp) {
-                .list => |items| {
-                    if (items.len < 2) continue;
-                    switch (items[0]) {
-                        .tag => |t| {
-                            if (t == .arm_else) {
-                                self.eval(items[1], source);
-                                return;
-                            }
-                            if (t == .arm and items.len >= 3) {
-                                const pattern = self.sexpToExpandedStr(items[1], source);
-                                if (std.mem.eql(u8, value, pattern)) {
-                                    self.eval(items[2], source);
-                                    return;
-                                }
-                            }
-                        },
-                        else => {},
-                    }
-                },
-                else => {},
+        if (args[1] == .list) {
+            for (args[1].list) |arm_sexp| {
+                if (self.tryExecArm(arm_sexp, value, source)) return;
+            }
+        } else {
+            for (args[1..]) |arm_sexp| {
+                if (self.tryExecArm(arm_sexp, value, source)) return;
             }
         }
         self.last_exit = 1;
+    }
+
+    fn tryExecArm(self: *Shell, arm_sexp: Sexp, value: []const u8, source: []const u8) bool {
+        switch (arm_sexp) {
+            .list => |items| {
+                if (items.len < 2) return false;
+                switch (items[0]) {
+                    .tag => |t| {
+                        if (t == .arm_else) {
+                            self.eval(items[1], source);
+                            return true;
+                        }
+                        if (t == .arm and items.len >= 3 and self.tryPatternMatches(items[1], value, source)) {
+                            self.eval(items[2], source);
+                            return true;
+                        }
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+        return false;
+    }
+
+    fn tryPatternMatches(self: *Shell, pattern_sexp: Sexp, value: []const u8, source: []const u8) bool {
+        const raw = self.sexpToStr(pattern_sexp, source) orelse return false;
+        if (parseRegexSpec(raw)) |spec| {
+            const re = (if (spec.ignore_case)
+                Regex.compileIgnoreCase(spec.pattern)
+            else
+                Regex.compile(spec.pattern)) catch return false;
+            defer re.free();
+            return re.search(value);
+        }
+        const pattern = self.sexpToExpandedStr(pattern_sexp, source);
+        return std.mem.eql(u8, value, pattern);
     }
 
     // =========================================================================
@@ -1141,15 +1278,34 @@ pub const Shell = struct {
         const flag = self.sexpToStr(args[0], source) orelse { self.last_exit = 1; return; };
         const path = self.sexpToExpandedStr(args[1], source);
 
+        if (std.mem.eql(u8, flag, "-e")) {
+            posix.access(path, posix.F_OK) catch { self.last_exit = 1; return; };
+            self.last_exit = 0;
+            return;
+        }
+        if (std.mem.eql(u8, flag, "-r")) {
+            posix.access(path, posix.R_OK) catch { self.last_exit = 1; return; };
+            self.last_exit = 0;
+            return;
+        }
+        if (std.mem.eql(u8, flag, "-w")) {
+            posix.access(path, posix.W_OK) catch { self.last_exit = 1; return; };
+            self.last_exit = 0;
+            return;
+        }
+        if (std.mem.eql(u8, flag, "-x")) {
+            posix.access(path, posix.X_OK) catch { self.last_exit = 1; return; };
+            self.last_exit = 0;
+            return;
+        }
+
         const cwd = std.fs.cwd();
         const stat = cwd.statFile(path) catch {
             self.last_exit = 1;
             return;
         };
 
-        if (std.mem.eql(u8, flag, "-e")) {
-            self.last_exit = 0;
-        } else if (std.mem.eql(u8, flag, "-f")) {
+        if (std.mem.eql(u8, flag, "-f")) {
             self.last_exit = if (stat.kind == .file) 0 else 1;
         } else if (std.mem.eql(u8, flag, "-d")) {
             self.last_exit = if (stat.kind == .directory) 0 else 1;
@@ -1158,7 +1314,7 @@ pub const Shell = struct {
         } else if (std.mem.eql(u8, flag, "-L")) {
             self.last_exit = if (stat.kind == .sym_link) 0 else 1;
         } else {
-            self.last_exit = 0;
+            self.last_exit = 1;
         }
     }
 
@@ -1205,7 +1361,7 @@ pub const Shell = struct {
             self.last_exit = 1;
             return;
         };
-        const envp = getEnvP();
+        const envp = buildEnvP(self.allocator, self);
         posix.execvpeZ(argv_z[0].?, argv_z, envp) catch {};
         std.debug.print("slash: exec: {s}: command not found\n", .{argv[0]});
         posix.exit(127);
@@ -1373,16 +1529,13 @@ pub const Shell = struct {
             return;
         };
         const query = if (argv.len > 1) argv[1] else "";
-        const dirs = hdb.recentDirs(self.allocator, if (query.len > 0) 50 else 9);
-        // Filter by query if provided
+        const scored = hdb.frecency(self.allocator, query, if (query.len > 0) 50 else 9);
         var filtered: [9][]const u8 = .{""} ** 9;
         var count: u8 = 0;
-        for (dirs) |path| {
+        for (scored) |entry| {
             if (count >= 9) break;
-            if (query.len == 0 or std.mem.indexOf(u8, path, query) != null) {
-                filtered[count] = path;
-                count += 1;
-            }
+            filtered[count] = entry.path;
+            count += 1;
         }
         if (count == 0) {
             if (query.len > 0)
@@ -1444,6 +1597,13 @@ pub const Shell = struct {
     // Control-flow keywords (if/for/while/unless/until/try/else) and
     // operator keywords (and/or/not/xor/in) are syntax, not commands,
     // and are intentionally excluded.
+    pub const keyword_names = [_][]const u8{
+        "if",   "unless", "else",     "for",    "in",       "while",
+        "until", "try",   "and",      "or",     "not",      "xor",
+        "cmd",  "key",    "set",      "test",   "source",   "exit",
+        "exec", "break",  "continue", "shift",
+    };
+
     pub const builtin_names = [_][]const u8{
         "cd",      "echo",    "true",    "false",   "type",    "pwd",
         "jobs",    "fg",      "bg",      "history", "j",
@@ -1465,27 +1625,37 @@ pub const Shell = struct {
         const call_args = argv[1..];
         const saved_args = self.args;
 
-        // Set positional args ($1, $2, ... $#, $*)
         self.args = call_args;
 
-        // Bind named params
         const saved = self.allocator.alloc(?[]const u8, params.len) catch return;
         defer self.allocator.free(saved);
         for (params, 0..) |pname, i| {
             saved[i] = self.vars.get(pname);
-            const val = if (i < call_args.len) call_args[i] else "";
-            self.vars.put(pname, val) catch {};
+            const raw = if (i < call_args.len) call_args[i] else "";
+            const val = self.allocator.dupe(u8, raw) catch continue;
+            if (self.vars.getPtr(pname)) |slot| {
+                self.allocator.free(slot.*);
+                slot.* = val;
+            } else {
+                const key = self.allocator.dupe(u8, pname) catch continue;
+                self.vars.put(key, val) catch {};
+            }
         }
 
         self.eval(cmd.body, cmd.source);
         if (self.flow == .exit_cmd) self.flow = .normal;
 
-        // Restore named params
         for (params, 0..) |pname, i| {
             if (saved[i]) |old| {
-                self.vars.put(pname, old) catch {};
+                if (self.vars.getPtr(pname)) |slot| {
+                    self.allocator.free(slot.*);
+                    slot.* = old;
+                }
             } else {
-                _ = self.vars.remove(pname);
+                if (self.vars.fetchRemove(pname)) |kv| {
+                    self.allocator.free(kv.key);
+                    self.allocator.free(kv.value);
+                }
             }
         }
         self.args = saved_args;
@@ -1524,7 +1694,14 @@ pub const Shell = struct {
     fn evalCmdDel(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
         const name = self.sexpToStr(args[0], source) orelse return;
-        _ = self.user_cmds.remove(name);
+        if (self.user_cmds.fetchRemove(name)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value.source);
+            if (kv.value.params.len > 0) {
+                for (kv.value.params) |p| self.allocator.free(p);
+                self.allocator.free(kv.value.params);
+            }
+        }
         self.last_exit = 0;
     }
 
@@ -1550,6 +1727,7 @@ pub const Shell = struct {
         const combo_raw = self.sexpToStr(args[0], source) orelse return;
         const command = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch return;
         if (self.key_bindings.getPtr(combo_raw)) |slot| {
+            self.allocator.free(slot.*);
             slot.* = command;
         } else {
             const combo = self.allocator.dupe(u8, combo_raw) catch return;
@@ -1561,7 +1739,10 @@ pub const Shell = struct {
     fn evalKeyDel(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
         const combo = self.sexpToStr(args[0], source) orelse return;
-        _ = self.key_bindings.remove(combo);
+        if (self.key_bindings.fetchRemove(combo)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
         self.last_exit = 0;
     }
 
@@ -1607,6 +1788,7 @@ pub const Shell = struct {
         const name_raw = self.sexpToStr(args[0], source) orelse return;
         const value = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch return;
         if (self.options.getPtr(name_raw)) |slot| {
+            self.allocator.free(slot.*);
             slot.* = value;
         } else {
             const name = self.allocator.dupe(u8, name_raw) catch return;
@@ -1618,7 +1800,10 @@ pub const Shell = struct {
     fn evalSetReset(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
         const name = self.sexpToStr(args[0], source) orelse return;
-        _ = self.options.remove(name);
+        if (self.options.fetchRemove(name)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value);
+        }
         self.last_exit = 0;
     }
 
@@ -1683,8 +1868,8 @@ pub const Shell = struct {
             if (text[i] == '$' and i + 1 < text.len) {
                 if (text[i + 1] == '{') {
                     if (std.mem.indexOfScalarPos(u8, text, i + 2, '}')) |close| {
-                        const name = text[i + 2 .. close];
-                        const val = self.lookupVar(name);
+                        const inner = text[i + 2 .. close];
+                        const val = self.resolveBracedVar(inner);
                         buf.appendSlice(self.allocator, val) catch {};
                         i = close + 1;
                         continue;
@@ -1750,8 +1935,53 @@ fn toExecArgs(alloc: Allocator, argv: []const []const u8) ![*:null]const ?[*:0]c
     return @ptrCast(buf.ptr);
 }
 
-fn getEnvP() [*:null]const ?[*:0]const u8 {
-    return std.c.environ;
+fn buildEnvP(alloc: Allocator, shell: *const Shell) [*:null]const ?[*:0]const u8 {
+    var envp: std.ArrayList(?[*:0]const u8) = .empty;
+    const env = std.c.environ;
+    var i: usize = 0;
+    while (env[i]) |entry| : (i += 1) {
+        const slice: [*]const u8 = @ptrCast(entry);
+        var len: usize = 0;
+        while (slice[len] != 0) len += 1;
+        const text = slice[0..len];
+        const eq = std.mem.indexOfScalar(u8, text, '=') orelse text.len;
+        const name = text[0..eq];
+        if (shouldExportVar(name) and shell.vars.contains(name)) continue;
+        envp.append(alloc, alloc.dupeZ(u8, text) catch continue) catch continue;
+    }
+
+    var it = shell.vars.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (!shouldExportVar(name)) continue;
+        const name_len = name.len;
+        const val = entry.value_ptr.*;
+        const total = name_len + 1 + val.len;
+        const pair = alloc.allocSentinel(u8, total, 0) catch continue;
+        @memcpy(pair[0..name_len], name);
+        pair[name_len] = '=';
+        @memcpy(pair[name_len + 1 ..][0..val.len], val);
+        envp.append(alloc, pair) catch continue;
+    }
+
+    envp.append(alloc, null) catch {};
+    return @ptrCast(envp.items.ptr);
+}
+
+fn shouldExportVar(name: []const u8) bool {
+    return name.len > 0 and std.ascii.isUpper(name[0]);
+}
+
+fn parseFdToken(token: []const u8) ?posix.fd_t {
+    if (token.len < 2) return null;
+    return std.fmt.parseInt(posix.fd_t, token[0 .. token.len - 1], 10) catch null;
+}
+
+fn parseFdDupToken(token: []const u8) ?struct { src_fd: posix.fd_t, dest_fd: posix.fd_t } {
+    const sep = std.mem.indexOf(u8, token, ">&") orelse return null;
+    const src_fd = std.fmt.parseInt(posix.fd_t, token[0..sep], 10) catch return null;
+    const dest_fd = std.fmt.parseInt(posix.fd_t, token[sep + 2 ..], 10) catch return null;
+    return .{ .src_fd = src_fd, .dest_fd = dest_fd };
 }
 
 fn resetChildSignals() void {

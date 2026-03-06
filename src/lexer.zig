@@ -31,6 +31,7 @@ pub const Lexer = struct {
     indent_depth: u8 = 0,
     indent_pending: u8 = 0,
     indent_queued: ?Token = null,
+    indent_trailing_newline: bool = false,
 
     // Regex context
     last_cat: TokenCat = .eof,
@@ -54,6 +55,7 @@ pub const Lexer = struct {
         self.indent_depth = 0;
         self.indent_pending = 0;
         self.indent_queued = null;
+        self.indent_trailing_newline = false;
         self.last_cat = .eof;
     }
 
@@ -69,7 +71,10 @@ pub const Lexer = struct {
         }
         if (self.indent_pending > 0) {
             self.indent_pending -= 1;
-            self.indent_queued = Token{ .cat = .newline, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
+            if (self.indent_pending == 0 and self.indent_trailing_newline) {
+                self.indent_trailing_newline = false;
+                self.indent_queued = Token{ .cat = .newline, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
+            }
             return Token{ .cat = .outdent, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
         }
         if (self.hd_type == 0 and self.hd_buf_pos < self.hd_buf_count) {
@@ -181,11 +186,11 @@ pub const Lexer = struct {
         if (tok.cat == .newline) return self.handleIndent(tok);
 
         if (tok.cat == .eof and self.indent_depth > 0) {
-            if (self.indent_depth > 1) self.indent_pending = self.indent_depth - 1;
+            self.indent_pending = self.indent_depth;
             self.indent_depth = 0;
             self.indent_level = 0;
-            self.indent_queued = Token{ .cat = .newline, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
-            return Token{ .cat = .outdent, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
+            self.indent_trailing_newline = true;
+            return Token{ .cat = .newline, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
         }
 
         if (tok.cat == .heredoc_sq or tok.cat == .heredoc_dq or tok.cat == .heredoc_bt) {
@@ -314,13 +319,19 @@ pub const Lexer = struct {
             }
             self.indent_level = ws;
             if (count > 0) {
-                if (count > 1) self.indent_pending = count - 1;
-                self.indent_queued = Token{ .cat = .newline, .pre = 0, .pos = nl_tok.pos, .len = 0 };
-                return Token{ .cat = .outdent, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
+                self.indent_pending = count;
+                self.indent_trailing_newline = !self.nextTokenIsElse();
+                return nl_tok;
             }
             return nl_tok;
         }
         return nl_tok;
+    }
+
+    fn nextTokenIsElse(self: *const Lexer) bool {
+        var probe = self.base;
+        const tok = probe.matchRules();
+        return tok.cat == .ident and std.mem.eql(u8, probe.text(tok), "else");
     }
 
     fn collectRegexBare(self: *Lexer) Token {

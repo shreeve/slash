@@ -46,22 +46,24 @@ pub const Context = struct {
 var prompt_buf: [8192]u8 = undefined;
 
 pub fn render(fmt: []const u8, ctx: Context) struct { str: []const u8, visible_len: usize } {
+    const needs = scanSegments(fmt);
+
     var time_buf: [8]u8 = undefined;
-    const time_str = getTime(&time_buf);
-    const user = posix.getenv("USER") orelse "user";
+    const time_str = if (needs.time) getTime(&time_buf) else "";
+    const user = if (needs.user) (posix.getenv("USER") orelse "user") else "";
     var host_buf: [256]u8 = undefined;
-    const host = getHostname(&host_buf);
+    const host = if (needs.host) getHostname(&host_buf) else "";
     var cwd_buf: [4096]u8 = undefined;
-    const cwd_raw = posix.getcwd(&cwd_buf) catch "?";
-    const home = posix.getenv("HOME") orelse "";
+    const cwd_raw = if (needs.dir or needs.git) (posix.getcwd(&cwd_buf) catch "?") else "";
+    const home = if (needs.dir) (posix.getenv("HOME") orelse "") else "";
     var dir_buf: [4096]u8 = undefined;
-    const dir = abbreviateHome(cwd_raw, home, &dir_buf);
+    const dir = if (needs.dir) abbreviateHome(cwd_raw, home, &dir_buf) else "";
     var git_buf: [256]u8 = undefined;
-    const git = getGitInfo(&git_buf, cwd_raw);
+    const git = if (needs.git) getGitInfo(&git_buf, cwd_raw) else "";
     var exit_buf: [4]u8 = undefined;
-    const exit_str = if (ctx.last_exit != 0) std.fmt.bufPrint(&exit_buf, "{d}", .{ctx.last_exit}) catch "" else "";
+    const exit_str = if (needs.exit and ctx.last_exit != 0) std.fmt.bufPrint(&exit_buf, "{d}", .{ctx.last_exit}) catch "" else "";
     var dur_buf: [16]u8 = undefined;
-    const dur_str = formatDuration(&dur_buf, ctx.duration_ms);
+    const dur_str = if (needs.duration) formatDuration(&dur_buf, ctx.duration_ms) else "";
 
     var out: usize = 0;
     var vis: usize = 0;
@@ -111,6 +113,40 @@ pub fn render(fmt: []const u8, ctx: Context) struct { str: []const u8, visible_l
     }
 
     return .{ .str = prompt_buf[0..out], .visible_len = vis };
+}
+
+const SegmentNeeds = struct {
+    time: bool = false,
+    user: bool = false,
+    host: bool = false,
+    dir: bool = false,
+    git: bool = false,
+    exit: bool = false,
+    duration: bool = false,
+};
+
+fn scanSegments(fmt: []const u8) SegmentNeeds {
+    var needs: SegmentNeeds = .{};
+    var i: usize = 0;
+    while (i + 1 < fmt.len) {
+        if (fmt[i] == '%') {
+            switch (fmt[i + 1]) {
+                't' => needs.time = true,
+                'u' => needs.user = true,
+                'h' => needs.host = true,
+                'd' => needs.dir = true,
+                'g' => needs.git = true,
+                'e' => needs.exit = true,
+                'D' => needs.duration = true,
+                '$' => needs.exit = true,
+                else => {},
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    return needs;
 }
 
 // --- output helpers ---
@@ -270,18 +306,23 @@ fn openGitHead(path_buf: *[4096]u8, dir: []const u8) ?std.fs.File {
     return std.fs.openFileAbsolute(path_buf[0 .. dir.len + suffix.len], .{}) catch null;
 }
 
-/// Quick dirty check: compare .git/index mtime to see if recently modified.
+/// Dirty check: index mtime differs from HEAD mtime indicates staged changes.
 fn checkDirty(path_buf: *[4096]u8, git_dir: []const u8) bool {
-    const idx_suffix = "/.git/index";
-    if (git_dir.len + idx_suffix.len > path_buf.len) return false;
+    const head_suffix = "/.git/HEAD";
+    if (git_dir.len + head_suffix.len > path_buf.len) return false;
     @memcpy(path_buf[0..git_dir.len], git_dir);
+    @memcpy(path_buf[git_dir.len..][0..head_suffix.len], head_suffix);
+    const head_file = std.fs.openFileAbsolute(path_buf[0 .. git_dir.len + head_suffix.len], .{}) catch return false;
+    defer head_file.close();
+    const head_stat = head_file.stat() catch return false;
+
+    const idx_suffix = "/.git/index";
     @memcpy(path_buf[git_dir.len..][0..idx_suffix.len], idx_suffix);
     const idx_file = std.fs.openFileAbsolute(path_buf[0 .. git_dir.len + idx_suffix.len], .{}) catch return false;
     defer idx_file.close();
-    const stat = idx_file.stat() catch return false;
-    const now_ns: i128 = std.time.nanoTimestamp();
-    const mtime_ns: i128 = stat.mtime;
-    return (now_ns - mtime_ns) < 2 * std.time.ns_per_s;
+    const idx_stat = idx_file.stat() catch return false;
+
+    return idx_stat.mtime != head_stat.mtime;
 }
 
 fn formatDuration(buf: *[16]u8, ms: u64) []const u8 {
