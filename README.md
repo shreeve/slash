@@ -196,7 +196,7 @@ by frecency. Type a number at the next prompt to jump.
 
 ### Prompt
 
-Rich out of the box. Git branch and dirty state (via `.git/HEAD`), command
+Rich out of the box. Git branch (via `.git/HEAD`), command
 duration, and exit codes are all shown. Fully configurable via format escapes:
 
 ```

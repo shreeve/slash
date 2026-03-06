@@ -12,7 +12,7 @@ exec.zig       (s-expression executor: fork/exec/pipe)
 main.zig       (CLI, REPL)
 lexer.zig      (shell-specific lexer: heredoc, indent, regex)
 readline.zig   (line editing, highlighting, completion)
-prompt.zig     (prompt rendering, format escapes, git status)
+prompt.zig     (prompt rendering, format escapes, git branch)
 history.zig    (SQLite history + frecency)
 regex.zig      (Oniguruma C API wrapper)
 ```
@@ -28,7 +28,7 @@ Pipeline: `source text → lexer → tokens → parser → s-expressions → exe
 - `src/exec.zig` — walks s-expressions, executes commands (struct: `Shell`)
 - `src/main.zig` — entry point, CLI flags, REPL loop
 - `src/readline.zig` — line editing, key bindings, syntax highlighting, tab completion
-- `src/prompt.zig` — prompt rendering with format escapes, git status (reads `.git/HEAD`)
+- `src/prompt.zig` — prompt rendering with format escapes, git branch (reads `.git/HEAD`)
 - `src/history.zig` — SQLite interface for history and directory frecency
 - `src/regex.zig` — Oniguruma regex wrapper (Zig FFI)
 - `regex/` — Oniguruma 6.9.9 C source (compiled by build.zig)
