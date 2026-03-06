@@ -110,6 +110,7 @@ check "multi pipe"              "ls | grep zig | sort"      "(pipe (cmd ls) (pip
 check "pipe stderr"             "make |& grep error"        "(pipe_err (cmd make) (cmd grep error))"
 check "pipe stderr exec"        '/bin/sh -c "echo out; echo err 1>&2" |& wc -l' "" "       2"
 check "4-stage pipe exec"       'echo hello world | tr h H | tr w W | wc -w' "" "       2"
+check "10-stage pipe exec"      'echo hello | cat | cat | cat | cat | cat | cat | cat | cat | cat | wc -w' "" "       1"
 check "mixed pipe err exec"     '/bin/sh -c "echo out; echo err 1>&2" |& cat | wc -l' "" "       2"
 
 # ==========================================================================

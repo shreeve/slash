@@ -32,6 +32,7 @@ const UserCmd = struct {
 // =========================================================================
 
 pub const JobState = enum { running, stopped, done };
+const MAX_JOB_PIDS = 16;
 
 pub const Job = struct {
     id: u16,
@@ -39,7 +40,7 @@ pub const Job = struct {
     state: JobState,
     exit_code: u8,
     command: []const u8,
-    pids: [8]posix.pid_t = .{0} ** 8,
+    pids: [MAX_JOB_PIDS]posix.pid_t = .{0} ** MAX_JOB_PIDS,
     pid_count: u8 = 0,
 };
 
@@ -147,10 +148,10 @@ pub const Shell = struct {
             if (slot.* == null) {
                 var job = Job{ .id = id, .pgid = pgid, .state = state, .exit_code = 0, .command = command };
                 for (pids, 0..) |pid, i| {
-                    if (i >= 8) break;
+                    if (i >= MAX_JOB_PIDS) break;
                     job.pids[i] = pid;
                 }
-                job.pid_count = @intCast(@min(pids.len, 8));
+                job.pid_count = @intCast(@min(pids.len, MAX_JOB_PIDS));
                 slot.* = job;
                 return id;
             }
@@ -1067,9 +1068,9 @@ pub const Shell = struct {
     }
 
     const PipeSegment = struct { sexp: Sexp, pipe_stderr: bool };
-    const MAX_PIPE_SEGMENTS = 16;
+    const MAX_PIPE_SEGMENTS = MAX_JOB_PIDS;
 
-    fn flattenPipeline(args: []const Sexp, pipe_stderr: bool, buf: *[MAX_PIPE_SEGMENTS]PipeSegment) u8 {
+    fn flattenPipeline(args: []const Sexp, pipe_stderr: bool, buf: *[MAX_PIPE_SEGMENTS]PipeSegment) ?u8 {
         if (args.len < 2) return 0;
         var count: u8 = 0;
 
@@ -1078,7 +1079,7 @@ pub const Shell = struct {
 
         var right = args[1];
         while (true) {
-            if (count >= MAX_PIPE_SEGMENTS) break;
+            if (count >= MAX_PIPE_SEGMENTS) return null;
             switch (right) {
                 .list => |items| {
                     if (items.len >= 3 and items[0] == .tag) {
@@ -1107,7 +1108,11 @@ pub const Shell = struct {
         }
 
         var seg_buf: [MAX_PIPE_SEGMENTS]PipeSegment = undefined;
-        const n = flattenPipeline(args, pipe_stderr, &seg_buf);
+        const n = flattenPipeline(args, pipe_stderr, &seg_buf) orelse {
+            std.debug.print("slash: pipeline exceeds {d} stages\n", .{MAX_PIPE_SEGMENTS});
+            self.last_exit = 1;
+            return;
+        };
         if (n < 2) {
             if (n == 1) self.eval(seg_buf[0].sexp, source);
             return;
@@ -1125,10 +1130,13 @@ pub const Shell = struct {
 
         var child_pids: [MAX_PIPE_SEGMENTS]posix.pid_t = .{0} ** MAX_PIPE_SEGMENTS;
         var pgid: posix.pid_t = 0;
+        var spawned: usize = 0;
+        var fork_failed = false;
 
         for (segments, 0..) |seg, i| {
             const pid = posix.fork() catch {
                 self.last_exit = 1;
+                fork_failed = true;
                 break;
             };
 
@@ -1157,6 +1165,7 @@ pub const Shell = struct {
             if (i == 0) pgid = pid;
             if (self.interactive) _ = libc.setpgid(pid, pgid);
             child_pids[i] = pid;
+            spawned += 1;
         }
 
         for (0..n - 1) |i| {
@@ -1164,17 +1173,28 @@ pub const Shell = struct {
             posix.close(pipe_fds[i][1]);
         }
 
+        if (fork_failed) {
+            for (child_pids[0..spawned]) |pid| {
+                if (pid > 0) posix.kill(pid, posix.SIG.TERM) catch {};
+            }
+            for (child_pids[0..spawned]) |pid| {
+                if (pid > 0) _ = posix.waitpid(pid, 0);
+            }
+            self.last_exit = 1;
+            return;
+        }
+
         if (self.interactive) {
             const cmd_text = self.allocator.dupe(u8, source[0..@min(source.len, 80)]) catch "";
-            const job_id = self.addJob(pgid, .running, cmd_text, child_pids[0..n]);
+            const job_id = self.addJob(pgid, .running, cmd_text, child_pids[0..spawned]);
             _ = libc.tcsetpgrp(self.tty_fd, pgid);
-            self.waitForForegroundJob(pgid, @intCast(n));
+            self.waitForForegroundJob(pgid, @intCast(spawned));
             if (self.findJobById(job_id)) |job| {
                 if (job.state != .stopped) self.removeJob(job_id);
             }
         } else {
-            for (0..n - 1) |i| _ = posix.waitpid(child_pids[i], 0);
-            const result = posix.waitpid(child_pids[n - 1], 0);
+            for (0..spawned - 1) |i| _ = posix.waitpid(child_pids[i], 0);
+            const result = posix.waitpid(child_pids[spawned - 1], 0);
             self.last_exit = statusToExit(result.status);
         }
     }
