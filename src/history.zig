@@ -72,9 +72,11 @@ pub const Db = struct {
         if (c.sqlite3_prepare_v2(self.handle, sql.ptr, -1, &stmt, null) != c.SQLITE_OK) return results.items;
         defer _ = c.sqlite3_finalize(stmt);
 
+        var pattern: ?[]const u8 = null;
+        defer if (pattern) |p| alloc.free(p);
         if (query.len > 0) {
-            const pattern = std.fmt.allocPrint(alloc, "%{s}%", .{query}) catch return results.items;
-            _ = c.sqlite3_bind_text(stmt, 1, @ptrCast(pattern.ptr), @intCast(pattern.len), c.SQLITE_STATIC);
+            pattern = std.fmt.allocPrint(alloc, "%{s}%", .{query}) catch return results.items;
+            _ = c.sqlite3_bind_text(stmt, 1, @ptrCast(pattern.?.ptr), @intCast(pattern.?.len), c.SQLITE_STATIC);
             _ = c.sqlite3_bind_int(stmt, 2, @intCast(limit));
         } else {
             _ = c.sqlite3_bind_int(stmt, 1, @intCast(limit));
@@ -100,6 +102,7 @@ pub const Db = struct {
         defer _ = c.sqlite3_finalize(stmt);
 
         const pattern = std.fmt.allocPrint(alloc, "{s}%", .{prefix}) catch return null;
+        defer alloc.free(pattern);
         _ = c.sqlite3_bind_text(stmt, 1, @ptrCast(pattern.ptr), @intCast(pattern.len), c.SQLITE_STATIC);
         _ = c.sqlite3_bind_text(stmt, 2, @ptrCast(prefix.ptr), @intCast(prefix.len), c.SQLITE_STATIC);
 
@@ -132,9 +135,11 @@ pub const Db = struct {
         if (c.sqlite3_prepare_v2(self.handle, sql.ptr, -1, &stmt, null) != c.SQLITE_OK) return results.items;
         defer _ = c.sqlite3_finalize(stmt);
 
+        var pattern: ?[]const u8 = null;
+        defer if (pattern) |p| alloc.free(p);
         if (query.len > 0) {
-            const pattern = std.fmt.allocPrint(alloc, "%{s}%", .{query}) catch return results.items;
-            _ = c.sqlite3_bind_text(stmt, 1, @ptrCast(pattern.ptr), @intCast(pattern.len), c.SQLITE_STATIC);
+            pattern = std.fmt.allocPrint(alloc, "%{s}%", .{query}) catch return results.items;
+            _ = c.sqlite3_bind_text(stmt, 1, @ptrCast(pattern.?.ptr), @intCast(pattern.?.len), c.SQLITE_STATIC);
             _ = c.sqlite3_bind_int(stmt, 2, @intCast(limit));
         } else {
             _ = c.sqlite3_bind_int(stmt, 1, @intCast(limit));

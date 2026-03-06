@@ -609,11 +609,11 @@ fn completeVariable(prefix: []const u8, word_start: usize) TabResult {
         }
     }
 
-    // Check environment variables
     if (var_prefix.len > 0) {
         const env = std.c.environ;
         var i: usize = 0;
         while (env[i]) |entry| : (i += 1) {
+            if (match_count >= 32) break;
             const slice: [*]const u8 = @ptrCast(entry);
             var eq: usize = 0;
             while (slice[eq] != '=' and slice[eq] != 0) eq += 1;
@@ -625,7 +625,7 @@ fn completeVariable(prefix: []const u8, word_start: usize) TabResult {
                     @memcpy(complete_buf[match_count * 128 + 1 ..][0..name.len], name);
                     const full = complete_buf[match_count * 128 ..][0..full_len];
                     if (match_count == 0) first_match = full;
-                    if (match_count < 32) complete_list_buf[match_count] = full;
+                    complete_list_buf[match_count] = full;
                     match_count += 1;
                 }
             }

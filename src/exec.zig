@@ -506,6 +506,8 @@ pub const Shell = struct {
                     posix.chdir(pathZ) catch |err| {
                         std.debug.print("cd: {s}: {s}\n", .{ name, @errorName(err) });
                         self.last_exit = 1;
+                        self.cleanupProcSubs(procsub_fds.items);
+                        return;
                     };
                     self.last_exit = 0;
                     self.cleanupProcSubs(procsub_fds.items);
@@ -1259,16 +1261,31 @@ pub const Shell = struct {
             .list => |items| {
                 const start: usize = if (items.len > 0 and items[0] == .tag) 1 else 0;
                 for (items[start..]) |item| {
-                    const val = self.sexpToExpandedStr(item, source);
-                    self.vars.put(var_name, val) catch continue;
+                    const val = self.allocator.dupe(u8, self.sexpToExpandedStr(item, source)) catch continue;
+                    if (self.vars.getPtr(var_name)) |slot| {
+                        self.allocator.free(slot.*);
+                        slot.* = val;
+                    } else {
+                        const key = self.allocator.dupe(u8, var_name) catch continue;
+                        self.vars.put(key, val) catch continue;
+                    }
                     self.eval(body, source);
-                    if (self.flow == .break_loop) { self.flow = .normal; break; }
-                    if (self.flow == .continue_loop) { self.flow = .normal; }
+                    if (self.flow != .normal) {
+                        if (self.flow == .break_loop) self.flow = .normal;
+                        if (self.flow == .continue_loop) { self.flow = .normal; continue; }
+                        break;
+                    }
                 }
             },
             else => {
-                const val = self.sexpToExpandedStr(word_list, source);
-                self.vars.put(var_name, val) catch return;
+                const val = self.allocator.dupe(u8, self.sexpToExpandedStr(word_list, source)) catch return;
+                if (self.vars.getPtr(var_name)) |slot| {
+                    self.allocator.free(slot.*);
+                    slot.* = val;
+                } else {
+                    const key = self.allocator.dupe(u8, var_name) catch return;
+                    self.vars.put(key, val) catch return;
+                }
                 self.eval(body, source);
             },
         }
@@ -1280,8 +1297,11 @@ pub const Shell = struct {
             self.eval(args[0], source);
             if (self.last_exit != 0) break;
             self.eval(args[1], source);
-            if (self.flow == .break_loop) { self.flow = .normal; break; }
-            if (self.flow == .continue_loop) { self.flow = .normal; }
+            if (self.flow != .normal) {
+                if (self.flow == .break_loop) self.flow = .normal;
+                if (self.flow == .continue_loop) { self.flow = .normal; continue; }
+                break;
+            }
         }
     }
 
@@ -1291,8 +1311,11 @@ pub const Shell = struct {
             self.eval(args[0], source);
             if (self.last_exit == 0) break;
             self.eval(args[1], source);
-            if (self.flow == .break_loop) { self.flow = .normal; break; }
-            if (self.flow == .continue_loop) { self.flow = .normal; }
+            if (self.flow != .normal) {
+                if (self.flow == .break_loop) self.flow = .normal;
+                if (self.flow == .continue_loop) { self.flow = .normal; continue; }
+                break;
+            }
         }
     }
 
@@ -1748,7 +1771,6 @@ pub const Shell = struct {
     fn evalCmdDef(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
         const name_raw = self.sexpToStr(args[0], source) orelse return;
-        const name = self.allocator.dupe(u8, name_raw) catch return;
         const source_copy = self.allocator.dupe(u8, source) catch return;
 
         var params: [][]const u8 = &.{};
@@ -1763,11 +1785,23 @@ pub const Shell = struct {
             }
         }
 
-        self.user_cmds.put(name, .{
+        const new_cmd = UserCmd{
             .params = params,
             .body = args[args.len - 1],
             .source = source_copy,
-        }) catch {};
+        };
+
+        if (self.user_cmds.getPtr(name_raw)) |slot| {
+            self.allocator.free(slot.source);
+            if (slot.params.len > 0) {
+                for (slot.params) |p| self.allocator.free(p);
+                self.allocator.free(slot.params);
+            }
+            slot.* = new_cmd;
+        } else {
+            const name = self.allocator.dupe(u8, name_raw) catch return;
+            self.user_cmds.put(name, new_cmd) catch {};
+        }
         self.last_exit = 0;
     }
 

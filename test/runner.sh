@@ -653,6 +653,104 @@ check_script "exec cmd with defaults" \
     "8080"
 
 # ==========================================================================
+# EXECUTION: COMPARISON OPERATORS
+# ==========================================================================
+
+check_script "exec if ==" \
+    "$(printf 'x = "hello"\nif $x == "hello" { echo yes } else { echo no }\n')" \
+    "yes"
+
+check_script "exec if !=" \
+    "$(printf 'x = "hello"\nif $x != "world" { echo yes } else { echo no }\n')" \
+    "yes"
+
+check_script "exec if >=" \
+    "$(printf 'x = 10\nif $x >= 10 { echo yes } else { echo no }\n')" \
+    "yes"
+
+check_script "exec if <=" \
+    "$(printf 'x = 5\nif $x <= 5 { echo yes } else { echo no }\n')" \
+    "yes"
+
+check_script "exec if =~" \
+    "$(printf 'x = "hello.zig"\nif $x =~ /\\.zig$/ { echo yes } else { echo no }\n')" \
+    "yes"
+
+check_script "exec if !~" \
+    "$(printf 'x = "hello.txt"\nif $x !~ /\\.zig$/ { echo yes } else { echo no }\n')" \
+    "yes"
+
+# ==========================================================================
+# EXECUTION: LOOP CONTROL
+# ==========================================================================
+
+check_script "exec break" \
+    "$(printf 'for x in a b c d e\n    if $x == "c" { break }\n    echo $x\n')" \
+    "$(printf 'a\nb')"
+
+check_script "exec continue" \
+    "$(printf 'for x in a b c d e\n    if $x == "c" { continue }\n    echo $x\n')" \
+    "$(printf 'a\nb\nd\ne')"
+
+check_script "exec until" \
+    "$(printf 'x = 0\nuntil $x == 3\n    echo $x\n    x = $x + 1\n')" \
+    "$(printf '0\n1\n2')"
+
+check_script "exec exit in loop" \
+    "$(printf 'for x in a b c\n    if $x == "b" { exit }\n    echo $x\n')" \
+    "a"
+
+# ==========================================================================
+# EXECUTION: STRING INTERPOLATION
+# ==========================================================================
+
+check_script "exec dq interpolation" \
+    "$(printf 'name = "world"\necho "hello $name"\n')" \
+    "hello world"
+
+check_script "exec escape sequences" \
+    "$(printf 'echo "a\\tb"\n')" \
+    "$(printf 'a\tb')"
+
+# ==========================================================================
+# EXECUTION: SPECIAL VARIABLES
+# ==========================================================================
+
+check_script "exec arg count" \
+    "$(printf 'echo $#\n')" \
+    "0"
+
+check_script "exec positional args" \
+    "$(printf 'echo $1 $2\n')" \
+    " "
+
+check_script "exec shift" \
+    "$(printf 'echo $1\nshift\necho $1\n')" \
+    "$(printf '\n')"
+
+check_script "exec test -e" \
+    "$(printf 'if test -e build.zig { echo exists }\n')" \
+    "exists"
+
+check_script "exec source" \
+    "$(printf 'echo "x = 42" > /tmp/_sl_source.slash\nsource /tmp/_sl_source.slash\necho $x\n')" \
+    "42"
+
+rm -f /tmp/_sl_source.slash
+
+check_script "exec xor" \
+    "$(printf 'cmd a true xor false\na\necho $?\n')" \
+    "0"
+
+check_script "exec comment ignored" \
+    "$(printf 'echo hello # this is a comment\n')" \
+    "hello"
+
+check_script "exec cmd redefine" \
+    "$(printf 'cmd foo echo first\ncmd foo echo second\nfoo\n')" \
+    "second"
+
+# ==========================================================================
 # RESULTS
 # ==========================================================================
 echo ""
