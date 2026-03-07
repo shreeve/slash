@@ -297,7 +297,9 @@ pub const Shell = struct {
     }
 
     pub fn execSource(self: *Shell, source: []const u8) void {
-        var p = Parser.init(self.allocator, source);
+        const parse_source = ensureTrailingNewlineAlloc(self.allocator, source) catch source;
+        defer if (parse_source.ptr != source.ptr) self.allocator.free(parse_source);
+        var p = Parser.init(self.allocator, parse_source);
         defer p.deinit();
         const sexp = p.parseProgram() catch |err| {
             std.debug.print("parse error: {s}\n", .{@errorName(err)});
@@ -330,7 +332,8 @@ pub const Shell = struct {
 
     fn dispatch(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8) void {
         switch (tag) {
-            .program, .block => self.evalSequence(args, source),
+            .program => if (self.interactive) self.evalSequence(args, source) else self.evalProgram(args, source),
+            .block => self.evalSequence(args, source),
             .cmd => self.evalCmd(args, source),
             .pipe => self.evalPipe(args, source, false),
             .pipe_err => self.evalPipe(args, source, true),
@@ -1085,9 +1088,16 @@ pub const Shell = struct {
         }
     }
 
+    fn evalProgram(self: *Shell, args: []const Sexp, source: []const u8) void {
+        for (args) |child| {
+            self.eval(child, source);
+            if (self.flow != .normal) return;
+            if (self.last_exit != 0) return;
+        }
+    }
+
     fn evalBg(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len == 0) return;
-        const cmd_text = self.allocator.dupe(u8, source[0..@min(source.len, 80)]) catch "";
         const pid = posix.fork() catch {
             std.debug.print("slash: fork failed\n", .{});
             self.last_exit = 1;
@@ -1096,14 +1106,21 @@ pub const Shell = struct {
         if (pid == 0) {
             if (self.interactive) _ = libc.setpgid(0, 0);
             resetChildSignals();
+            // Background wrapper children must not inherit foreground job behavior.
+            // Nested eval paths (especially pipelines) should execute detached from
+            // terminal ownership logic even though they reuse the same Shell code.
+            self.interactive = false;
             self.eval(args[0], source);
             posix.exit(self.last_exit);
         }
-        if (self.interactive) _ = libc.setpgid(pid, pid);
         self.last_bg_pid = pid;
-        const pids = [_]posix.pid_t{pid};
-        const job_id = self.addJob(pid, .running, cmd_text, &pids);
-        std.debug.print("[{d}] {d}\n", .{ job_id, pid });
+        if (self.interactive) {
+            _ = libc.setpgid(pid, pid);
+            const cmd_text = self.allocator.dupe(u8, source[0..@min(source.len, 80)]) catch "";
+            const pids = [_]posix.pid_t{pid};
+            const job_id = self.addJob(pid, .running, cmd_text, &pids);
+            std.debug.print("[{d}] {d}\n", .{ job_id, pid });
+        }
         self.last_exit = 0;
         if (args.len >= 2) self.eval(args[1], source);
     }
@@ -1249,9 +1266,13 @@ pub const Shell = struct {
                 if (job.state != .stopped) self.removeJob(job_id);
             }
         } else {
-            for (0..spawned - 1) |i| _ = posix.waitpid(child_pids[i], 0);
-            const result = posix.waitpid(child_pids[spawned - 1], 0);
-            self.last_exit = statusToExit(result.status);
+            var worst_exit: u8 = 0;
+            for (0..spawned) |i| {
+                const result = posix.waitpid(child_pids[i], 0);
+                const code = statusToExit(result.status);
+                if (code != 0) worst_exit = code;
+            }
+            self.last_exit = worst_exit;
         }
     }
 
@@ -1684,6 +1705,10 @@ pub const Shell = struct {
         const query = if (argv.len > 1) argv[1] else "";
         const limit: usize = if (argv.len > 2) std.fmt.parseInt(usize, argv[2], 10) catch 20 else 20;
         const results = hdb.search(self.allocator, query, limit);
+        defer {
+            for (results) |cmd| self.allocator.free(cmd);
+            if (results.len > 0) self.allocator.free(results);
+        }
         for (results) |cmd| std.debug.print("{s}\n", .{cmd});
         self.last_exit = 0;
     }
@@ -1696,6 +1721,10 @@ pub const Shell = struct {
         };
         const query = if (argv.len > 1) argv[1] else "";
         const scored = hdb.frecency(self.allocator, query, if (query.len > 0) 50 else 9);
+        defer {
+            for (scored) |entry| self.allocator.free(entry.path);
+            if (scored.len > 0) self.allocator.free(scored);
+        }
         var filtered: [9][]const u8 = .{""} ** 9;
         var count: u8 = 0;
         for (scored) |entry| {
@@ -2356,10 +2385,7 @@ fn expandRegexGlob(alloc: Allocator, arg: []const u8, out: *std.ArrayList([]cons
         }
     }
 
-    if (matches.items.len == 0) {
-        out.append(alloc, arg) catch {};
-        return;
-    }
+    if (matches.items.len == 0) return;
     std.mem.sort([]const u8, matches.items, {}, lessThanStr);
     for (matches.items) |m| out.append(alloc, m) catch {};
 }
@@ -2427,10 +2453,7 @@ fn expandGlob(alloc: Allocator, pattern: []const u8, out: *std.ArrayList([]const
         }
     }
 
-    if (matches.items.len == 0) {
-        out.append(alloc, pattern) catch {};
-        return;
-    }
+    if (matches.items.len == 0) return;
     std.mem.sort([]const u8, matches.items, {}, lessThanStr);
     for (matches.items) |m| out.append(alloc, m) catch {};
 }
@@ -2480,4 +2503,12 @@ fn globToRegex(alloc: Allocator, pattern: []const u8) ?[]const u8 {
 
 fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
+}
+
+fn ensureTrailingNewlineAlloc(alloc: Allocator, source: []const u8) ![]const u8 {
+    if (source.len == 0 or source[source.len - 1] == '\n') return source;
+    const buf = try alloc.alloc(u8, source.len + 1);
+    @memcpy(buf[0..source.len], source);
+    buf[source.len] = '\n';
+    return buf;
 }

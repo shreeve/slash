@@ -453,6 +453,10 @@ const LexerParser = struct {
             }
         }
 
+        if (guards.items.len > 0 or rewind_amount != null or is_hold or pre_counted_char != null or is_simd) {
+            return error.UnsupportedLexerFeature;
+        }
+
         // Store the rule
         try self.spec.rules.append(self.allocator, .{
             .pattern = pattern,

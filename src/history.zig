@@ -1,7 +1,7 @@
 //! History — flat-file command history and directory frecency
 //!
 //! Stores command history in ~/.slash/history as tab-separated lines:
-//!   timestamp\texit_code\tduration_ms\tcwd\tcommand
+//!   timestamp\texit_code\tduration_ms\tescaped_cwd\tescaped_command
 //!
 //! Loaded into memory on open; new entries appended to both the file
 //! and the in-memory list. Pruned to 50,000 entries on open.
@@ -67,22 +67,38 @@ pub const Db = struct {
     }
 
     pub fn record(self: *Db, command: []const u8, cwd: []const u8, exit_code: u8, duration_ms: u64) void {
+        if (self.entries.items.len > 0 and
+            std.mem.eql(u8, self.entries.items[self.entries.items.len - 1].command, command))
+            return;
         const now = std.time.timestamp();
+        const escaped_cwd = escapeFieldAlloc(self.alloc, cwd) catch return;
+        defer self.alloc.free(escaped_cwd);
+        const escaped_command = escapeFieldAlloc(self.alloc, command) catch return;
+        defer self.alloc.free(escaped_command);
         if (self.file) |f| {
-            var buf: [8192]u8 = undefined;
-            const line = std.fmt.bufPrint(&buf, "{d}\t{d}\t{d}\t{s}\t{s}\n", .{
-                now, exit_code, duration_ms, cwd, command,
+            var prefix_buf: [96]u8 = undefined;
+            const prefix = std.fmt.bufPrint(&prefix_buf, "{d}\t{d}\t{d}\t", .{
+                now, exit_code, duration_ms,
             }) catch return;
-            f.writeAll(line) catch {};
+            f.writeAll(prefix) catch {};
+            f.writeAll(escaped_cwd) catch {};
+            f.writeAll("\t") catch {};
+            f.writeAll(escaped_command) catch {};
+            f.writeAll("\n") catch {};
         }
+        const cwd_copy = self.alloc.dupe(u8, cwd) catch return;
+        errdefer self.alloc.free(cwd_copy);
+        const command_copy = self.alloc.dupe(u8, command) catch return;
+        errdefer self.alloc.free(command_copy);
         const entry = Entry{
             .timestamp = now,
             .exit_code = exit_code,
             .duration_ms = duration_ms,
-            .cwd = self.alloc.dupe(u8, cwd) catch return,
-            .command = self.alloc.dupe(u8, command) catch return,
+            .cwd = cwd_copy,
+            .command = command_copy,
         };
         self.entries.append(self.alloc, entry) catch {};
+        if (self.entries.items.len > MAX_ENTRIES + 1024) self.prune();
     }
 
     pub fn search(self: *const Db, alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 {
@@ -176,12 +192,17 @@ pub const Db = struct {
         const command = rest;
         if (command.len == 0) return error.BadLine;
 
+        const cwd = unescapeFieldAlloc(self.alloc, cwd_field) catch return error.OutOfMemory;
+        errdefer self.alloc.free(cwd);
+        const cmd = unescapeFieldAlloc(self.alloc, command) catch return error.OutOfMemory;
+        errdefer self.alloc.free(cmd);
+
         self.entries.append(self.alloc, .{
             .timestamp = std.fmt.parseInt(i64, ts_str, 10) catch return error.BadLine,
             .exit_code = std.fmt.parseInt(u8, exit_str, 10) catch 0,
             .duration_ms = std.fmt.parseInt(u64, dur_str, 10) catch 0,
-            .cwd = self.alloc.dupe(u8, cwd_field) catch return error.OutOfMemory,
-            .command = self.alloc.dupe(u8, command) catch return error.OutOfMemory,
+            .cwd = cwd,
+            .command = cmd,
         }) catch return error.OutOfMemory;
     }
 
@@ -210,12 +231,20 @@ pub const Db = struct {
         const out = std.fs.cwd().createFile(tmp, .{}) catch return;
         var closed = false;
         defer if (!closed) out.close();
-        var buf: [8192]u8 = undefined;
         for (self.entries.items) |e| {
-            const line = std.fmt.bufPrint(&buf, "{d}\t{d}\t{d}\t{s}\t{s}\n", .{
-                e.timestamp, e.exit_code, e.duration_ms, e.cwd, e.command,
+            const escaped_cwd = escapeFieldAlloc(self.alloc, e.cwd) catch continue;
+            defer self.alloc.free(escaped_cwd);
+            const escaped_command = escapeFieldAlloc(self.alloc, e.command) catch continue;
+            defer self.alloc.free(escaped_command);
+            var prefix_buf: [96]u8 = undefined;
+            const prefix = std.fmt.bufPrint(&prefix_buf, "{d}\t{d}\t{d}\t", .{
+                e.timestamp, e.exit_code, e.duration_ms,
             }) catch continue;
-            out.writeAll(line) catch {};
+            out.writeAll(prefix) catch {};
+            out.writeAll(escaped_cwd) catch {};
+            out.writeAll("\t") catch {};
+            out.writeAll(escaped_command) catch {};
+            out.writeAll("\n") catch {};
         }
         out.close();
         closed = true;
@@ -232,4 +261,43 @@ pub const DirScore = struct {
 
 fn containsSubstring(haystack: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, haystack, needle) != null;
+}
+
+fn escapeFieldAlloc(alloc: std.mem.Allocator, value: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    for (value) |ch| {
+        switch (ch) {
+            '\\' => try buf.appendSlice(alloc, "\\\\"),
+            '\n' => try buf.appendSlice(alloc, "\\n"),
+            '\r' => try buf.appendSlice(alloc, "\\r"),
+            '\t' => try buf.appendSlice(alloc, "\\t"),
+            else => try buf.append(alloc, ch),
+        }
+    }
+    return try buf.toOwnedSlice(alloc);
+}
+
+fn unescapeFieldAlloc(alloc: std.mem.Allocator, value: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(alloc);
+    var i: usize = 0;
+    while (i < value.len) : (i += 1) {
+        if (value[i] == '\\' and i + 1 < value.len) {
+            i += 1;
+            switch (value[i]) {
+                'n' => try buf.append(alloc, '\n'),
+                'r' => try buf.append(alloc, '\r'),
+                't' => try buf.append(alloc, '\t'),
+                '\\' => try buf.append(alloc, '\\'),
+                else => {
+                    try buf.append(alloc, '\\');
+                    try buf.append(alloc, value[i]);
+                },
+            }
+        } else {
+            try buf.append(alloc, value[i]);
+        }
+    }
+    return try buf.toOwnedSlice(alloc);
 }

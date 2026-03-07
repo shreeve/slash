@@ -24,6 +24,7 @@ pub const Lexer = struct {
     hd_buf: [64]Token = undefined,
     hd_buf_count: u8 = 0,
     hd_buf_pos: u8 = 0,
+    pending_err: bool = false,
 
     // Indent state
     indent_level: u32 = 0,
@@ -51,6 +52,7 @@ pub const Lexer = struct {
         self.hd_scanned = false;
         self.hd_buf_count = 0;
         self.hd_buf_pos = 0;
+        self.pending_err = false;
         self.indent_level = 0;
         self.indent_depth = 0;
         self.indent_pending = 0;
@@ -65,6 +67,10 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Lexer) Token {
+        if (self.pending_err) {
+            self.pending_err = false;
+            return Token{ .cat = .err, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
+        }
         if (self.indent_queued) |q| {
             self.indent_queued = null;
             return q;
@@ -106,7 +112,7 @@ pub const Lexer = struct {
                     self.last_cat = result.cat;
                     return result;
                 }
-            } else if (!std.ascii.isAlphanumeric(ch) and ch != ' ' and ch != '\t' and ch != '\n' and ch != '\r' and ch != '$') {
+            } else if (ch == '/') {
                 self.base.pos = rx_pos;
                 const result = self.collectRegexBare();
                 self.last_cat = result.cat;
@@ -209,6 +215,9 @@ pub const Lexer = struct {
                 if (self.hd_buf_count < 64) {
                     self.hd_buf[self.hd_buf_count] = t;
                     self.hd_buf_count += 1;
+                } else {
+                    self.pending_err = true;
+                    break;
                 }
             }
             return tok;
@@ -273,11 +282,22 @@ pub const Lexer = struct {
                         while (true) {
                             const t = self.base.matchRules();
                             if (t.cat == .newline) {
-                                if (self.hd_buf_count < 64) { self.hd_buf[self.hd_buf_count] = t; self.hd_buf_count += 1; }
+                                if (self.hd_buf_count < 64) {
+                                    self.hd_buf[self.hd_buf_count] = t;
+                                    self.hd_buf_count += 1;
+                                } else {
+                                    self.pending_err = true;
+                                }
                                 break;
                             }
                             if (t.cat == .eof) break;
-                            if (self.hd_buf_count < 64) { self.hd_buf[self.hd_buf_count] = t; self.hd_buf_count += 1; }
+                            if (self.hd_buf_count < 64) {
+                                self.hd_buf[self.hd_buf_count] = t;
+                                self.hd_buf_count += 1;
+                            } else {
+                                self.pending_err = true;
+                                break;
+                            }
                         }
                     }
                     return Token{ .cat = close_cat, .pre = @intCast(@min(ws, 255)), .pos = @intCast(content_start), .len = @intCast(delim.len) };
@@ -307,18 +327,24 @@ pub const Lexer = struct {
             self.base.source[self.base.pos + ws] == '\r' or self.base.source[self.base.pos + ws] == '#')
             return nl_tok;
         if (ws > self.indent_level) {
-            if (self.indent_depth < 63) {
-                self.indent_stack[self.indent_depth] = self.indent_level;
-                self.indent_depth += 1;
-            }
+            if (self.indent_depth >= 63)
+                return Token{ .cat = .err, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
+            self.indent_stack[self.indent_depth] = self.indent_level;
+            self.indent_depth += 1;
             self.indent_level = ws;
             return Token{ .cat = .indent, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
         } else if (ws < self.indent_level) {
             var count: u8 = 0;
-            while (self.indent_depth > 0 and self.indent_stack[self.indent_depth - 1] >= ws) {
+            var next_level = self.indent_level;
+            while (next_level > ws) {
+                if (self.indent_depth == 0)
+                    return Token{ .cat = .err, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
                 self.indent_depth -= 1;
+                next_level = self.indent_stack[self.indent_depth];
                 count += 1;
             }
+            if (next_level != ws)
+                return Token{ .cat = .err, .pre = 0, .pos = @intCast(self.base.pos), .len = 0 };
             self.indent_level = ws;
             if (count > 0) {
                 self.indent_pending = count;
@@ -373,3 +399,73 @@ pub const Lexer = struct {
         return Token{ .cat = .err, .pre = 0, .pos = @intCast(start), .len = 1 };
     }
 };
+
+pub fn lineNeedsContinuation(line: []const u8) bool {
+    const trimmed = std.mem.trimRight(u8, line, " \t");
+    if (trimmed.len == 0) return false;
+
+    var lex = Lexer.init(trimmed);
+    var sig_count: usize = 0;
+    var first_text: []const u8 = "";
+    var last_text: []const u8 = "";
+    var last_cat: TokenCat = .eof;
+    var saw_lbrace = false;
+
+    while (true) {
+        const tok = lex.next();
+        switch (tok.cat) {
+            .eof => break,
+            .comment, .newline => continue,
+            .lbrace => saw_lbrace = true,
+            else => {},
+        }
+        if (sig_count == 0) first_text = lex.text(tok);
+        sig_count += 1;
+        last_cat = tok.cat;
+        last_text = lex.text(tok);
+    }
+
+    if (lex.base.paren > 0 or lex.base.brace > 0) return true;
+
+    switch (last_cat) {
+        .backslash,
+        .pipe,
+        .pipe_err,
+        .and_sym,
+        .or_sym,
+        .plus,
+        .star,
+        .slash,
+        .percent,
+        .power,
+        .assign,
+        .default_op,
+        .match,
+        .nomatch,
+        .comma,
+        .heredoc_sq,
+        .heredoc_dq,
+        .heredoc_bt,
+        => return true,
+        else => {},
+    }
+
+    if (!saw_lbrace) {
+        if (std.mem.eql(u8, first_text, "if") or
+            std.mem.eql(u8, first_text, "unless") or
+            std.mem.eql(u8, first_text, "for") or
+            std.mem.eql(u8, first_text, "while") or
+            std.mem.eql(u8, first_text, "until") or
+            std.mem.eql(u8, first_text, "try") or
+            std.mem.eql(u8, first_text, "else"))
+        {
+            return true;
+        }
+    }
+
+    if (std.mem.eql(u8, first_text, "cmd") and last_cat == .rparen) return true;
+    if (std.mem.eql(u8, first_text, "cmd") and sig_count == 2 and (last_cat == .ident or last_cat == .missing)) return true;
+    if (std.mem.eql(u8, last_text, "else")) return true;
+
+    return false;
+}

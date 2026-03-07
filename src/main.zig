@@ -182,55 +182,7 @@ fn historySearchFn(alloc: std.mem.Allocator, query: []const u8, limit: usize) []
 }
 
 fn needsContinuation(line: []const u8) bool {
-    const trimmed = std.mem.trimRight(u8, line, " \t");
-    if (trimmed.len == 0) return false;
-
-    if (trimmed[trimmed.len - 1] == '\\') return true;
-
-    var brace_depth: i32 = 0;
-    var in_sq = false;
-    var in_dq = false;
-    var i: usize = 0;
-    while (i < trimmed.len) : (i += 1) {
-        const ch = trimmed[i];
-        if (ch == '\\' and in_dq and i + 1 < trimmed.len) { i += 1; continue; }
-        if (ch == '\'' and !in_dq) { in_sq = !in_sq; continue; }
-        if (ch == '"' and !in_sq) { in_dq = !in_dq; continue; }
-        if (in_sq or in_dq) continue;
-        if (ch == '#') break;
-        if (ch == '{') brace_depth += 1;
-        if (ch == '}') brace_depth -= 1;
-    }
-    if (brace_depth > 0) return true;
-
-    // Lines starting with block keywords that don't have a body on this line
-    const block_keywords = [_][]const u8{ "if", "unless", "for", "while", "until", "try" };
-    for (block_keywords) |kw| {
-        if (std.mem.startsWith(u8, trimmed, kw) and
-            (trimmed.len == kw.len or trimmed[kw.len] == ' ' or trimmed[kw.len] == '\t'))
-        {
-            // Has a brace block on this line? No continuation needed.
-            if (std.mem.indexOfScalar(u8, trimmed, '{') != null) return false;
-            return true;
-        }
-    }
-    // "else" at end of line (after closing brace or standalone)
-    if (std.mem.endsWith(u8, trimmed, " else") or std.mem.eql(u8, trimmed, "else")) return true;
-
-    // cmd definition: "cmd name" or "cmd name(params)" needs continuation,
-    // but "cmd name body..." (one-liner with a space after the name) is complete.
-    if (trimmed.len > 4 and std.mem.startsWith(u8, trimmed, "cmd ")) {
-        if (trimmed[trimmed.len - 1] == ')') return true;
-        if (trimmed[trimmed.len - 1] == '-') return false;
-        const after_cmd = std.mem.trimLeft(u8, trimmed[4..], " \t");
-        // If after_cmd contains a space, there's a name AND a body — complete one-liner
-        if (std.mem.indexOfScalar(u8, after_cmd, ' ') != null) return false;
-        if (std.mem.indexOfScalar(u8, after_cmd, '\t') != null) return false;
-        // Just "cmd name" with no body — needs continuation
-        return after_cmd.len > 0;
-    }
-
-    return false;
+    return @import("lexer.zig").lineNeedsContinuation(line);
 }
 
 var user_cmd_names_buf: [64][]const u8 = undefined;
@@ -310,7 +262,18 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
             continue;
         }
 
-        if (std.mem.eql(u8, trimmed, "exit")) return;
+        if (std.mem.eql(u8, trimmed, "exit")) {
+            var has_jobs = false;
+            for (&ev.jobs) |slot| {
+                if (slot != null) { has_jobs = true; break; }
+            }
+            if (has_jobs) {
+                std.debug.print("slash: there are running or stopped jobs\n", .{});
+                ev.reapAndReport();
+                continue;
+            }
+            return;
+        }
 
         // Multi-line continuation: if line needs a block, collect more lines until blank
         var multi_buf: std.ArrayList(u8) = .empty;
@@ -345,9 +308,11 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
         if (exec.Shell.exit_requested) return;
 
         if (hdb) |h| {
-            var cwd_buf: [4096]u8 = undefined;
-            const cwd = std.posix.getcwd(&cwd_buf) catch "";
-            h.record(full_line, cwd, ev.last_exit, last_duration_ms);
+            if (full_line.len == 0 or full_line[0] != ' ') {
+                var cwd_buf: [4096]u8 = undefined;
+                const cwd = std.posix.getcwd(&cwd_buf) catch "";
+                h.record(full_line, cwd, ev.last_exit, last_duration_ms);
+            }
         }
     }
 }

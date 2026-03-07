@@ -147,10 +147,7 @@ defaults {
 # Comments start with # and run to end of line. Allowed everywhere,
 # including at the interactive prompt.
 #
-# simd_to '\n' — hint to skip ahead to the newline using SIMD byte search
-# (fast-path for scanning past comment text without per-byte matching).
-
-'#' [^\n]*                                  → comment, simd_to '\n'
+'#' [^\n]*                                  → comment
 
 # ==============================================================================
 # NEWLINES AND LINE CONTINUATION
