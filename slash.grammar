@@ -20,6 +20,8 @@
 #   heredoc   - Inside a heredoc body (0 = no, 1 = single-quote, 2 = double-quote, 3 = backtick)
 #   paren     - Parenthesis nesting depth (for subshells and grouping)
 #   brace     - Brace nesting depth (for block delimiters)
+#   math      - Math context (1 = after `=`; lexer.zig intercepts / as division,
+#               ^ as power, * and bare numbers before ident patterns; cleared on newline)
 
 state beg = 1
 state heredoc = 0
@@ -79,7 +81,7 @@ tokens {
     and_sym,        # &&
     or_sym,         # ||
     not_sym,        # !
-    xor,            # xor (word form only)
+    xor,            # xor (word form only — ^ is used for exponentiation)
     bg,             # & (at end of command, not &&)
     semi,           # ;
 
@@ -144,6 +146,9 @@ defaults {
 #
 # Comments start with # and run to end of line. Allowed everywhere,
 # including at the interactive prompt.
+#
+# simd_to '\n' — hint to skip ahead to the newline using SIMD byte search
+# (fast-path for scanning past comment text without per-byte matching).
 
 '#' [^\n]*                                  → comment, simd_to '\n'
 
@@ -336,11 +341,9 @@ defaults {
 # Bare words: command names, arguments, filenames, keywords.
 # Keywords are recognized in the parser via @as directives, not here.
 #
-# GLOB EXPANSION: Glob patterns (*.zig, file[0-9], {a,b}.txt) are expanded
-# by the shell BEFORE parsing, the same way bash works. The pre-parser
-# expands globs to filename lists, and the parser sees only the expanded
-# IDENT tokens. The lexer still tokenizes *, ?, [, ] for syntax
-# highlighting, but these tokens do not appear in the argument rule.
+# GLOB EXPANSION: Glob patterns (*.zig, file[0-9], {a,b}.txt) are tokenized
+# as IDENT by the lexer and parsed as command arguments. The executor expands
+# them to matching filenames at runtime, the same way bash works.
 
 # Note: / and ^ in math context are handled by lexer.zig, not here.
 # After assign (=), the math state is set, and lexer.zig intercepts
@@ -627,6 +630,7 @@ cmd_def   = CMD MISSING params? block        → (cmd_missing 3 4)
           | CMD name                        → (cmd_show 2)
           | CMD                             → (cmd_list)
 
+# L(X) — comma-separated list of X (expands to: X ("," X)*)
 params    = LPAREN_TIGHT L(name) ")"        → 2
 
 # ==============================================================================
