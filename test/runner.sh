@@ -604,6 +604,10 @@ check_script "exec test -x dir" \
     "$(printf 'if test -x src { echo executable }\n')" \
     "executable"
 
+check_script "exec test -L" \
+    "$(printf 'echo hi > /tmp/_sl_target.txt\nln -sf /tmp/_sl_target.txt /tmp/_sl_link.txt\nif test -L /tmp/_sl_link.txt { echo symlink }\nrm -f /tmp/_sl_target.txt /tmp/_sl_link.txt\n')" \
+    "symlink"
+
 check_script "exec test unknown flag" \
     "$(printf 'if test -z foo { echo bad } else { echo ok }\n')" \
     "ok"
@@ -749,6 +753,14 @@ check_script "exec comment ignored" \
 check_script "exec cmd redefine" \
     "$(printf 'cmd foo echo first\ncmd foo echo second\nfoo\n')" \
     "second"
+
+check_script "exec cmd missing hook" \
+    "$(printf 'cmd ??? { echo missing }\nno_such_cmd_xyz\n')" \
+    "missing"
+
+check_script "exec cmd missing delete" \
+    "$(printf 'cmd ??? { echo hook }\ncmd ??? -\nno_such_cmd_xyz\n')" \
+    ""
 
 # ==========================================================================
 # RESULTS
