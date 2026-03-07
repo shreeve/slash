@@ -66,6 +66,9 @@ const Action = struct {
 };
 
 /// Lexer rule
+///
+/// Implemented in generated code: pattern, token, actions (set/inc/dec), skip.
+/// Parsed but reserved for future use: guards, rewind, hold, simd_to, counted.
 const LexerRule = struct {
     pattern: []const u8,
     guards: []const Guard,
@@ -76,7 +79,7 @@ const LexerRule = struct {
     simd_char: ?u8 = null,
     is_skip: bool = false,
     is_hold: bool = false,
-    pre_counted_char: ?u8 = null, // For {pre = counted('.')}
+    pre_counted_char: ?u8 = null,
 };
 
 /// Default action

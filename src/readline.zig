@@ -733,24 +733,55 @@ fn refreshLine(line: []const u8, cursor: usize) void {
     writeAll(move);
 }
 
+var math_cache_line: [4096]u8 = undefined;
+var math_cache_line_len: usize = 0;
+var math_cache_result: [256]u8 = undefined;
+var math_cache_result_len: usize = 0;
+var math_cache_valid: bool = false;
+
 fn showMathPreview(line: []const u8) bool {
     if (line.len < 2) return false;
     const trimmed = std.mem.trimLeft(u8, line, " \t");
     if (trimmed.len < 2 or trimmed[0] != '=') return false;
-    // Must have something after =
     const expr = std.mem.trimLeft(u8, trimmed[1..], " \t");
     if (expr.len == 0) return false;
+
+    if (math_cache_valid and line.len == math_cache_line_len and
+        line.len <= math_cache_line.len and
+        std.mem.eql(u8, line, math_cache_line[0..math_cache_line_len]))
+    {
+        if (math_cache_result_len > 0) {
+            writeAll("  \x1b[90m= ");
+            writeAll(math_cache_result[0..math_cache_result_len]);
+            writeAll("\x1b[0m");
+            return true;
+        }
+        return false;
+    }
+
+    var got_result = false;
     if (key_handler) |kh| {
         if (kh.eval_math) |eval_fn| {
             if (eval_fn(line)) |result| {
                 writeAll("  \x1b[90m= ");
                 writeAll(result);
                 writeAll("\x1b[0m");
-                return true;
+                const n = @min(result.len, math_cache_result.len);
+                @memcpy(math_cache_result[0..n], result[0..n]);
+                math_cache_result_len = n;
+                got_result = true;
             }
         }
     }
-    return false;
+
+    if (line.len <= math_cache_line.len) {
+        @memcpy(math_cache_line[0..line.len], line);
+        math_cache_line_len = line.len;
+        math_cache_valid = true;
+        if (!got_result) math_cache_result_len = 0;
+    }
+
+    return got_result;
 }
 
 fn isKeyword(word: []const u8) bool {

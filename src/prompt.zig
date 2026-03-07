@@ -260,20 +260,28 @@ var git_cache_cwd: [4096]u8 = undefined;
 var git_cache_cwd_len: usize = 0;
 var git_cache_result: [256]u8 = undefined;
 var git_cache_result_len: usize = 0;
+var git_cache_head_path: [4096]u8 = undefined;
+var git_cache_head_path_len: usize = 0;
+var git_cache_head_mtime: i128 = 0;
 
 /// Reads .git/HEAD to get branch name, walks up from cwd.
 /// Handles both normal repos (.git/HEAD) and worktrees/submodules (.git file with gitdir:).
 /// Returns branch name or short hash for detached HEAD, "" if not a repo.
-/// Caches by cwd — skips filesystem work when the directory hasn't changed.
+/// Caches by cwd + HEAD mtime — skips full read when nothing has changed.
 fn getGitInfo(buf: *[256]u8, cwd: []const u8) []const u8 {
     if (cwd.len == git_cache_cwd_len and cwd.len <= git_cache_cwd.len and
-        std.mem.eql(u8, cwd, git_cache_cwd[0..git_cache_cwd_len]))
+        std.mem.eql(u8, cwd, git_cache_cwd[0..git_cache_cwd_len]) and
+        git_cache_head_path_len > 0)
     {
-        if (git_cache_result_len > 0) {
-            @memcpy(buf[0..git_cache_result_len], git_cache_result[0..git_cache_result_len]);
-            return buf[0..git_cache_result_len];
+        const head_stat = std.fs.cwd().statFile(git_cache_head_path[0..git_cache_head_path_len]) catch null;
+        const mtime = if (head_stat) |s| s.mtime else 0;
+        if (mtime == git_cache_head_mtime) {
+            if (git_cache_result_len > 0) {
+                @memcpy(buf[0..git_cache_result_len], git_cache_result[0..git_cache_result_len]);
+                return buf[0..git_cache_result_len];
+            }
+            return "";
         }
-        return "";
     }
 
     const result = getGitInfoUncached(buf, cwd);
@@ -301,7 +309,16 @@ fn getGitInfoUncached(buf: *[256]u8, cwd: []const u8) []const u8 {
         @memcpy(path_buf[dir.len..][0..git_suffix.len], git_suffix);
         const git_path = path_buf[0 .. dir.len + git_suffix.len];
 
-        const head = resolveGitHead(&path_buf, git_path) orelse {
+        const head_path_len = resolveGitHeadPath(&path_buf, git_path) orelse {
+            if (std.mem.lastIndexOfScalar(u8, dir, '/')) |sep| {
+                if (sep == 0) break;
+                dir = dir[0..sep];
+                continue;
+            }
+            break;
+        };
+        const head_path = path_buf[0..head_path_len];
+        const head = std.fs.openFileAbsolute(head_path, .{}) catch {
             if (std.mem.lastIndexOfScalar(u8, dir, '/')) |sep| {
                 if (sep == 0) break;
                 dir = dir[0..sep];
@@ -310,6 +327,14 @@ fn getGitInfoUncached(buf: *[256]u8, cwd: []const u8) []const u8 {
             break;
         };
         defer head.close();
+
+        // Cache HEAD path and mtime for invalidation
+        if (head_path_len <= git_cache_head_path.len) {
+            @memcpy(git_cache_head_path[0..head_path_len], head_path);
+            git_cache_head_path_len = head_path_len;
+            const stat = std.fs.cwd().statFile(head_path) catch null;
+            git_cache_head_mtime = if (stat) |s| s.mtime else 0;
+        }
 
         var head_buf: [256]u8 = undefined;
         const n = head.read(&head_buf) catch return "";
@@ -330,11 +355,16 @@ fn getGitInfoUncached(buf: *[256]u8, cwd: []const u8) []const u8 {
     return "";
 }
 
-fn resolveGitHead(path_buf: *[4096]u8, git_path: []const u8) ?std.fs.File {
+/// Resolves the path to the HEAD file for a git repo. Returns the length of the
+/// path written into path_buf, or null if no HEAD file is found.
+fn resolveGitHeadPath(path_buf: *[4096]u8, git_path: []const u8) ?usize {
     const head_suffix = "/HEAD";
     if (git_path.len + head_suffix.len > path_buf.len) return null;
     @memcpy(path_buf[git_path.len..][0..head_suffix.len], head_suffix);
-    if (std.fs.openFileAbsolute(path_buf[0 .. git_path.len + head_suffix.len], .{})) |f| return f else |_| {}
+    const direct_len = git_path.len + head_suffix.len;
+    if (std.fs.cwd().access(path_buf[0..direct_len], .{})) |_|
+        return direct_len
+    else |_| {}
 
     const git_file = std.fs.openFileAbsolute(git_path, .{}) catch return null;
     defer git_file.close();
@@ -347,7 +377,11 @@ fn resolveGitHead(path_buf: *[4096]u8, git_path: []const u8) ?std.fs.File {
     if (gitdir.len + head_suffix.len > path_buf.len) return null;
     @memcpy(path_buf[0..gitdir.len], gitdir);
     @memcpy(path_buf[gitdir.len..][0..head_suffix.len], head_suffix);
-    return std.fs.openFileAbsolute(path_buf[0 .. gitdir.len + head_suffix.len], .{}) catch null;
+    const indirect_len = gitdir.len + head_suffix.len;
+    if (std.fs.cwd().access(path_buf[0..indirect_len], .{})) |_|
+        return indirect_len
+    else |_|
+        return null;
 }
 
 fn formatDuration(buf: *[16]u8, ms: u64) []const u8 {

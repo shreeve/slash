@@ -193,7 +193,11 @@ pub const Shell = struct {
     fn removeJob(self: *Shell, id: u16) void {
         for (&self.jobs) |*slot| {
             if (slot.*) |job| {
-                if (job.id == id) { slot.* = null; return; }
+                if (job.id == id) {
+                    self.allocator.free(job.command);
+                    slot.* = null;
+                    return;
+                }
             }
         }
     }
@@ -230,6 +234,7 @@ pub const Shell = struct {
             if (slot.*) |*job| {
                 if (job.state == .done) {
                     std.debug.print("[{d}]  Done\t\t{s}\n", .{ job.id, job.command });
+                    self.allocator.free(job.command);
                     slot.* = null;
                 }
             }
@@ -481,7 +486,14 @@ pub const Shell = struct {
                 saved[0] = posix.dup(posix.STDIN_FILENO) catch -1;
                 saved[1] = posix.dup(posix.STDOUT_FILENO) catch -1;
                 saved[2] = posix.dup(posix.STDERR_FILENO) catch -1;
-                applyRedirects(self.allocator, redirs);
+                if (!applyRedirects(self.allocator, redirs)) {
+                    self.last_exit = 1;
+                    if (saved[0] != -1) { posix.dup2(saved[0], posix.STDIN_FILENO) catch {}; posix.close(saved[0]); }
+                    if (saved[1] != -1) { posix.dup2(saved[1], posix.STDOUT_FILENO) catch {}; posix.close(saved[1]); }
+                    if (saved[2] != -1) { posix.dup2(saved[2], posix.STDERR_FILENO) catch {}; posix.close(saved[2]); }
+                    self.cleanupProcSubs(procsub_fds.items);
+                    return;
+                }
             }
             if (is_builtin) {
                 _ = self.tryBuiltin(argv, source);
@@ -609,50 +621,59 @@ pub const Shell = struct {
         list.append(self.allocator, .{ .tag = tag, .target = target }) catch {};
     }
 
-    fn applyRedirects(alloc: Allocator, redirs: []const Redirect) void {
+    fn applyRedirects(alloc: Allocator, redirs: []const Redirect) bool {
         for (redirs) |r| {
-            switch (r.tag) {
+            const ok = switch (r.tag) {
                 .redir_out => openAndDup(alloc, r.target, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644, posix.STDOUT_FILENO),
                 .redir_append => openAndDup(alloc, r.target, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644, posix.STDOUT_FILENO),
                 .redir_in => openAndDup(alloc, r.target, .{ .ACCMODE = .RDONLY }, 0, posix.STDIN_FILENO),
                 .redir_err => openAndDup(alloc, r.target, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644, posix.STDERR_FILENO),
                 .redir_err_app => openAndDup(alloc, r.target, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644, posix.STDERR_FILENO),
-                .redir_both => {
-                    openAndDup(alloc, r.target, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644, posix.STDOUT_FILENO);
-                    posix.dup2(posix.STDOUT_FILENO, posix.STDERR_FILENO) catch {};
+                .redir_both => blk: {
+                    if (!openAndDup(alloc, r.target, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644, posix.STDOUT_FILENO))
+                        break :blk false;
+                    posix.dup2(posix.STDOUT_FILENO, posix.STDERR_FILENO) catch break :blk false;
+                    break :blk true;
                 },
-                .redir_dup, .redir_fd_dup => { posix.dup2(r.dest_fd, r.src_fd) catch {}; },
+                .redir_dup, .redir_fd_dup => blk: {
+                    posix.dup2(r.dest_fd, r.src_fd) catch break :blk false;
+                    break :blk true;
+                },
                 .redir_fd_out => openAndDup(alloc, r.target, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644, r.src_fd),
                 .redir_fd_in => openAndDup(alloc, r.target, .{ .ACCMODE = .RDONLY }, 0, r.src_fd),
-                .herestring => {
-                    const hs_pipe = posix.pipe() catch continue;
+                .herestring => blk: {
+                    const hs_pipe = posix.pipe() catch break :blk false;
                     _ = posix.write(hs_pipe[1], r.target) catch 0;
                     _ = posix.write(hs_pipe[1], "\n") catch 0;
                     posix.close(hs_pipe[1]);
-                    posix.dup2(hs_pipe[0], posix.STDIN_FILENO) catch {};
+                    posix.dup2(hs_pipe[0], posix.STDIN_FILENO) catch { posix.close(hs_pipe[0]); break :blk false; };
                     posix.close(hs_pipe[0]);
+                    break :blk true;
                 },
-                else => {},
-            }
+                else => true,
+            };
+            if (!ok) return false;
         }
+        return true;
     }
 
-    fn openAndDup(alloc: Allocator, target: []const u8, flags: posix.O, mode: posix.mode_t, dup_to: i32) void {
+    fn openAndDup(alloc: Allocator, target: []const u8, flags: posix.O, mode: posix.mode_t, dup_to: i32) bool {
         const pathZ = alloc.dupeZ(u8, target) catch {
             std.debug.print("slash: {s}: allocation failed\n", .{target});
-            return;
+            return false;
         };
         defer alloc.free(pathZ);
         const fd = posix.openatZ(posix.AT.FDCWD, pathZ, flags, mode) catch {
             std.debug.print("slash: {s}: cannot open\n", .{target});
-            return;
+            return false;
         };
         posix.dup2(fd, dup_to) catch {
             std.debug.print("slash: {s}: dup2 failed\n", .{target});
             posix.close(fd);
-            return;
+            return false;
         };
         if (fd != dup_to) posix.close(fd);
+        return true;
     }
 
     fn forkExecWithRedirects(self: *Shell, argv: []const []const u8, redirs: []const Redirect) void {
@@ -669,7 +690,7 @@ pub const Shell = struct {
                 _ = libc.tcsetpgrp(self.tty_fd, libc.getpid());
             }
             resetChildSignals();
-            applyRedirects(self.allocator, redirs);
+            if (!applyRedirects(self.allocator, redirs)) posix.exit(1);
             const argv_z = toExecArgs(self.allocator, argv) catch posix.exit(127);
             const envp = buildEnvP(self.allocator, self);
             posix.execvpeZ(argv_z[0].?, argv_z, envp) catch {};
@@ -1496,7 +1517,10 @@ pub const Shell = struct {
         const argv = argv_list.items;
         if (argv.len == 0) return;
 
-        applyRedirects(self.allocator, redir_list.items);
+        if (!applyRedirects(self.allocator, redir_list.items)) {
+            self.last_exit = 1;
+            return;
+        }
         resetChildSignals();
         const argv_z = toExecArgs(self.allocator, argv) catch {
             std.debug.print("slash: exec: allocation failed\n", .{});

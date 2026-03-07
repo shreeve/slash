@@ -295,6 +295,9 @@ pub const Lexer = struct {
     }
 
     fn handleIndent(self: *Lexer, nl_tok: Token) Token {
+        // Suppress indentation semantics inside grouping constructs
+        if (self.base.paren > 0 or self.base.brace > 0) return nl_tok;
+
         var ws: u32 = 0;
         while (self.base.pos + ws < self.base.source.len) {
             const ch = self.base.source[self.base.pos + ws];
