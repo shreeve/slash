@@ -567,7 +567,7 @@ fg command:
 
 ### Job Table
 
-Up to 64 jobs. Each job tracks its process group and up to 8 PIDs:
+Up to 64 jobs. Each job tracks its process group and up to 16 PIDs:
 
 ```zig
 const Job = struct {
@@ -630,7 +630,7 @@ These are registered in `isBuiltin()` in `exec.zig`:
 
 | Command | Description |
 |---------|-------------|
-| `cd` | Change directory (file-aware), record in frecency DB |
+| `cd` | Change directory (file-aware), history records cwd for frecency |
 | `..` / `...` / `....` | Go up 1, 2, 3, ... directories (dynamic dot-counter) |
 | `echo` | Print arguments |
 | `true` / `false` | Exit 0 / Exit 1 |

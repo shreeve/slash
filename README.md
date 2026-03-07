@@ -241,8 +241,8 @@ Human-readable syntax with `key`:
 key esc-=     "j"                     # list recent directories
 key esc-1     ".."                    # up 1 directory
 key esc-l     "ls -la"               # quick listing
-key ctrl-r    history-search          # incremental search
-key ctrl-x-e  edit-in-editor          # open in $EDITOR
+key ctrl-r    "echo search"           # bindings execute shell commands
+key ctrl-l    "clear"                 # clear screen
 ```
 
 ---
@@ -283,7 +283,7 @@ the parsed s-expression for any input.
 | `src/exec.zig` | Walks s-expressions, executes commands (struct: `Shell`) |
 | `src/main.zig` | Entry point, CLI flags, REPL loop |
 | `src/readline.zig` | Line editing, key bindings, syntax highlighting, tab completion |
-| `src/prompt.zig` | Prompt rendering with format escapes and git status |
+| `src/prompt.zig` | Prompt rendering with format escapes, git branch, duration |
 | `src/history.zig` | Flat-file history and directory frecency (`~/.slash/history`) |
 | `src/regex.zig` | libc POSIX regex wrapper (ERE) for `=~`, `!~`, glob expansion |
 
