@@ -7,17 +7,28 @@ walks s-expressions recursively and dispatches on the head tag.
 ## Architecture
 
 ```
-slash.grammar → grammar.zig → parser.zig (lexer + parser, tags + keywords inline)
-exec.zig       (s-expression executor: fork/exec/pipe)
-main.zig       (CLI, REPL)
-lexer.zig      (shell-specific lexer: heredoc, indent, regex)
-readline.zig   (line editing, highlighting, completion)
-prompt.zig     (prompt rendering, format escapes, git branch)
-history.zig    (SQLite history + frecency)
-regex.zig      (Oniguruma C API wrapper)
+grammar.zig  (build-time tool — reads slash.grammar, emits parser.zig)
+parser.zig   (generated — token patterns, SLR tables, s-expression builder)
+lexer.zig    (shell-specific lexer state: heredocs, indent, regex literals, math)
+exec.zig     (walks s-expressions, fork/exec/pipe, builtins, job control)
+main.zig     (CLI entry point, REPL loop, key bindings, continuation logic)
+readline.zig (line editor: raw mode, cursor, tab completion, highlighting, overlay search)
+prompt.zig   (prompt rendering: format escapes, git branch, duration)
+history.zig  (flat-file command history, search, suggest, frecency)
+regex.zig    (libc POSIX regex wrapper for executor =~/!~/globs)
 ```
 
 Pipeline: `source text → lexer → tokens → parser → s-expressions → executor`
+
+Dependency flow:
+```
+main → readline → (callbacks into exec)
+main → exec → parser → (uses lexer)
+main → prompt
+main → history
+exec → regex
+exec → lexer → parser (BaseLexer)
+```
 
 ## Key Files
 
@@ -29,9 +40,8 @@ Pipeline: `source text → lexer → tokens → parser → s-expressions → exe
 - `src/main.zig` — entry point, CLI flags, REPL loop
 - `src/readline.zig` — line editing, key bindings, syntax highlighting, tab completion
 - `src/prompt.zig` — prompt rendering with format escapes, git branch (reads `.git/HEAD`)
-- `src/history.zig` — SQLite interface for history and directory frecency
-- `src/regex.zig` — Oniguruma regex wrapper (Zig FFI)
-- `regex/` — Oniguruma 6.9.9 C source (compiled by build.zig)
+- `src/history.zig` — flat-file history and directory frecency (`~/.slash/history`)
+- `src/regex.zig` — libc POSIX regex wrapper (ERE) for `=~`, `!~`, glob expansion
 
 ## Build
 
@@ -59,7 +69,7 @@ Zig 0.15.2. See `docs/ZIG-0.15.2.md` for API changes (Writergate, ArrayList
 ## Conventions
 
 - Do not edit `src/parser.zig` — it is generated from `slash.grammar`
-- Lexer patterns are Oniguruma regex, compiled at init, matched via first-char dispatch table
+- Lexer patterns are regex strings matched by a pure-Zig interpreter (no C regex library), dispatched via first-char table
 - S-expressions are the interface between parser and executor — no AST
 - `std.debug.print` for all user-facing output (Zig 0.15 Writer API is buffer-based)
 - Commit messages: imperative, 1-2 sentences focused on "why"
@@ -72,7 +82,7 @@ Zig 0.15.2. See `docs/ZIG-0.15.2.md` for API changes (Writergate, ArrayList
 - **No AST** — parser outputs s-expressions directly (`mode = 'sexp'`); executor pattern-matches on head tags
 - **No separate tag/keyword files** — tag enum and keyword matchers are generated inline in parser.zig
 - **Grammar is documentation** — the grammar file is the authoritative specification of the language
-- **SQLite for all state** — `~/.slash/history.db`, frecency derived from history `cwd` column, no flat files
+- **Flat-file history** — `~/.slash/history` (TSV), loaded into memory on startup, frecency derived from cwd column
 - **`??` for defaults** — `$1 ?? 8080` instead of `${1:-8080}`
 - **`cmd ???`** — command-not-found hook, three characters
 - **Heredocs use `'''`/`"""`/`` ``` ``** — no `<<EOF` arbitrary tokens
