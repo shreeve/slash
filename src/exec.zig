@@ -42,6 +42,7 @@ pub const Job = struct {
     command: []const u8,
     pids: [MAX_JOB_PIDS]posix.pid_t = .{0} ** MAX_JOB_PIDS,
     pid_count: u8 = 0,
+    running_count: u8 = 0,
 };
 
 const MAX_JOBS = 64;
@@ -65,7 +66,7 @@ pub const Shell = struct {
     key_bindings: std.StringHashMap([]const u8),
 
     // History database (set by REPL)
-    history_db: ?@import("history.zig").Db = null,
+    history_db: ?*@import("history.zig").Db = null,
 
     // Job control state
     tty_fd: posix.fd_t = posix.STDIN_FILENO,
@@ -143,7 +144,8 @@ pub const Shell = struct {
 
     fn addJob(self: *Shell, pgid: posix.pid_t, state: JobState, command: []const u8, pids: []const posix.pid_t) u16 {
         const id = self.next_job_id;
-        self.next_job_id += 1;
+        self.next_job_id +%= 1;
+        if (self.next_job_id == 0) self.next_job_id = 1;
         for (&self.jobs) |*slot| {
             if (slot.* == null) {
                 var job = Job{ .id = id, .pgid = pgid, .state = state, .exit_code = 0, .command = command };
@@ -152,6 +154,7 @@ pub const Shell = struct {
                     job.pids[i] = pid;
                 }
                 job.pid_count = @intCast(@min(pids.len, MAX_JOB_PIDS));
+                job.running_count = job.pid_count;
                 slot.* = job;
                 return id;
             }
@@ -209,10 +212,12 @@ pub const Shell = struct {
             for (&self.jobs) |*slot| {
                 if (slot.*) |*job| {
                     if (job.state == .running) {
-                        for (job.pids[0..job.pid_count]) |jpid| {
+                        for (job.pids[0..job.pid_count], 0..) |jpid, i| {
                             if (jpid == pid) {
-                                job.state = .done;
+                                job.pids[i] = 0;
+                                if (job.running_count > 0) job.running_count -= 1;
                                 job.exit_code = statusToExit(result_status);
+                                if (job.running_count == 0) job.state = .done;
                                 break;
                             }
                         }
@@ -233,6 +238,11 @@ pub const Shell = struct {
 
     fn waitForForegroundJob(self: *Shell, pgid: posix.pid_t, pid_count: u8) void {
         var remaining = pid_count;
+        const rightmost_pid = if (self.findJobByPgid(pgid)) |job|
+            job.pids[job.pid_count - 1]
+        else
+            0;
+        var last_status: ?u32 = null;
         while (remaining > 0) {
             const result = posix.waitpid(-pgid, posix.W.UNTRACED);
             if (result.pid <= 0) break;
@@ -247,10 +257,10 @@ pub const Shell = struct {
             }
 
             remaining -= 1;
-            if (remaining == 0) {
-                self.last_exit = statusToExit(result.status);
-            }
+            if (result.pid == rightmost_pid) self.last_exit = statusToExit(result.status);
+            last_status = result.status;
         }
+        if (rightmost_pid == 0 and last_status != null) self.last_exit = statusToExit(last_status.?);
         self.reclaimTerminal();
     }
 
@@ -338,9 +348,9 @@ pub const Shell = struct {
             .cmd_del => self.evalCmdDel(args, source),
             .cmd_show => self.evalCmdShow(args, source),
             .cmd_list => self.evalCmdList(),
-            .cmd_missing => self.evalCmdDef(args, source),
-            .cmd_missing_del => { self.last_exit = 0; },
-            .cmd_missing_show => { self.last_exit = 0; },
+            .cmd_missing => self.evalCmdMissingDef(args, source),
+            .cmd_missing_del => self.evalCmdMissingDel(),
+            .cmd_missing_show => self.evalCmdMissingShow(),
             .set_reset => self.evalSetReset(args, source),
             .set_show => self.evalSetShow(args, source),
             .set_list => self.evalSetList(),
@@ -518,6 +528,12 @@ pub const Shell = struct {
 
         self.forkExecWithRedirects(argv, redirs);
         self.cleanupProcSubs(procsub_fds.items);
+
+        if (self.last_exit == 127) {
+            if (self.user_cmds.get("???")) |hook| {
+                self.invokeUserCmd(hook, argv);
+            }
+        }
     }
 
     fn spawnProcSub(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, fds: *std.ArrayList(ProcSubFd)) ?[]const u8 {
@@ -622,9 +638,20 @@ pub const Shell = struct {
     }
 
     fn openAndDup(alloc: Allocator, target: []const u8, flags: posix.O, mode: posix.mode_t, dup_to: i32) void {
-        const pathZ = alloc.dupeZ(u8, target) catch return;
-        const fd = posix.openatZ(posix.AT.FDCWD, pathZ, flags, mode) catch return;
-        posix.dup2(fd, dup_to) catch {};
+        const pathZ = alloc.dupeZ(u8, target) catch {
+            std.debug.print("slash: {s}: allocation failed\n", .{target});
+            return;
+        };
+        defer alloc.free(pathZ);
+        const fd = posix.openatZ(posix.AT.FDCWD, pathZ, flags, mode) catch {
+            std.debug.print("slash: {s}: cannot open\n", .{target});
+            return;
+        };
+        posix.dup2(fd, dup_to) catch {
+            std.debug.print("slash: {s}: dup2 failed\n", .{target});
+            posix.close(fd);
+            return;
+        };
         if (fd != dup_to) posix.close(fd);
     }
 
@@ -743,18 +770,22 @@ pub const Shell = struct {
         return std.fmt.bufPrint(&argc_str_buf, "{d}", .{self.args.len}) catch "0";
     }
 
+    var arg_join_buf: [4096]u8 = undefined;
+
     fn argJoinStr(self: *Shell) []const u8 {
         if (self.args.len == 0) return "";
-        var total: usize = 0;
-        for (self.args) |a| total += a.len + 1;
-        const buf = self.allocator.alloc(u8, total - 1) catch return "";
         var pos: usize = 0;
         for (self.args, 0..) |a, i| {
-            if (i > 0) { buf[pos] = ' '; pos += 1; }
-            @memcpy(buf[pos..][0..a.len], a);
-            pos += a.len;
+            if (i > 0) {
+                if (pos >= arg_join_buf.len) break;
+                arg_join_buf[pos] = ' ';
+                pos += 1;
+            }
+            const n = @min(a.len, arg_join_buf.len - pos);
+            @memcpy(arg_join_buf[pos..][0..n], a[0..n]);
+            pos += n;
         }
-        return buf[0..pos];
+        return arg_join_buf[0..pos];
     }
 
     fn evalShift(self: *Shell) void {
@@ -770,9 +801,11 @@ pub const Shell = struct {
         return std.fmt.bufPrint(&exit_str_buf, "{d}", .{self.last_exit}) catch "0";
     }
 
-    fn pidStr(self: *Shell) []const u8 {
+    var pid_str_buf: [10]u8 = undefined;
+
+    fn pidStr(_: *Shell) []const u8 {
         const pid = libc.getpid();
-        return std.fmt.allocPrint(self.allocator, "{d}", .{pid}) catch "0";
+        return std.fmt.bufPrint(&pid_str_buf, "{d}", .{pid}) catch "0";
     }
 
     var last_bg_pid_buf: [10]u8 = undefined;
@@ -914,7 +947,7 @@ pub const Shell = struct {
                 self.last_exit = 2;
                 return;
             };
-            const re = (if (spec.ignore_case)
+            var re = (if (spec.ignore_case)
                 Regex.compileIgnoreCase(spec.pattern)
             else
                 Regex.compile(spec.pattern)) catch {
@@ -1361,7 +1394,7 @@ pub const Shell = struct {
     fn tryPatternMatches(self: *Shell, pattern_sexp: Sexp, value: []const u8, source: []const u8) bool {
         const raw = self.sexpToStr(pattern_sexp, source) orelse return false;
         if (parseRegexSpec(raw)) |spec| {
-            const re = (if (spec.ignore_case)
+            var re = (if (spec.ignore_case)
                 Regex.compileIgnoreCase(spec.pattern)
             else
                 Regex.compile(spec.pattern)) catch return false;
@@ -1401,6 +1434,14 @@ pub const Shell = struct {
             self.last_exit = 0;
             return;
         }
+        if (std.mem.eql(u8, flag, "-L")) {
+            const stat = posix.fstatat(posix.AT.FDCWD, path, posix.AT.SYMLINK_NOFOLLOW) catch {
+                self.last_exit = 1;
+                return;
+            };
+            self.last_exit = if ((stat.mode & posix.S.IFMT) == posix.S.IFLNK) 0 else 1;
+            return;
+        }
 
         const cwd = std.fs.cwd();
         const stat = cwd.statFile(path) catch {
@@ -1414,8 +1455,6 @@ pub const Shell = struct {
             self.last_exit = if (stat.kind == .directory) 0 else 1;
         } else if (std.mem.eql(u8, flag, "-s")) {
             self.last_exit = if (stat.size > 0) 0 else 1;
-        } else if (std.mem.eql(u8, flag, "-L")) {
-            self.last_exit = if (stat.kind == .sym_link) 0 else 1;
         } else {
             self.last_exit = 1;
         }
@@ -1733,7 +1772,10 @@ pub const Shell = struct {
         const saved = self.allocator.alloc(?[]const u8, params.len) catch return;
         defer self.allocator.free(saved);
         for (params, 0..) |pname, i| {
-            saved[i] = self.vars.get(pname);
+            saved[i] = if (self.vars.get(pname)) |old|
+                self.allocator.dupe(u8, old) catch null
+            else
+                null;
             const raw = if (i < call_args.len) call_args[i] else "";
             const val = self.allocator.dupe(u8, raw) catch continue;
             if (self.vars.getPtr(pname)) |slot| {
@@ -1753,6 +1795,9 @@ pub const Shell = struct {
                 if (self.vars.getPtr(pname)) |slot| {
                     self.allocator.free(slot.*);
                     slot.* = old;
+                } else {
+                    const key = self.allocator.dupe(u8, pname) catch continue;
+                    self.vars.put(key, old) catch {};
                 }
             } else {
                 if (self.vars.fetchRemove(pname)) |kv| {
@@ -1819,11 +1864,84 @@ pub const Shell = struct {
         self.last_exit = 0;
     }
 
+    fn evalCmdMissingDef(self: *Shell, args: []const Sexp, source: []const u8) void {
+        if (args.len < 2) return;
+        const source_copy = self.allocator.dupe(u8, source) catch return;
+
+        var params: [][]const u8 = &.{};
+        const body_idx: usize = if (args.len >= 3 and args[1] == .list) blk: {
+            const plist = args[1].list;
+            var param_names = self.allocator.alloc([]const u8, plist.len) catch return;
+            for (plist, 0..) |p, i| {
+                param_names[i] = self.allocator.dupe(u8, self.sexpToStr(p, source) orelse "") catch "";
+            }
+            params = param_names;
+            break :blk args.len - 1;
+        } else args.len - 1;
+
+        const new_cmd = UserCmd{
+            .params = params,
+            .body = args[body_idx],
+            .source = source_copy,
+        };
+
+        if (self.user_cmds.getPtr("???")) |slot| {
+            self.allocator.free(slot.source);
+            if (slot.params.len > 0) {
+                for (slot.params) |p| self.allocator.free(p);
+                self.allocator.free(slot.params);
+            }
+            slot.* = new_cmd;
+        } else {
+            const name = self.allocator.dupe(u8, "???") catch return;
+            self.user_cmds.put(name, new_cmd) catch {};
+        }
+        self.last_exit = 0;
+    }
+
+    fn evalCmdMissingDel(self: *Shell) void {
+        if (self.user_cmds.fetchRemove("???")) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value.source);
+            if (kv.value.params.len > 0) {
+                for (kv.value.params) |p| self.allocator.free(p);
+                self.allocator.free(kv.value.params);
+            }
+        }
+        self.last_exit = 0;
+    }
+
     fn evalCmdShow(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
         const name = self.sexpToStr(args[0], source) orelse return;
-        if (self.user_cmds.get(name)) |_| {
-            std.debug.print("cmd {s} (defined)\n", .{name});
+        self.showCmd(name);
+    }
+
+    fn evalCmdMissingShow(self: *Shell) void {
+        self.showCmd("???");
+    }
+
+    fn showCmd(self: *Shell, name: []const u8) void {
+        if (self.user_cmds.get(name)) |cmd| {
+            std.debug.print("cmd {s}", .{name});
+            if (cmd.params.len > 0) {
+                std.debug.print("(", .{});
+                for (cmd.params, 0..) |p, i| {
+                    if (i > 0) std.debug.print(", ", .{});
+                    std.debug.print("{s}", .{p});
+                }
+                std.debug.print(")", .{});
+            }
+            const span = sexpSourceSpan(cmd.body, cmd.source);
+            if (span.len > 0) {
+                if (std.mem.indexOfScalar(u8, span, '\n') != null) {
+                    std.debug.print("\n{s}\n", .{span});
+                } else {
+                    std.debug.print(" {s}\n", .{span});
+                }
+            } else {
+                std.debug.print("\n", .{});
+            }
         } else {
             std.debug.print("slash: cmd {s}: not defined\n", .{name});
         }
@@ -1832,8 +1950,41 @@ pub const Shell = struct {
 
     fn evalCmdList(self: *Shell) void {
         var it = self.user_cmds.iterator();
-        while (it.next()) |entry| std.debug.print("cmd {s}\n", .{entry.key_ptr.*});
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            const cmd = entry.value_ptr.*;
+            const span = sexpSourceSpan(cmd.body, cmd.source);
+            if (span.len > 0 and std.mem.indexOfScalar(u8, span, '\n') != null) {
+                std.debug.print("cmd {s} ...\n", .{name});
+            } else if (span.len > 0) {
+                std.debug.print("cmd {s} {s}\n", .{ name, span });
+            } else {
+                std.debug.print("cmd {s}\n", .{name});
+            }
+        }
         self.last_exit = 0;
+    }
+
+    fn sexpSourceSpan(sexp: Sexp, source: []const u8) []const u8 {
+        var lo: u32 = @intCast(source.len);
+        var hi: u32 = 0;
+        sexpSpanWalk(sexp, &lo, &hi);
+        if (lo >= hi) return "";
+        return std.mem.trim(u8, source[lo..hi], " \t\n");
+    }
+
+    fn sexpSpanWalk(sexp: Sexp, lo: *u32, hi: *u32) void {
+        switch (sexp) {
+            .src => |s| {
+                if (s.pos < lo.*) lo.* = s.pos;
+                const end = s.pos + s.len;
+                if (end > hi.*) hi.* = end;
+            },
+            .list => |items| {
+                for (items) |child| sexpSpanWalk(child, lo, hi);
+            },
+            else => {},
+        }
     }
 
     fn evalKey(self: *Shell, args: []const Sexp, source: []const u8) void {
@@ -2150,7 +2301,7 @@ fn expandRegexGlob(alloc: Allocator, arg: []const u8, out: *std.ArrayList([]cons
         out.append(alloc, arg) catch {};
         return;
     };
-    const re = if (parsed.ignore_case) Regex.compileIgnoreCase(parsed.pattern) catch {
+    var re = if (parsed.ignore_case) Regex.compileIgnoreCase(parsed.pattern) catch {
         out.append(alloc, arg) catch {};
         return;
     } else Regex.compile(parsed.pattern) catch {
@@ -2215,7 +2366,7 @@ fn expandGlob(alloc: Allocator, pattern: []const u8, out: *std.ArrayList([]const
         out.append(alloc, pattern) catch {};
         return;
     };
-    const re = Regex.compile(re_pattern) catch {
+    var re = Regex.compile(re_pattern) catch {
         out.append(alloc, pattern) catch {};
         return;
     };

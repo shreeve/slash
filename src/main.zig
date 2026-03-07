@@ -185,12 +185,19 @@ fn needsContinuation(line: []const u8) bool {
     const trimmed = std.mem.trimRight(u8, line, " \t");
     if (trimmed.len == 0) return false;
 
-    // Backslash continuation
     if (trimmed[trimmed.len - 1] == '\\') return true;
 
-    // Open brace without close
     var brace_depth: i32 = 0;
-    for (trimmed) |ch| {
+    var in_sq = false;
+    var in_dq = false;
+    var i: usize = 0;
+    while (i < trimmed.len) : (i += 1) {
+        const ch = trimmed[i];
+        if (ch == '\\' and in_dq and i + 1 < trimmed.len) { i += 1; continue; }
+        if (ch == '\'' and !in_dq) { in_sq = !in_sq; continue; }
+        if (ch == '"' and !in_sq) { in_dq = !in_dq; continue; }
+        if (in_sq or in_dq) continue;
+        if (ch == '#') break;
         if (ch == '{') brace_depth += 1;
         if (ch == '}') brace_depth -= 1;
     }

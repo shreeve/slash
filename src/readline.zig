@@ -247,8 +247,8 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                 if (key_handler) |kh| {
                     const result = historySearch(kh);
                     if (result) |selected| {
-                        @memcpy(line_buf[0..selected.len], selected);
-                        len = selected.len;
+                        len = @min(selected.len, line_buf.len);
+                        @memcpy(line_buf[0..len], selected[0..len]);
                         cursor = len;
                     }
                     refreshLine(line_buf[0..len], cursor);
@@ -262,15 +262,16 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                         if (result) |r| {
                             switch (r.kind) {
                                 .history, .command => {
-                                    @memcpy(line_buf[0..r.text.len], r.text);
-                                    len = r.text.len;
+                                    len = @min(r.text.len, line_buf.len);
+                                    @memcpy(line_buf[0..len], r.text[0..len]);
                                     cursor = len;
                                 },
                                 .directory => {
                                     @memcpy(line_buf[0..2], "cd");
                                     line_buf[2] = ' ';
-                                    @memcpy(line_buf[3..][0..r.text.len], r.text);
-                                    len = 3 + r.text.len;
+                                    const rest = @min(r.text.len, line_buf.len - 3);
+                                    @memcpy(line_buf[3..][0..rest], r.text[0..rest]);
+                                    len = 3 + rest;
                                     cursor = len;
                                 },
                             }
@@ -445,7 +446,7 @@ fn completePath(prefix: []const u8, word_start: usize) TabResult {
                 const full = if (dir_part.len > 0)
                     std.fmt.bufPrint(complete_buf[match_count * 128 ..][0..128], "{s}{s}", .{ dir_part, entry.name }) catch continue
                 else
-                    entry.name;
+                    std.fmt.bufPrint(complete_buf[match_count * 128 ..][0..128], "{s}", .{entry.name}) catch continue;
                 if (match_count == 0) {
                     single_match = full;
                     common_len = full.len;
@@ -500,7 +501,13 @@ const PathCache = struct {
 
     fn refresh(self: *PathCache) void {
         const path_env = std.posix.getenv("PATH") orelse "";
-        const hash = std.hash.Fnv1a_64.hash(path_env);
+        var cwd_buf: [4096]u8 = undefined;
+        const cwd = std.posix.getcwd(&cwd_buf) catch "";
+        var hash_ctx = std.hash.Fnv1a_64.init();
+        hash_ctx.update(path_env);
+        hash_ctx.update("\x00");
+        hash_ctx.update(cwd);
+        const hash = hash_ctx.final();
         if (hash == self.path_hash and self.names.len > 0) return;
         self.path_hash = hash;
 
@@ -519,6 +526,9 @@ const PathCache = struct {
             while (iter.next() catch null) |entry| {
                 if (entry.kind != .file and entry.kind != .sym_link) continue;
                 if (seen.contains(entry.name)) continue;
+                var full_path_buf: [4096]u8 = undefined;
+                const full_path = std.fmt.bufPrint(&full_path_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
+                std.posix.access(full_path, std.posix.X_OK) catch continue;
                 const name = self.alloc.dupe(u8, entry.name) catch continue;
                 list.append(self.alloc, name) catch continue;
                 seen.put(name, {}) catch {};
@@ -781,6 +791,8 @@ fn writeColorized(line: []const u8) void {
 
 const OverlayItem = struct { text: []const u8, suffix: []const u8, kind: ResultKind = .history };
 
+var overlay_return_buf: [4096]u8 = undefined;
+
 fn overlaySearch(
     title: []const u8,
     title_width: usize,
@@ -822,7 +834,13 @@ fn overlaySearch(
         switch (ch[0]) {
             '\r', '\n', 9 => {
                 clearOverlay();
-                if (selected < results.len) return results[selected];
+                if (selected < results.len) {
+                    var item = results[selected];
+                    const tlen = @min(item.text.len, overlay_return_buf.len);
+                    @memcpy(overlay_return_buf[0..tlen], item.text[0..tlen]);
+                    item.text = overlay_return_buf[0..tlen];
+                    return item;
+                }
                 return null;
             },
             27 => {
@@ -880,8 +898,9 @@ fn historySearch(kh: KeyHandler) ?[]const u8 {
     };
     wrapper.saved_fn = search_fn;
     const result = overlaySearch("\x1b[7m History Search: \x1b[0m ", 19, &wrapper.search) orelse return null;
-    @memcpy(save_buf[0..result.text.len], result.text);
-    return save_buf[0..result.text.len];
+    const len = @min(result.text.len, save_buf.len);
+    @memcpy(save_buf[0..len], result.text[0..len]);
+    return save_buf[0..len];
 }
 
 var palette_buf: [4096]u8 = undefined;

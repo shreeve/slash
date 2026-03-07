@@ -1,82 +1,50 @@
-//! Regex — Zig wrapper over Oniguruma
+//! Regex — Zig wrapper over libc POSIX regex (ERE)
 //!
-//! Used by:
-//!   - Generated lexer (pattern matching in next())
-//!   - Executor (=~, !~, try pattern arms)
+//! Used by the executor for =~, !~, try pattern arms, and glob expansion.
+//! The lexer no longer uses regex — it uses generated char-class dispatch.
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("oniguruma.h");
-});
+const c = @cImport(@cInclude("regex.h"));
 
 pub const Regex = struct {
-    inner: c.OnigRegex,
+    inner: c.regex_t,
 
     pub fn compile(pattern: []const u8) !Regex {
-        return compileWithOpts(pattern, c.ONIG_OPTION_NONE);
+        return compileWithOpts(pattern, c.REG_EXTENDED | c.REG_NOSUB);
     }
 
     pub fn compileIgnoreCase(pattern: []const u8) !Regex {
-        return compileWithOpts(pattern, c.ONIG_OPTION_IGNORECASE);
+        return compileWithOpts(pattern, c.REG_EXTENDED | c.REG_NOSUB | c.REG_ICASE);
     }
 
-    fn compileWithOpts(pattern: []const u8, opts: c.OnigOptionType) !Regex {
-        var regex: c.OnigRegex = undefined;
-        var einfo: c.OnigErrorInfo = undefined;
-        const enc = c.ONIG_ENCODING_UTF8();
-        const r = c.onig_new(
-            &regex,
-            pattern.ptr,
-            pattern.ptr + pattern.len,
-            opts,
-            enc,
-            c.ONIG_SYNTAX_DEFAULT(),
-            &einfo,
-        );
-        if (r != c.ONIG_NORMAL) return error.CompileError;
-        return .{ .inner = regex };
+    fn compileWithOpts(pattern: []const u8, flags: c_int) !Regex {
+        var pat_buf: [4096]u8 = undefined;
+        if (pattern.len >= pat_buf.len) return error.CompileError;
+        @memcpy(pat_buf[0..pattern.len], pattern);
+        pat_buf[pattern.len] = 0;
+        var self: Regex = undefined;
+        if (c.regcomp(&self.inner, @ptrCast(&pat_buf), flags) != 0)
+            return error.CompileError;
+        return self;
     }
 
-    /// Anchored match at position `pos` in `source`.
-    /// Returns match length, or null if no match.
-    pub fn matchAt(self: Regex, source: []const u8, pos: usize) ?usize {
-        const r = c.onig_match(
-            self.inner,
-            source.ptr,
-            source.ptr + source.len,
-            source.ptr + pos,
-            null,
-            c.ONIG_OPTION_NONE,
-        );
-        if (r < 0) return null;
-        return @intCast(r);
+    pub fn search(self: *const Regex, source: []const u8) bool {
+        var buf: [8192]u8 = undefined;
+        if (source.len < buf.len) {
+            @memcpy(buf[0..source.len], source);
+            buf[source.len] = 0;
+            return c.regexec(&self.inner, @ptrCast(&buf), 0, null, 0) == 0;
+        }
+        const alloc = std.heap.page_allocator;
+        const z = alloc.alloc(u8, source.len + 1) catch return false;
+        defer alloc.free(z);
+        @memcpy(z[0..source.len], source);
+        z[source.len] = 0;
+        return c.regexec(&self.inner, @ptrCast(z.ptr), 0, null, 0) == 0;
     }
 
-    /// Search for pattern anywhere in `source`.
-    /// Returns true if found.
-    pub fn search(self: Regex, source: []const u8) bool {
-        const r = c.onig_search(
-            self.inner,
-            source.ptr,
-            source.ptr + source.len,
-            source.ptr,
-            source.ptr + source.len,
-            null,
-            c.ONIG_OPTION_NONE,
-        );
-        return r >= 0;
-    }
-
-    pub fn free(self: Regex) void {
-        c.onig_free(self.inner);
+    pub fn free(self: *const Regex) void {
+        c.regfree(@constCast(&self.inner));
     }
 };
 
-pub fn init() void {
-    var encs = [_]c.OnigEncoding{c.ONIG_ENCODING_UTF8()};
-    _ = c.onig_initialize(&encs, 1);
-}
-
-pub fn deinit() void {
-    _ = c.onig_end();
-}

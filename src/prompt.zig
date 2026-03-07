@@ -257,18 +257,20 @@ fn abbreviateHome(path: []const u8, home: []const u8, buf: *[4096]u8) []const u8
 }
 
 /// Reads .git/HEAD to get branch name, walks up from cwd.
+/// Handles both normal repos (.git/HEAD) and worktrees/submodules (.git file with gitdir:).
 /// Returns branch name or short hash for detached HEAD, "" if not a repo.
 fn getGitInfo(buf: *[256]u8, cwd: []const u8) []const u8 {
     var path_buf: [4096]u8 = undefined;
 
     var dir = cwd;
     while (true) {
-        const suffix = "/.git/HEAD";
-        if (dir.len + suffix.len > path_buf.len) break;
+        const git_suffix = "/.git";
+        if (dir.len + git_suffix.len > path_buf.len) break;
         @memcpy(path_buf[0..dir.len], dir);
-        @memcpy(path_buf[dir.len..][0..suffix.len], suffix);
+        @memcpy(path_buf[dir.len..][0..git_suffix.len], git_suffix);
+        const git_path = path_buf[0 .. dir.len + git_suffix.len];
 
-        const head = std.fs.openFileAbsolute(path_buf[0 .. dir.len + suffix.len], .{}) catch {
+        const head = resolveGitHead(&path_buf, git_path) orelse {
             if (std.mem.lastIndexOfScalar(u8, dir, '/')) |sep| {
                 if (sep == 0) break;
                 dir = dir[0..sep];
@@ -295,6 +297,26 @@ fn getGitInfo(buf: *[256]u8, cwd: []const u8) []const u8 {
         return buf[0..branch.len];
     }
     return "";
+}
+
+fn resolveGitHead(path_buf: *[4096]u8, git_path: []const u8) ?std.fs.File {
+    const head_suffix = "/HEAD";
+    if (git_path.len + head_suffix.len > path_buf.len) return null;
+    @memcpy(path_buf[git_path.len..][0..head_suffix.len], head_suffix);
+    if (std.fs.openFileAbsolute(path_buf[0 .. git_path.len + head_suffix.len], .{})) |f| return f else |_| {}
+
+    const git_file = std.fs.openFileAbsolute(git_path, .{}) catch return null;
+    defer git_file.close();
+    var gitdir_buf: [4096]u8 = undefined;
+    const n = git_file.read(&gitdir_buf) catch return null;
+    const line = std.mem.trimRight(u8, gitdir_buf[0..n], "\n\r ");
+    const prefix = "gitdir: ";
+    if (!std.mem.startsWith(u8, line, prefix)) return null;
+    const gitdir = line[prefix.len..];
+    if (gitdir.len + head_suffix.len > path_buf.len) return null;
+    @memcpy(path_buf[0..gitdir.len], gitdir);
+    @memcpy(path_buf[gitdir.len..][0..head_suffix.len], head_suffix);
+    return std.fs.openFileAbsolute(path_buf[0 .. gitdir.len + head_suffix.len], .{}) catch null;
 }
 
 fn formatDuration(buf: *[16]u8, ms: u64) []const u8 {

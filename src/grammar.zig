@@ -785,16 +785,23 @@ fn isRegexSpecial(c: u8) bool {
 }
 
 /// Determine which first bytes a regex can match. Sets flags[ch] = true for each.
+/// Accounts for \w (word chars), and optional atoms (*, ?) that allow matching to
+/// start at the following element.
 fn firstCharsOfRegex(regex: []const u8, flags: *[256]bool) void {
     if (regex.len == 0) return;
+    var consumed: usize = 0;
     switch (regex[0]) {
         '\\' => {
-            if (regex.len > 1) switch (regex[1]) {
-                'n' => flags['\n'] = true,
-                'r' => flags['\r'] = true,
-                't' => flags['\t'] = true,
-                else => flags[regex[1]] = true,
-            };
+            if (regex.len > 1) {
+                switch (regex[1]) {
+                    'n' => flags['\n'] = true,
+                    'r' => flags['\r'] = true,
+                    't' => flags['\t'] = true,
+                    'w' => setWordChars(flags),
+                    else => flags[regex[1]] = true,
+                }
+                consumed = 2;
+            }
         },
         '[' => {
             var i: usize = 1;
@@ -803,8 +810,12 @@ fn firstCharsOfRegex(regex: []const u8, flags: *[256]bool) void {
             if (neg) for (0..256) |c| { flags[c] = true; };
             while (i < regex.len and regex[i] != ']') {
                 if (regex[i] == '\\' and i + 1 < regex.len) {
-                    const ch: u8 = switch (regex[i + 1]) { 'n' => '\n', 'r' => '\r', 't' => '\t', else => regex[i + 1] };
-                    if (neg) { flags[ch] = false; } else { flags[ch] = true; }
+                    if (regex[i + 1] == 'w') {
+                        if (neg) clearWordChars(flags) else setWordChars(flags);
+                    } else {
+                        const ch: u8 = switch (regex[i + 1]) { 'n' => '\n', 'r' => '\r', 't' => '\t', else => regex[i + 1] };
+                        if (neg) { flags[ch] = false; } else { flags[ch] = true; }
+                    }
                     i += 2;
                 } else if (i + 2 < regex.len and regex[i + 1] == '-') {
                     var ch: usize = regex[i];
@@ -817,16 +828,37 @@ fn firstCharsOfRegex(regex: []const u8, flags: *[256]bool) void {
                     i += 1;
                 }
             }
+            consumed = if (i < regex.len) i + 1 else i;
         },
-        '.' => for (0..256) |c| { flags[c] = true; },
+        '.' => {
+            for (0..256) |c| flags[c] = true;
+            consumed = 1;
+        },
         '(' => {
             var i: usize = 1;
             if (i < regex.len and regex[i] == '?') i += 1;
             if (i < regex.len and regex[i] == ':') i += 1;
             if (i < regex.len) firstCharsOfRegex(regex[i..], flags);
         },
-        else => flags[regex[0]] = true,
+        else => { flags[regex[0]] = true; consumed = 1; },
     }
+    if (consumed > 0 and consumed < regex.len and (regex[consumed] == '*' or regex[consumed] == '?')) {
+        firstCharsOfRegex(regex[consumed + 1 ..], flags);
+    }
+}
+
+fn setWordChars(flags: *[256]bool) void {
+    for ('a'..('z' + 1)) |c| flags[c] = true;
+    for ('A'..('Z' + 1)) |c| flags[c] = true;
+    for ('0'..('9' + 1)) |c| flags[c] = true;
+    flags['_'] = true;
+}
+
+fn clearWordChars(flags: *[256]bool) void {
+    for ('a'..('z' + 1)) |c| flags[c] = false;
+    for ('A'..('Z' + 1)) |c| flags[c] = false;
+    for ('0'..('9' + 1)) |c| flags[c] = false;
+    flags['_'] = false;
 }
 
 // =============================================================================
@@ -1024,7 +1056,7 @@ const LexerGenerator = struct {
     fn generateMatchRules(self: *LexerGenerator) !void {
         const num_rules = self.spec.rules.items.len;
 
-        try self.write("    const regex = @import(\"regex.zig\");\n\n");
+        try self.emitPatternMatcher();
 
         // Emit action struct and unified rule table
         try self.write(
@@ -1168,22 +1200,8 @@ const LexerGenerator = struct {
         try self.write("        break :blk d;\n");
         try self.write("    };\n\n");
 
-        // Compiled regex storage
-        try self.print("    var compiled: [{d}]?regex.Regex = .{{null}} ** {d};\n", .{ num_rules, num_rules });
         try self.write(
-            \\    var initialized: bool = false;
-            \\
-            \\    fn ensureInit() void {
-            \\        if (initialized) return;
-            \\        regex.init();
-            \\        for (rules, 0..) |rule, i| {
-            \\            compiled[i] = regex.Regex.compile(rule.pat) catch null;
-            \\        }
-            \\        initialized = true;
-            \\    }
-            \\
             \\    pub fn matchRules(self: *BaseLexer) Token {
-            \\        ensureInit();
             \\        while (true) {
             \\            const ws_start = self.pos;
             \\            while (self.pos < self.source.len and (self.source[self.pos] == ' ' or self.source[self.pos] == '\t'))
@@ -1207,12 +1225,10 @@ const LexerGenerator = struct {
             \\            var best_len: usize = 0;
             \\            var best_rule: usize = {d};
             \\            for (dispatch[self.source[self.pos]]) |ri| {{
-            \\                if (compiled[ri]) |re| {{
-            \\                    if (re.matchAt(self.source, self.pos)) |len| {{
-            \\                        if (len > best_len) {{
-            \\                            best_len = len;
-            \\                            best_rule = ri;
-            \\                        }}
+            \\                if (match.matchAt(rules[ri].pat, self.source, self.pos)) |len| {{
+            \\                    if (len > best_len) {{
+            \\                        best_len = len;
+            \\                        best_rule = ri;
             \\                    }}
             \\                }}
             \\            }}
@@ -1249,6 +1265,104 @@ const LexerGenerator = struct {
             \\            return Token{ .cat = .err, .pre = ws_count, .pos = start, .len = 1 };
             \\        }
             \\    }
+            \\
+        );
+    }
+
+    fn emitPatternMatcher(self: *LexerGenerator) !void {
+        try self.write(
+            \\    const match = struct {
+            \\        fn matchAt(pat: []const u8, source: []const u8, pos: usize) ?usize {
+            \\            const end_si = matchExpr(pat, 0, pat.len, source, pos) orelse return null;
+            \\            if (end_si < pos) return null;
+            \\            return end_si - pos;
+            \\        }
+            \\        fn matchExpr(pat: []const u8, pi_s: usize, pi_e: usize, src: []const u8, si: usize) ?usize {
+            \\            var a = pi_s;
+            \\            while (true) {
+            \\                if (trySeq(pat, a, pi_e, src, si)) |e| return e;
+            \\                a = (findAlt(pat, a, pi_e) orelse return null) + 1;
+            \\            }
+            \\        }
+            \\        fn findAlt(pat: []const u8, pi: usize, pi_e: usize) ?usize {
+            \\            var p = pi;
+            \\            var d: usize = 0;
+            \\            while (p < pi_e) : (p += 1) {
+            \\                switch (pat[p]) {
+            \\                    '\\' => p += 1,
+            \\                    '[' => { p += 1; while (p < pi_e and pat[p] != ']') : (p += 1) { if (pat[p] == '\\' and p + 1 < pi_e) p += 1; } },
+            \\                    '(' => d += 1,
+            \\                    ')' => { if (d == 0) return null; d -= 1; },
+            \\                    '|' => { if (d == 0) return p; },
+            \\                    else => {},
+            \\                }
+            \\            }
+            \\            return null;
+            \\        }
+            \\        fn trySeq(pat: []const u8, pi_s: usize, pi_e: usize, src: []const u8, si_s: usize) ?usize {
+            \\            var pi = pi_s;
+            \\            var si = si_s;
+            \\            while (pi < pi_e) {
+            \\                if (pat[pi] == '|' or pat[pi] == ')') break;
+            \\                const ae = skipAtom(pat, pi, pi_e);
+            \\                const q: u8 = if (ae < pi_e and isQ(pat[ae])) pat[ae] else 0;
+            \\                const rp = ae + @as(usize, if (q != 0) 1 else 0);
+            \\                if (q == 0) { si = matchOne(pat, pi, ae, src, si) orelse return null; pi = rp; continue; }
+            \\                const mn: usize = if (q == '+') 1 else 0;
+            \\                const mx: usize = if (q == '?') 1 else 4096;
+            \\                var pos: [4097]usize = undefined;
+            \\                pos[0] = si;
+            \\                var c: usize = 0;
+            \\                while (c < mx) { const ns = matchOne(pat, pi, ae, src, pos[c]) orelse break; c += 1; pos[c] = ns; }
+            \\                var i: usize = c + 1;
+            \\                while (i > 0) { i -= 1; if (i < mn) break; if (trySeq(pat, rp, pi_e, src, pos[i])) |e| return e; }
+            \\                return null;
+            \\            }
+            \\            return si;
+            \\        }
+            \\        fn matchOne(pat: []const u8, pi: usize, ae: usize, src: []const u8, si: usize) ?usize {
+            \\            if (pi >= ae) return null;
+            \\            switch (pat[pi]) {
+            \\                '.' => return if (si < src.len) si + 1 else null,
+            \\                '\\' => return if (si < src.len and pi + 1 < ae and src[si] == esc(pat[pi + 1])) si + 1 else null,
+            \\                '[' => return if (si < src.len and ccMatch(pat, pi, ae, src[si])) si + 1 else null,
+            \\                '(' => return matchExpr(pat, pi + 1, ae - 1, src, si),
+            \\                else => return if (si < src.len and src[si] == pat[pi]) si + 1 else null,
+            \\            }
+            \\        }
+            \\        fn skipAtom(pat: []const u8, pi: usize, pi_e: usize) usize {
+            \\            if (pi >= pi_e) return pi;
+            \\            switch (pat[pi]) {
+            \\                '\\' => return @min(pi + 2, pi_e),
+            \\                '[' => { var p = pi + 1; if (p < pi_e and pat[p] == '^') p += 1; if (p < pi_e and pat[p] == ']') p += 1;
+            \\                    while (p < pi_e and pat[p] != ']') : (p += 1) { if (pat[p] == '\\' and p + 1 < pi_e) p += 1; }
+            \\                    return if (p < pi_e) p + 1 else p; },
+            \\                '(' => { var p = pi + 1; var d: usize = 1; while (p < pi_e and d > 0) : (p += 1) {
+            \\                    if (pat[p] == '\\' and p + 1 < pi_e) { p += 1; continue; }
+            \\                    if (pat[p] == '[') { p += 1; while (p < pi_e and pat[p] != ']') : (p += 1) { if (pat[p] == '\\' and p + 1 < pi_e) p += 1; } continue; }
+            \\                    if (pat[p] == '(') d += 1; if (pat[p] == ')') d -= 1;
+            \\                } return p; },
+            \\                else => return pi + 1,
+            \\            }
+            \\        }
+            \\        fn esc(ch: u8) u8 { return switch (ch) { 'n' => '\n', 'r' => '\r', 't' => '\t', else => ch }; }
+            \\        fn ccMatch(pat: []const u8, pi: usize, ae: usize, ch: u8) bool {
+            \\            var p = pi + 1;
+            \\            var neg = false;
+            \\            if (p < ae and pat[p] == '^') { neg = true; p += 1; }
+            \\            var hit = false;
+            \\            while (p < ae and pat[p] != ']') {
+            \\                if (pat[p] == '\\' and p + 1 < ae) { p += 1;
+            \\                    if (pat[p] == 'w') { if (isW(ch)) hit = true; } else { if (ch == esc(pat[p])) hit = true; } p += 1;
+            \\                } else if (p + 2 < ae and pat[p + 1] == '-' and pat[p + 2] != ']') {
+            \\                    if (ch >= pat[p] and ch <= pat[p + 2]) hit = true; p += 3;
+            \\                } else { if (ch == pat[p]) hit = true; p += 1; }
+            \\            }
+            \\            return if (neg) !hit else hit;
+            \\        }
+            \\        fn isQ(ch: u8) bool { return ch == '*' or ch == '+' or ch == '?'; }
+            \\        fn isW(ch: u8) bool { return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_'; }
+            \\    };
             \\
         );
     }
@@ -3556,18 +3670,7 @@ const ParserGenerator = struct {
             }
         }
 
-        try writer.writeAll(
-            \\
-            \\// SIMD helpers (fallback if simd.zig not available)
-            \\const simd = struct {
-            \\    fn findByte(haystack: []const u8, needle: u8) usize {
-            \\        for (haystack, 0..) |c, i| if (c == needle) return i;
-            \\        return haystack.len;
-            \\    }
-            \\};
-            \\
-            \\
-        );
+        try writer.writeAll("\n");
 
         // Write lexer code (body only)
         try writer.writeAll(lexer_body);
