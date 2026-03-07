@@ -678,19 +678,39 @@ fn showCompletions(line: []const u8, _: usize, _: usize) void {
     writeAll(line);
 }
 
+var suggest_cache: [4096]u8 = undefined;
+var suggest_cache_len: usize = 0;
+
 fn updateGhost(line: []const u8) void {
     ghost_text = "";
     if (line.len < 2) return;
+
+    if (suggest_cache_len > line.len and
+        std.mem.startsWith(u8, suggest_cache[0..suggest_cache_len], line))
+    {
+        const suffix = suggest_cache[line.len..suggest_cache_len];
+        if (suffix.len <= ghost_buf.len) {
+            @memcpy(ghost_buf[0..suffix.len], suffix);
+            ghost_text = ghost_buf[0..suffix.len];
+        }
+        return;
+    }
+
     if (key_handler) |kh| {
         if (kh.suggest) |suggest_fn| {
             if (suggest_fn(line)) |suggestion| {
                 if (suggestion.len > line.len and std.mem.startsWith(u8, suggestion, line)) {
+                    const n = @min(suggestion.len, suggest_cache.len);
+                    @memcpy(suggest_cache[0..n], suggestion[0..n]);
+                    suggest_cache_len = n;
                     const suffix = suggestion[line.len..];
                     if (suffix.len <= ghost_buf.len) {
                         @memcpy(ghost_buf[0..suffix.len], suffix);
                         ghost_text = ghost_buf[0..suffix.len];
                     }
                 }
+            } else {
+                suggest_cache_len = 0;
             }
         }
     }

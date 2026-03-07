@@ -175,9 +175,8 @@ pub const Lexer = struct {
 
         var tok = self.base.matchRules();
 
-        // lparen_tight is only meaningful after an ident (for cmd name(params)).
-        // Everywhere else (start of line, after operators), convert to regular lparen.
-        if (tok.cat == .lparen_tight and self.last_cat != .ident) {
+        // lparen_tight is meaningful after an ident or ??? (for cmd name(params) / cmd ???(name)).
+        if (tok.cat == .lparen_tight and self.last_cat != .ident and self.last_cat != .missing) {
             tok.cat = .lparen;
         }
 

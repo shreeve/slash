@@ -256,10 +256,41 @@ fn abbreviateHome(path: []const u8, home: []const u8, buf: *[4096]u8) []const u8
     return path;
 }
 
+var git_cache_cwd: [4096]u8 = undefined;
+var git_cache_cwd_len: usize = 0;
+var git_cache_result: [256]u8 = undefined;
+var git_cache_result_len: usize = 0;
+
 /// Reads .git/HEAD to get branch name, walks up from cwd.
 /// Handles both normal repos (.git/HEAD) and worktrees/submodules (.git file with gitdir:).
 /// Returns branch name or short hash for detached HEAD, "" if not a repo.
+/// Caches by cwd — skips filesystem work when the directory hasn't changed.
 fn getGitInfo(buf: *[256]u8, cwd: []const u8) []const u8 {
+    if (cwd.len == git_cache_cwd_len and cwd.len <= git_cache_cwd.len and
+        std.mem.eql(u8, cwd, git_cache_cwd[0..git_cache_cwd_len]))
+    {
+        if (git_cache_result_len > 0) {
+            @memcpy(buf[0..git_cache_result_len], git_cache_result[0..git_cache_result_len]);
+            return buf[0..git_cache_result_len];
+        }
+        return "";
+    }
+
+    const result = getGitInfoUncached(buf, cwd);
+
+    if (cwd.len <= git_cache_cwd.len) {
+        @memcpy(git_cache_cwd[0..cwd.len], cwd);
+        git_cache_cwd_len = cwd.len;
+    }
+    git_cache_result_len = result.len;
+    if (result.len > 0) {
+        @memcpy(git_cache_result[0..result.len], result);
+    }
+
+    return result;
+}
+
+fn getGitInfoUncached(buf: *[256]u8, cwd: []const u8) []const u8 {
     var path_buf: [4096]u8 = undefined;
 
     var dir = cwd;

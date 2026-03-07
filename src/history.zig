@@ -103,14 +103,14 @@ pub const Db = struct {
         return results.items;
     }
 
-    pub fn suggest(self: *const Db, alloc: std.mem.Allocator, prefix: []const u8) ?[]const u8 {
+    pub fn suggest(self: *const Db, _: std.mem.Allocator, prefix: []const u8) ?[]const u8 {
         if (prefix.len < 2) return null;
         var i = self.entries.items.len;
         while (i > 0) {
             i -= 1;
             const cmd = self.entries.items[i].command;
             if (cmd.len > prefix.len and std.mem.startsWith(u8, cmd, prefix))
-                return alloc.dupe(u8, cmd) catch null;
+                return cmd;
         }
         return null;
     }

@@ -2366,13 +2366,13 @@ fn expandGlob(alloc: Allocator, pattern: []const u8, out: *std.ArrayList([]const
         out.append(alloc, pattern) catch {};
         return;
     };
+    defer alloc.free(re_pattern);
     var re = Regex.compile(re_pattern) catch {
         out.append(alloc, pattern) catch {};
         return;
     };
     defer re.free();
 
-    // Split pattern into directory and filename parts
     var dir_end: usize = 0;
     for (pattern, 0..) |ch, i| {
         if (ch == '/') dir_end = i + 1;
@@ -2398,6 +2398,8 @@ fn expandGlob(alloc: Allocator, pattern: []const u8, out: *std.ArrayList([]const
             alloc.dupe(u8, entry.name) catch continue;
         if (re.search(full)) {
             matches.append(alloc, full) catch {};
+        } else {
+            alloc.free(full);
         }
     }
 

@@ -225,7 +225,8 @@ defaults {
 #   ~|^foo.*|i       pipe delimiter, case-insensitive
 #   ~!bar$!          bang delimiter
 #   ~#\d{3}#g        hash delimiter, global
-#   ~/pattern/i      slash delimiter (/ is fine here — no ambiguity)
+#   Note: / cannot be used as a standalone regex delimiter because
+#   ~/path is a valid tilde-expansion path. Use ~|pattern|i instead.
 #
 # The lexer handles this in the generated next() function, not as a
 # regex rule, since the delimiter character varies.
