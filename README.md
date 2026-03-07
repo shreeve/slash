@@ -207,12 +207,12 @@ Supports `%t` (time), `%u` (user), `%h` (host), `%d` (directory), `%g` (git),
 `%e` (exit code), `%D` (duration), `%$` (colored prompt char), `%fg`/`%bg`
 (hex colors), `%>` (powerline arrow), and `%r` (reset).
 
-### History and SQLite
+### History
 
-All persistent state lives in SQLite at `~/.slash/history.db` — no flat files.
-Command history records the command, working directory, exit code, duration,
-and timestamp. SQLite WAL mode enables sharing across concurrent Slash
-instances. `Ctrl+R` opens incremental search with live filtering.
+Command history is stored in `~/.slash/history` as tab-separated text, loaded
+into memory on startup. Each entry records the command, working directory, exit
+code, duration, and timestamp. `Ctrl+R` opens incremental search with live
+filtering. Directory frecency for `j` is derived from history cwd data.
 
 Directory frecency (frequency + recency) is derived from the history table's
 working directory column — no separate tracking needed. The `j` command and
@@ -257,8 +257,8 @@ main.zig                                       (CLI + REPL)
 lexer.zig                                      (shell-specific lexer extensions)
 readline.zig                                   (line editing, highlighting, completion)
 prompt.zig                                     (prompt rendering, format escapes)
-history.zig                                    (SQLite history + frecency)
-regex.zig                                      (Oniguruma C API wrapper)
+history.zig                                    (flat-file history + frecency)
+regex.zig                                      (libc POSIX regex wrapper)
 ```
 
 The compilation pipeline is:
@@ -284,9 +284,8 @@ the parsed s-expression for any input.
 | `src/main.zig` | Entry point, CLI flags, REPL loop |
 | `src/readline.zig` | Line editing, key bindings, syntax highlighting, tab completion |
 | `src/prompt.zig` | Prompt rendering with format escapes and git status |
-| `src/history.zig` | SQLite interface for command history and directory frecency |
-| `src/regex.zig` | Oniguruma regex wrapper (Zig FFI) |
-| `regex/` | Oniguruma 6.9.9 C source (compiled by `build.zig`) |
+| `src/history.zig` | Flat-file history and directory frecency (`~/.slash/history`) |
+| `src/regex.zig` | libc POSIX regex wrapper (ERE) for `=~`, `!~`, glob expansion |
 
 ---
 

@@ -662,7 +662,7 @@ raw tokens through, expansion happens at runtime:
 | Feature | Where |
 |---------|-------|
 | Glob expansion (`*.zig`, `file[0-9]`) | Expander converts glob to regex, matches against directory entries |
-| Regex glob expansion (`~\|pattern\|`) | Expander compiles Oniguruma regex, matches against directory entries |
+| Regex glob expansion (`~\|pattern\|`) | Expander compiles libc POSIX regex, matches against directory entries |
 | Brace expansion (`{a,b,c}`) | Expander checks `pre=0` on LBRACE to distinguish from block syntax |
 | Variable interpolation in strings | Expander parses `$name` inside `string_dq` tokens |
 | Tilde expansion (`~/foo`) | Expander handles `~` prefix in idents |
