@@ -100,6 +100,8 @@ check "precedence mul+add"      "x = 2 + 3 * 4"             "(assign x (add 2 (m
 check "precedence parens"       "x = (1 + 2) * 3"           "(assign x (mul (add 1 2) 3))"
 check "assign default"          'x = $y ?? 0'               "(assign x (default \$y 0))"
 check "assign capture"          'x = $(ls)'                 "(assign x (capture (cmd ls)))"
+check "match rhs expr paren"    'if $x =~ (1) { echo yes }' "(if (match \$x 1) (block (cmd echo yes)))"
+check "nomatch rhs expr var"    'if $x !~ $y { echo no }'   "(if (nomatch \$x \$y) (block (cmd echo no)))"
 check "unset variable"          "name = -"                  "(unset name)"
 
 # ==========================================================================
@@ -325,6 +327,42 @@ check_script() {
     fi
 }
 
+check_script_raw() {
+    local label="$1"
+    local script="$2"
+    local expect="$3"
+    local actual
+    local tmpf="/tmp/_slash_test_raw_$$.slash"
+    printf '%s' "$script" > "$tmpf"
+    actual=$("$SLASH" "$tmpf" 2>/dev/null)
+    rm -f "$tmpf"
+    if [ "$actual" = "$expect" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: ${label}\n    expect: ${expect}\n    actual: ${actual}\n"
+    fi
+}
+
+check_script_error() {
+    local label="$1"
+    local script="$2"
+    local actual
+    local tmpf="/tmp/_slash_test_err_$$.slash"
+    printf '%s\n' "$script" > "$tmpf"
+    actual=$("$SLASH" "$tmpf" 2>&1 || true)
+    rm -f "$tmpf"
+    case "$actual" in
+        *"parse error"*)
+            PASS=$((PASS + 1))
+            ;;
+        *)
+            FAIL=$((FAIL + 1))
+            ERRORS="${ERRORS}\n  FAIL: ${label}\n    expect parse error\n    actual: ${actual}\n"
+            ;;
+    esac
+}
+
 check_script "heredoc literal" \
     "$(printf "cat '''\n    hello world\n    '''\n")" \
     "hello world"
@@ -376,6 +414,13 @@ check_script "exec if true" \
 check_script "exec if false else" \
     "$(printf 'if false { echo y } else { echo n }\n')" \
     "n"
+
+check_script_raw "exec no trailing newline" \
+    'echo no-newline' \
+    "no-newline"
+
+check_script_error "exec malformed dedent" \
+    "$(printf 'if true\n    echo yes\n  echo bad\n')"
 
 check_script "exec indent if else" \
     "$(printf 'if true\n    echo yes\nelse\n    echo no\n')" \
