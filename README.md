@@ -127,6 +127,10 @@ port = $1 ?? 8080
 cmd o open ${* ?? "."}
 ```
 
+In expression contexts, `??` currently falls back when the left side evaluates
+to `0`. In braced-variable/string contexts, it behaves like a default for
+unset/empty values.
+
 **Redirections** — full Unix set:
 
 ```
@@ -196,8 +200,9 @@ by frecency. Type a number at the next prompt to jump.
 
 ### Prompt
 
-Rich out of the box. Git branch (via `.git/HEAD`), command
-duration, and exit codes are all shown. Fully configurable via format escapes:
+Rich out of the box. The default prompt shows time, user/host, and directory.
+Git branch (via `.git/HEAD`), command duration, and exit codes are available
+through prompt escapes. Fully configurable via format strings:
 
 ```
 PROMPT="%bg(#43669d)%fg(#ecede8) %t %bg(#81a1c7)%fg(#43669d)%>%fg(#ecede8) %u@%h %r%fg(#81a1c7)%>%fg(#ecede8) %d>%r "
@@ -227,11 +232,12 @@ is computed when multiple matches exist.
 
 ### Job Control
 
-Implemented correctly, following the POSIX model. Every pipeline runs in its
-own process group. `Ctrl+C` kills the pipeline, not the shell. `Ctrl+Z` stops
-the foreground job. `fg`, `bg`, and `jobs` work as expected. Both parent and
-child call `setpgid` to close the fork race condition. All signals are reset
-to defaults before `exec` in children.
+Slash supports POSIX-style job control: foreground pipelines get their own
+process groups, `Ctrl+C` targets the foreground job instead of the shell,
+`Ctrl+Z` stops the foreground job, and `fg`, `bg`, and `jobs` are available.
+Both parent and child call `setpgid` to close the fork race condition. Signal
+defaults are restored before `exec` in children. Background reaping is
+poll-based at prompt boundaries rather than using a `SIGCHLD` handler.
 
 ### Key Bindings
 

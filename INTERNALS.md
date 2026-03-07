@@ -123,7 +123,7 @@ context-sensitive tokenization using state variables.
 | Token | Symbol | Description |
 |-------|--------|-------------|
 | `assign` | `=` | Assignment |
-| `default_op` | `??` | Default value (if unset or empty) |
+| `default_op` | `??` | Default value (expression fallback currently treats `0` as missing) |
 
 **Punctuation**
 
@@ -543,6 +543,7 @@ Slash sets these signals to `SIG_IGN` at startup in `main.zig`:
 
 There is no `SIGCHLD` handler — background job reaping is done by polling
 with `waitpid(-1, WNOHANG)` in `reapAndReport()` at each prompt cycle.
+This keeps the runtime simpler, but means background status updates are prompt-driven.
 `SIGPIPE` is not explicitly handled by the shell; children get the kernel
 default.
 
