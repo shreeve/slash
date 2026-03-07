@@ -410,6 +410,7 @@ pub fn lineNeedsContinuation(line: []const u8) bool {
     var last_text: []const u8 = "";
     var last_cat: TokenCat = .eof;
     var saw_lbrace = false;
+    var saw_unterminated_quote = false;
 
     while (true) {
         const tok = lex.next();
@@ -417,6 +418,13 @@ pub fn lineNeedsContinuation(line: []const u8) bool {
             .eof => break,
             .comment, .newline => continue,
             .lbrace => saw_lbrace = true,
+            .err => {
+                const text = lex.text(tok);
+                if (text.len == 1 and (text[0] == '"' or text[0] == '\'')) {
+                    saw_unterminated_quote = true;
+                    break;
+                }
+            },
             else => {},
         }
         if (sig_count == 0) first_text = lex.text(tok);
@@ -425,6 +433,7 @@ pub fn lineNeedsContinuation(line: []const u8) bool {
         last_text = lex.text(tok);
     }
 
+    if (saw_unterminated_quote) return true;
     if (lex.base.paren > 0 or lex.base.brace > 0) return true;
 
     switch (last_cat) {

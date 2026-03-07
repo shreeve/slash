@@ -1092,7 +1092,21 @@ pub const Shell = struct {
         for (args) |child| {
             self.eval(child, source);
             if (self.flow != .normal) return;
-            if (self.last_exit != 0) return;
+            if (self.last_exit != 0 and shouldAbortScriptOnFailure(child)) return;
+        }
+    }
+
+    fn shouldAbortScriptOnFailure(sexp: Sexp) bool {
+        switch (sexp) {
+            .list => |items| {
+                if (items.len > 0 and items[0] == .tag) {
+                    const tag = items[0].tag;
+                    if (tag == .@"if" or tag == .unless or tag == .@"while" or tag == .until or tag == .@"for" or tag == .@"try")
+                        return false;
+                }
+                return true;
+            },
+            else => return true,
         }
     }
 
