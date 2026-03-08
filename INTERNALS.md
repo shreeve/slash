@@ -631,7 +631,7 @@ These are registered in `isBuiltin()` in `exec.zig`:
 
 | Command | Description |
 |---------|-------------|
-| `cd` | Change directory (file-aware), history records cwd for frecency |
+| `cd` | Change directory (file-aware), updates session directory MRU for `j` |
 | `..` / `...` / `....` | Go up 1, 2, 3, ... directories (dynamic dot-counter) |
 | `echo` | Print arguments |
 | `true` / `false` | Exit 0 / Exit 1 |
@@ -640,7 +640,7 @@ These are registered in `isBuiltin()` in `exec.zig`:
 | `jobs` | List all jobs |
 | `fg` / `bg` | Job control (foreground / background) |
 | `history` | Search/display command history |
-| `j` | Fuzzy jump to frecency-ranked directory match |
+| `j` | List session MRU directories (deduped), optionally filtered by substring |
 | `exit` | Exit current context (command, script, or shell) |
 | `source` | Execute a script in current shell context |
 | `set` | Set, show, reset, or list shell options |

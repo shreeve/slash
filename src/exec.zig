@@ -62,6 +62,10 @@ pub const Shell = struct {
     j_list: [9][]const u8 = .{""} ** 9,
     j_count: u8 = 0,
 
+    // Session MRU directories (most recent first, deduped)
+    dir_mru: [9][]const u8 = .{""} ** 9,
+    dir_mru_count: u8 = 0,
+
     // Key bindings (key combo → command string)
     key_bindings: std.StringHashMap([]const u8),
 
@@ -92,6 +96,7 @@ pub const Shell = struct {
         self.interactive = true;
         _ = libc.setpgid(0, self.shell_pgid);
         _ = libc.tcsetpgrp(self.tty_fd, self.shell_pgid);
+        self.noteSessionCwd();
     }
 
     pub fn setArgs(self: *Shell, script_args: []const []const u8) void {
@@ -136,6 +141,63 @@ pub const Shell = struct {
             }
         }
         self.key_bindings.deinit();
+        self.clearJList();
+        self.clearSessionDirs();
+    }
+
+    fn clearJList(self: *Shell) void {
+        const count: usize = @intCast(self.j_count);
+        for (self.j_list[0..count]) |path| {
+            if (path.len > 0) self.allocator.free(path);
+        }
+        self.j_count = 0;
+        for (&self.j_list) |*slot| slot.* = "";
+    }
+
+    fn clearSessionDirs(self: *Shell) void {
+        const count: usize = @intCast(self.dir_mru_count);
+        for (self.dir_mru[0..count]) |path| {
+            if (path.len > 0) self.allocator.free(path);
+        }
+        self.dir_mru_count = 0;
+        for (&self.dir_mru) |*slot| slot.* = "";
+    }
+
+    fn noteSessionCwd(self: *Shell) void {
+        var cwd_buf: [4096]u8 = undefined;
+        const cwd = posix.getcwd(&cwd_buf) catch return;
+        self.noteSessionDir(cwd);
+    }
+
+    fn noteSessionDir(self: *Shell, cwd: []const u8) void {
+        if (cwd.len == 0) return;
+
+        const count: usize = @intCast(self.dir_mru_count);
+        for (0..count) |i| {
+            if (std.mem.eql(u8, self.dir_mru[i], cwd)) {
+                const existing = self.dir_mru[i];
+                var j = i;
+                while (j > 0) : (j -= 1) {
+                    self.dir_mru[j] = self.dir_mru[j - 1];
+                }
+                self.dir_mru[0] = existing;
+                return;
+            }
+        }
+
+        const duped = self.allocator.dupe(u8, cwd) catch return;
+        if (self.dir_mru_count == self.dir_mru.len) {
+            const last = self.dir_mru.len - 1;
+            if (self.dir_mru[last].len > 0) self.allocator.free(self.dir_mru[last]);
+        } else {
+            self.dir_mru_count += 1;
+        }
+        const new_count: usize = @intCast(self.dir_mru_count);
+        var i = new_count - 1;
+        while (i > 0) : (i -= 1) {
+            self.dir_mru[i] = self.dir_mru[i - 1];
+        }
+        self.dir_mru[0] = duped;
     }
 
     // =========================================================================
@@ -534,6 +596,7 @@ pub const Shell = struct {
                         self.cleanupProcSubs(procsub_fds.items);
                         return;
                     };
+                    self.noteSessionCwd();
                     self.last_exit = 0;
                     self.cleanupProcSubs(procsub_fds.items);
                     return;
@@ -1585,7 +1648,14 @@ pub const Shell = struct {
                 if (j > 0 and pos < buf.len) { buf[pos] = '/'; pos += 1; }
                 if (pos + 2 <= buf.len) { buf[pos] = '.'; buf[pos + 1] = '.'; pos += 2; }
             }
-            if (pos > 0) posix.chdir(buf[0..pos]) catch {};
+            if (pos > 0) {
+                posix.chdir(buf[0..pos]) catch |err| {
+                    std.debug.print("cd: {s}: {s}\n", .{ buf[0..pos], @errorName(err) });
+                    self.last_exit = 1;
+                    return true;
+                };
+                self.noteSessionCwd();
+            }
             self.last_exit = 0;
             return true;
         }
@@ -1618,6 +1688,7 @@ pub const Shell = struct {
             self.last_exit = 1;
             return;
         };
+        self.noteSessionCwd();
         self.last_exit = 0;
     }
 
@@ -1728,24 +1799,17 @@ pub const Shell = struct {
     }
 
     fn builtinJ(self: *Shell, argv: []const []const u8) void {
-        const hdb = self.history_db orelse {
-            std.debug.print("j: database not available\n", .{});
-            self.last_exit = 1;
-            return;
-        };
         const query = if (argv.len > 1) argv[1] else "";
-        const scored = hdb.frecency(self.allocator, query, if (query.len > 0) 50 else 9);
-        defer {
-            for (scored) |entry| self.allocator.free(entry.path);
-            if (scored.len > 0) self.allocator.free(scored);
-        }
         var filtered: [9][]const u8 = .{""} ** 9;
-        var count: u8 = 0;
-        for (scored) |entry| {
-            if (count >= 9) break;
-            filtered[count] = entry.path;
+        var count: usize = 0;
+        const mru_count: usize = @intCast(self.dir_mru_count);
+        for (self.dir_mru[0..mru_count]) |path| {
+            if (query.len > 0 and std.mem.indexOf(u8, path, query) == null) continue;
+            filtered[count] = path;
             count += 1;
+            if (count >= filtered.len) break;
         }
+
         if (count == 0) {
             if (query.len > 0)
                 std.debug.print("j: no matches for '{s}'\n", .{query})
@@ -1754,21 +1818,18 @@ pub const Shell = struct {
             self.last_exit = 1;
             return;
         }
-        // j foo — jump to first match
-        if (argv.len > 1) {
-            posix.chdir(filtered[0]) catch |err| {
-                std.debug.print("j: {s}: {s}\n", .{ filtered[0], @errorName(err) });
+
+        // j [query] — list and store for digit jump
+        self.clearJList();
+        for (filtered[0..count], 0..) |path, i| {
+            std.debug.print("{d} {s}\n", .{ i + 1, path });
+            self.j_list[i] = self.allocator.dupe(u8, path) catch {
+                std.debug.print("j: out of memory\n", .{});
+                self.clearJList();
                 self.last_exit = 1;
                 return;
             };
-            self.last_exit = 0;
-            return;
-        }
-        // j — list and store for digit jump
-        self.j_count = count;
-        for (filtered[0..count], 0..) |path, i| {
-            std.debug.print("{d} {s}\n", .{ i + 1, path });
-            self.j_list[i] = path;
+            self.j_count = @intCast(i + 1);
         }
         self.last_exit = 0;
     }
@@ -1784,6 +1845,7 @@ pub const Shell = struct {
             self.last_exit = 1;
             return;
         };
+        self.noteSessionCwd();
         self.last_exit = 0;
     }
 

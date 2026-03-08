@@ -47,19 +47,11 @@ var active_prompt: []const u8 = "$ ";
 var active_prompt_len: usize = 2;
 var ghost_text: []const u8 = "";
 
-pub const ResultKind = enum { history, directory, command };
-
-pub const PaletteResult = struct {
-    text: []const u8,
-    kind: ResultKind,
-};
-
 pub const KeyHandler = struct {
     lookup: *const fn (combo: []const u8) ?[]const u8,
     exec: *const fn (cmd: []const u8) void,
     search: ?*const fn (alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 = null,
     suggest: ?*const fn (prefix: []const u8) ?[]const u8 = null,
-    palette: ?*const fn (alloc: std.mem.Allocator, query: []const u8) []PaletteResult = null,
     eval_math: ?*const fn (expr: []const u8) ?[]const u8 = null,
     user_cmd_names: ?*const fn () []const []const u8 = null,
     shell_var_names: ?*const fn () []const []const u8 = null,
@@ -173,6 +165,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                                 len = @min(h.len, line_buf.len);
                                 @memcpy(line_buf[0..len], h[0..len]);
                                 cursor = len;
+                                updateGhost(line_buf[0..len]);
                                 refreshLine(line_buf[0..len], cursor);
                                 break;
                             }
@@ -188,6 +181,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                                 len = saved_len;
                                 @memcpy(line_buf[0..len], save_buf[0..len]);
                                 cursor = len;
+                                updateGhost(line_buf[0..len]);
                                 refreshLine(line_buf[0..len], cursor);
                                 break;
                             }
@@ -197,6 +191,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                                 len = @min(h.len, line_buf.len);
                                 @memcpy(line_buf[0..len], h[0..len]);
                                 cursor = len;
+                                updateGhost(line_buf[0..len]);
                                 refreshLine(line_buf[0..len], cursor);
                                 break;
                             }
@@ -255,29 +250,49 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                 }
             },
             16 => {
-                // Ctrl+P: command palette
-                if (key_handler) |kh| {
-                    if (kh.palette != null) {
-                        const result = paletteSearch(kh);
-                        if (result) |r| {
-                            switch (r.kind) {
-                                .history, .command => {
-                                    len = @min(r.text.len, line_buf.len);
-                                    @memcpy(line_buf[0..len], r.text[0..len]);
-                                    cursor = len;
-                                },
-                                .directory => {
-                                    @memcpy(line_buf[0..2], "cd");
-                                    line_buf[2] = ' ';
-                                    const rest = @min(r.text.len, line_buf.len - 3);
-                                    @memcpy(line_buf[3..][0..rest], r.text[0..rest]);
-                                    len = 3 + rest;
-                                    cursor = len;
-                                },
-                            }
-                        }
-                        ghost_text = "";
+                // Ctrl+P: previous history entry (prefix-matching)
+                if (hist_pos == history.count) {
+                    @memcpy(save_buf[0..len], line_buf[0..len]);
+                    saved_len = len;
+                }
+                var search_pos = hist_pos;
+                while (search_pos > 0) {
+                    search_pos -= 1;
+                    const h = history.get(search_pos);
+                    if (saved_len == 0 or (h.len >= saved_len and std.mem.eql(u8, h[0..saved_len], save_buf[0..saved_len]))) {
+                        hist_pos = search_pos;
+                        len = @min(h.len, line_buf.len);
+                        @memcpy(line_buf[0..len], h[0..len]);
+                        cursor = len;
+                        updateGhost(line_buf[0..len]);
                         refreshLine(line_buf[0..len], cursor);
+                        break;
+                    }
+                }
+            },
+            14 => {
+                // Ctrl+N: next history entry (prefix-matching)
+                var search_pos = hist_pos;
+                while (search_pos < history.count) {
+                    search_pos += 1;
+                    if (search_pos == history.count) {
+                        hist_pos = search_pos;
+                        len = saved_len;
+                        @memcpy(line_buf[0..len], save_buf[0..len]);
+                        cursor = len;
+                        updateGhost(line_buf[0..len]);
+                        refreshLine(line_buf[0..len], cursor);
+                        break;
+                    }
+                    const h = history.get(search_pos);
+                    if (saved_len == 0 or (h.len >= saved_len and std.mem.eql(u8, h[0..saved_len], save_buf[0..saved_len]))) {
+                        hist_pos = search_pos;
+                        len = @min(h.len, line_buf.len);
+                        @memcpy(line_buf[0..len], h[0..len]);
+                        cursor = len;
+                        updateGhost(line_buf[0..len]);
+                        refreshLine(line_buf[0..len], cursor);
+                        break;
                     }
                 }
             },
@@ -840,7 +855,7 @@ fn writeColorized(line: []const u8) void {
     }
 }
 
-const OverlayItem = struct { text: []const u8, suffix: []const u8, kind: ResultKind = .history };
+const OverlayItem = struct { text: []const u8, suffix: []const u8 };
 
 var overlay_return_buf: [4096]u8 = undefined;
 
@@ -952,36 +967,6 @@ fn historySearch(kh: KeyHandler) ?[]const u8 {
     const len = @min(result.text.len, save_buf.len);
     @memcpy(save_buf[0..len], result.text[0..len]);
     return save_buf[0..len];
-}
-
-var palette_buf: [4096]u8 = undefined;
-
-fn paletteSearch(kh: KeyHandler) ?PaletteResult {
-    const palette_fn = kh.palette orelse return null;
-    const wrapper = struct {
-        var saved_fn: *const fn (std.mem.Allocator, []const u8) []PaletteResult = undefined;
-        fn search(alloc: std.mem.Allocator, query: []const u8) []OverlayItem {
-            const results = saved_fn(alloc, query);
-            for (results, 0..) |r, i| {
-                if (i >= 32) break;
-                overlay_items_buf[i] = .{
-                    .text = r.text,
-                    .kind = r.kind,
-                    .suffix = switch (r.kind) {
-                        .history => "  \x1b[90m(history)\x1b[0m",
-                        .directory => "  \x1b[90m(dir)\x1b[0m",
-                        .command => "  \x1b[90m(cmd)\x1b[0m",
-                    },
-                };
-            }
-            return overlay_items_buf[0..@min(results.len, 32)];
-        }
-    };
-    wrapper.saved_fn = palette_fn;
-    const result = overlaySearch("\x1b[7m Palette: \x1b[0m ", 12, &wrapper.search) orelse return null;
-    const len = @min(result.text.len, palette_buf.len);
-    @memcpy(palette_buf[0..len], result.text[0..len]);
-    return .{ .text = palette_buf[0..len], .kind = result.kind };
 }
 
 fn clearOverlay() void {

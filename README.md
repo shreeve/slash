@@ -191,12 +191,13 @@ First-class, not a plugin:
 cd projects/slash                     # go there, record it
 ..                                    # up one level (no cd needed)
 ...                                   # up two levels
-j slash                               # fuzzy jump to frecent match
+j slash                               # list recent session dirs matching "slash"
 /tmp                                  # auto-cd (just type the path)
 ```
 
-Press `Esc-=` (or type `j`) to list your most recent directories ranked
-by frecency. Type a number at the next prompt to jump.
+Type `j` to list your most recent directories for this session (MRU, deduped).
+Type a number (1-9) at the next prompt to jump. If you want a hotkey, bind one
+with `key esc-= "j"`.
 
 ### Prompt
 
@@ -217,11 +218,7 @@ Supports `%t` (time), `%u` (user), `%h` (host), `%d` (directory), `%g` (git),
 Command history is stored in `~/.slash/history` as tab-separated text, loaded
 into memory on startup. Each entry records the command, working directory, exit
 code, duration, and timestamp. `Ctrl+R` opens incremental search with live
-filtering. Directory frecency for `j` is derived from history cwd data.
-
-Directory frecency (frequency + recency) is derived from the history table's
-working directory column — no separate tracking needed. The `j` command and
-the `j` directory listing both use this data.
+filtering.
 
 ### Tab Completion
 
@@ -263,7 +260,7 @@ main.zig                                       (CLI + REPL)
 lexer.zig                                      (shell-specific lexer extensions)
 readline.zig                                   (line editing, highlighting, completion)
 prompt.zig                                     (prompt rendering, format escapes)
-history.zig                                    (flat-file history + frecency)
+history.zig                                    (flat-file history)
 regex.zig                                      (libc POSIX regex wrapper)
 ```
 
@@ -290,7 +287,7 @@ the parsed s-expression for any input.
 | `src/main.zig` | Entry point, CLI flags, REPL loop |
 | `src/readline.zig` | Line editing, key bindings, syntax highlighting, tab completion |
 | `src/prompt.zig` | Prompt rendering with format escapes, git branch, duration |
-| `src/history.zig` | Flat-file history and directory frecency (`~/.slash/history`) |
+| `src/history.zig` | Flat-file history (`~/.slash/history`) |
 | `src/regex.zig` | libc POSIX regex wrapper (ERE) for `=~`, `!~`, glob expansion |
 
 ---
@@ -336,7 +333,7 @@ config file. That is enough.
 ## Status
 
 Slash is under active development. The parser, executor, job control, readline,
-syntax highlighting, tab completion, history, directory frecency, prompt, and
+syntax highlighting, tab completion, history, directory navigation, prompt, and
 key bindings are all working. See [INTERNALS.md](INTERNALS.md) for technical
 deep-dives into the grammar, parser, and execution model.
 

@@ -14,7 +14,7 @@ exec.zig     (walks s-expressions, fork/exec/pipe, builtins, job control)
 main.zig     (CLI entry point, REPL loop, key bindings, continuation logic)
 readline.zig (line editor: raw mode, cursor, tab completion, highlighting, overlay search)
 prompt.zig   (prompt rendering: format escapes, git branch, duration)
-history.zig  (flat-file command history, search, suggest, frecency)
+history.zig  (flat-file command history, search, suggest)
 regex.zig    (libc POSIX regex wrapper for executor =~/!~/globs)
 ```
 
@@ -40,7 +40,7 @@ exec → lexer → parser (BaseLexer)
 - `src/main.zig` — entry point, CLI flags, REPL loop
 - `src/readline.zig` — line editing, key bindings, syntax highlighting, tab completion
 - `src/prompt.zig` — prompt rendering with format escapes, git branch (reads `.git/HEAD`)
-- `src/history.zig` — flat-file history and directory frecency (`~/.slash/history`)
+- `src/history.zig` — flat-file history (`~/.slash/history`)
 - `src/regex.zig` — libc POSIX regex wrapper (ERE) for `=~`, `!~`, glob expansion
 
 ## Build
@@ -82,7 +82,7 @@ Zig 0.15.2. See `docs/ZIG-0.15.2.md` for API changes (Writergate, ArrayList
 - **No AST** — parser outputs s-expressions directly (`mode = 'sexp'`); executor pattern-matches on head tags
 - **No separate tag/keyword files** — tag enum and keyword matchers are generated inline in parser.zig
 - **Grammar is documentation** — the grammar file is the authoritative specification of the language
-- **Flat-file history** — `~/.slash/history` (TSV), loaded into memory on startup, frecency derived from cwd column
+- **Flat-file history** — `~/.slash/history` (TSV), loaded into memory on startup (records cwd alongside each command)
 - **`??` for defaults** — `$1 ?? 8080` instead of `${1:-8080}`
 - **`cmd ???`** — command-not-found hook, three characters
 - **Heredocs use `'''`/`"""`/`` ``` ``** — no `<<EOF` arbitrary tokens

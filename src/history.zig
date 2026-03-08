@@ -1,4 +1,4 @@
-//! History — flat-file command history and directory frecency
+//! History — flat-file command history
 //!
 //! Stores command history in ~/.slash/history as tab-separated lines:
 //!   timestamp\texit_code\tduration_ms\tescaped_cwd\tescaped_command
@@ -131,43 +131,6 @@ pub const Db = struct {
         return null;
     }
 
-    pub fn frecency(self: *const Db, alloc: std.mem.Allocator, query: []const u8, limit: usize) []DirScore {
-        const now = std.time.timestamp();
-        var map = std.StringHashMap(DirAccum).init(alloc);
-        defer map.deinit();
-        for (self.entries.items) |e| {
-            if (e.cwd.len == 0) continue;
-            if (query.len > 0 and !containsSubstring(e.cwd, query)) continue;
-            if (map.getPtr(e.cwd)) |acc| {
-                acc.count += 1;
-                if (e.timestamp > acc.max_ts) acc.max_ts = e.timestamp;
-            } else {
-                map.put(e.cwd, .{ .count = 1, .max_ts = e.timestamp }) catch continue;
-            }
-        }
-
-        var scored: std.ArrayList(DirScore) = .empty;
-        var it = map.iterator();
-        while (it.next()) |kv| {
-            const age_hours: f64 = @as(f64, @floatFromInt(@max(0, now - kv.value_ptr.max_ts))) / 3600.0;
-            const score = @as(f64, @floatFromInt(kv.value_ptr.count)) / (1.0 + age_hours);
-            const path = alloc.dupe(u8, kv.key_ptr.*) catch continue;
-            scored.append(alloc, .{ .path = path, .score = score }) catch {};
-        }
-        std.mem.sortUnstable(DirScore, scored.items, {}, struct {
-            fn cmp(_: void, a: DirScore, b: DirScore) bool {
-                return a.score > b.score;
-            }
-        }.cmp);
-
-        const n = @min(scored.items.len, limit);
-        if (n < scored.items.len) {
-            for (scored.items[n..]) |entry| alloc.free(entry.path);
-        }
-        scored.shrinkRetainingCapacity(n);
-        return scored.items;
-    }
-
     fn load(self: *Db) void {
         const file = std.fs.cwd().openFile(self.path, .{}) catch return;
         defer file.close();
@@ -250,13 +213,6 @@ pub const Db = struct {
         closed = true;
         std.fs.cwd().rename(tmp, self.path) catch {};
     }
-};
-
-const DirAccum = struct { count: u64, max_ts: i64 };
-
-pub const DirScore = struct {
-    path: []const u8,
-    score: f64,
 };
 
 fn containsSubstring(haystack: []const u8, needle: []const u8) bool {

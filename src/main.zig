@@ -155,26 +155,6 @@ fn historySuggest(prefix: []const u8) ?[]const u8 {
     return null;
 }
 
-fn paletteFn(alloc: std.mem.Allocator, query: []const u8) []readline.PaletteResult {
-    var results: std.ArrayList(readline.PaletteResult) = .empty;
-    if (repl_shell) |sh| {
-        if (sh.history_db) |hdb| {
-            for (hdb.search(alloc, query, 5)) |cmd|
-                results.append(alloc, .{ .text = cmd, .kind = .history }) catch {};
-            for (hdb.frecency(alloc, query, 3)) |d|
-                results.append(alloc, .{ .text = d.path, .kind = .directory }) catch {};
-        }
-        var it = sh.user_cmds.iterator();
-        while (it.next()) |entry| {
-            const name = entry.key_ptr.*;
-            if (query.len == 0 or std.mem.indexOf(u8, name, query) != null) {
-                results.append(alloc, .{ .text = name, .kind = .command }) catch {};
-            }
-        }
-    }
-    return results.items;
-}
-
 fn historySearchFn(alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 {
     if (repl_shell) |sh| {
         if (sh.history_db) |hdb| return hdb.search(alloc, query, limit);
@@ -234,7 +214,7 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
     }
 
     repl_shell = ev;
-    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec, .search = &historySearchFn, .suggest = &historySuggest, .palette = &paletteFn, .eval_math = &evalMathPreview, .user_cmd_names = &getUserCmdNames, .shell_var_names = &getShellVarNames });
+    readline.setKeyHandler(.{ .lookup = &keyLookup, .exec = &keyExec, .search = &historySearchFn, .suggest = &historySuggest, .eval_math = &evalMathPreview, .user_cmd_names = &getUserCmdNames, .shell_var_names = &getShellVarNames });
 
     const hdb = history.Db.open() catch null;
     defer if (hdb) |h| h.close();
