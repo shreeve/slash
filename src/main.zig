@@ -33,7 +33,7 @@ const version = build_options.version;
 // MAIN
 // =============================================================================
 
-pub fn main() !void {
+pub fn main() !u8 {
     setupSignals();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -53,10 +53,10 @@ pub fn main() !void {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             showHelp();
-            return;
+            return 0;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
             std.debug.print("slash {s}\n", .{version});
-            return;
+            return 0;
         } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--tokens")) {
             show_tokens = true;
         } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--sexp")) {
@@ -67,7 +67,7 @@ pub fn main() !void {
                 command_string = args[i];
             } else {
                 std.debug.print("Error: -c requires a command string\n", .{});
-                return;
+                return 1;
             }
         } else if (arg.len > 0 and arg[0] != '-') {
             script_path = arg;
@@ -76,7 +76,7 @@ pub fn main() !void {
         } else {
             std.debug.print("Unknown option: {s}\n", .{arg});
             showHelp();
-            return;
+            return 1;
         }
     }
 
@@ -84,51 +84,52 @@ pub fn main() !void {
     if (command_string) |cmd| {
         if (show_tokens) {
             dumpTokens(cmd, "<cmd>");
-            return;
+            return 0;
         }
         if (show_sexp) {
             dumpSexp(alloc, cmd, .oneline);
-            return;
+            return 0;
         }
         var ev = exec.Shell.init(alloc);
         defer ev.deinit();
         ev.execLine(cmd);
-        return;
+        return ev.last_exit;
     }
 
     // Script mode
     if (script_path) |path| {
         const source = std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024) catch |err| {
             std.debug.print("Error reading '{s}': {s}\n", .{ path, @errorName(err) });
-            return;
+            return 1;
         };
         defer alloc.free(source);
 
         if (show_tokens) {
             dumpTokens(source, path);
-            return;
+            return 0;
         }
         if (show_sexp) {
             dumpSexp(alloc, source, .program);
-            return;
+            return 0;
         }
         var ev = exec.Shell.init(alloc);
         defer ev.deinit();
         if (i < args.len) ev.setArgs(args[i..]);
         ev.execSource(source);
-        return;
+        return ev.last_exit;
     }
 
     // Interactive REPL
     if (show_tokens or show_sexp) {
         std.debug.print("Error: --tokens/--sexp require a file or -c command\n", .{});
-        return;
+        return 1;
     }
 
     var ev = exec.Shell.init(alloc);
     defer ev.deinit();
     ev.initInteractive();
     try runRepl(alloc, &ev);
+    return ev.last_exit;
 }
 
 // =============================================================================
