@@ -631,7 +631,7 @@ These are registered in `isBuiltin()` in `exec.zig`:
 
 | Command | Description |
 |---------|-------------|
-| `cd` | Change directory (file-aware), updates session directory MRU for `j` |
+| `cd` | Change directory (file-aware). `cd -` jumps to previous directory. Updates session directory MRU for `j`. |
 | `..` / `...` / `....` | Go up 1, 2, 3, ... directories (dynamic dot-counter) |
 | `echo` | Print arguments |
 | `true` / `false` | Exit 0 / Exit 1 |

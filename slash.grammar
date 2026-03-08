@@ -484,7 +484,7 @@ cmd_arg   = argument
 # ARGUMENTS
 # ==============================================================================
 
-argument  = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG | REGEX
+argument  = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG | REGEX | "-"
           | proc_sub
           | subshell_capture
 

@@ -191,6 +191,7 @@ First-class, not a plugin:
 cd projects/slash                     # go there, record it
 ..                                    # up one level (no cd needed)
 ...                                   # up two levels
+cd -                                  # back to previous directory
 j slash                               # list recent session dirs matching "slash"
 /tmp                                  # auto-cd (just type the path)
 ```

@@ -81,13 +81,15 @@ pub const Shell = struct {
     last_bg_pid: posix.pid_t = 0,
 
     pub fn init(alloc: Allocator) Shell {
-        return .{
+        var sh: Shell = .{
             .allocator = alloc,
             .vars = std.StringHashMap([]const u8).init(alloc),
             .user_cmds = std.StringHashMap(UserCmd).init(alloc),
             .options = std.StringHashMap([]const u8).init(alloc),
             .key_bindings = std.StringHashMap([]const u8).init(alloc),
         };
+        sh.initCwdState();
+        return sh;
     }
 
     pub fn initInteractive(self: *Shell) void {
@@ -96,7 +98,6 @@ pub const Shell = struct {
         self.interactive = true;
         _ = libc.setpgid(0, self.shell_pgid);
         _ = libc.tcsetpgrp(self.tty_fd, self.shell_pgid);
-        self.noteSessionCwd();
     }
 
     pub fn setArgs(self: *Shell, script_args: []const []const u8) void {
@@ -163,10 +164,48 @@ pub const Shell = struct {
         for (&self.dir_mru) |*slot| slot.* = "";
     }
 
-    fn noteSessionCwd(self: *Shell) void {
+    fn setVarDupe(self: *Shell, name_raw: []const u8, value_raw: []const u8) void {
+        const value = self.allocator.dupe(u8, value_raw) catch return;
+        if (self.vars.getPtr(name_raw)) |slot| {
+            self.allocator.free(slot.*);
+            slot.* = value;
+            return;
+        }
+        const name = self.allocator.dupe(u8, name_raw) catch {
+            self.allocator.free(value);
+            return;
+        };
+        self.vars.put(name, value) catch {
+            self.allocator.free(name);
+            self.allocator.free(value);
+        };
+    }
+
+    fn initCwdState(self: *Shell) void {
         var cwd_buf: [4096]u8 = undefined;
         const cwd = posix.getcwd(&cwd_buf) catch return;
+        self.setVarDupe("PWD", cwd);
         self.noteSessionDir(cwd);
+    }
+
+    fn recordDirChange(self: *Shell, old_cwd: []const u8, new_cwd: []const u8) void {
+        if (old_cwd.len > 0) self.setVarDupe("OLDPWD", old_cwd);
+        if (new_cwd.len > 0) self.setVarDupe("PWD", new_cwd);
+        self.noteSessionDir(new_cwd);
+    }
+
+    fn chdirTracked(self: *Shell, label: []const u8, target: []const u8) bool {
+        var old_buf: [4096]u8 = undefined;
+        const old_cwd = posix.getcwd(&old_buf) catch "";
+        posix.chdir(target) catch |err| {
+            std.debug.print("{s}: {s}: {s}\n", .{ label, target, @errorName(err) });
+            self.last_exit = 1;
+            return false;
+        };
+        var new_buf: [4096]u8 = undefined;
+        const new_cwd = posix.getcwd(&new_buf) catch "";
+        self.recordDirChange(old_cwd, new_cwd);
+        return true;
     }
 
     fn noteSessionDir(self: *Shell, cwd: []const u8) void {
@@ -578,25 +617,16 @@ pub const Shell = struct {
         if (argv.len == 1 and !has_redirs) {
             const name = argv[0];
             if (name.len > 0 and (name[0] == '/' or name[0] == '.' or name[0] == '~')) {
-                const pathZ = self.allocator.dupeZ(u8, name) catch {
-                    self.forkExecWithRedirects(argv, redirs);
-                    self.cleanupProcSubs(procsub_fds.items);
-                    return;
-                };
-                defer self.allocator.free(pathZ);
                 const stat = std.fs.cwd().statFile(name) catch {
                     self.forkExecWithRedirects(argv, redirs);
                     self.cleanupProcSubs(procsub_fds.items);
                     return;
                 };
                 if (stat.kind == .directory) {
-                    posix.chdir(pathZ) catch |err| {
-                        std.debug.print("cd: {s}: {s}\n", .{ name, @errorName(err) });
-                        self.last_exit = 1;
+                    if (!self.chdirTracked("cd", name)) {
                         self.cleanupProcSubs(procsub_fds.items);
                         return;
-                    };
-                    self.noteSessionCwd();
+                    }
                     self.last_exit = 0;
                     self.cleanupProcSubs(procsub_fds.items);
                     return;
@@ -1649,12 +1679,7 @@ pub const Shell = struct {
                 if (pos + 2 <= buf.len) { buf[pos] = '.'; buf[pos + 1] = '.'; pos += 2; }
             }
             if (pos > 0) {
-                posix.chdir(buf[0..pos]) catch |err| {
-                    std.debug.print("cd: {s}: {s}\n", .{ buf[0..pos], @errorName(err) });
-                    self.last_exit = 1;
-                    return true;
-                };
-                self.noteSessionCwd();
+                if (!self.chdirTracked("cd", buf[0..pos])) return true;
             }
             self.last_exit = 0;
             return true;
@@ -1676,19 +1701,20 @@ pub const Shell = struct {
     fn builtinCd(self: *Shell, argv: []const []const u8) void {
         const raw = if (argv.len > 1) argv[1] else posix.getenv("HOME") orelse "/";
         var expand_buf: [4096]u8 = undefined;
-        const target = if (raw.len >= 2 and raw[0] == '~' and raw[1] == '/') blk: {
+        const target = if (raw.len == 1 and raw[0] == '-') blk: {
+            break :blk self.vars.get("OLDPWD") orelse {
+                std.debug.print("cd: OLDPWD not set\n", .{});
+                self.last_exit = 1;
+                return;
+            };
+        } else if (raw.len >= 2 and raw[0] == '~' and raw[1] == '/') blk: {
             const home = posix.getenv("HOME") orelse break :blk raw;
             break :blk std.fmt.bufPrint(&expand_buf, "{s}{s}", .{ home, raw[1..] }) catch raw;
         } else if (raw.len == 1 and raw[0] == '~')
             posix.getenv("HOME") orelse "/"
         else
             raw;
-        posix.chdir(target) catch |err| {
-            std.debug.print("cd: {s}: {s}\n", .{ target, @errorName(err) });
-            self.last_exit = 1;
-            return;
-        };
-        self.noteSessionCwd();
+        if (!self.chdirTracked("cd", target)) return;
         self.last_exit = 0;
     }
 
@@ -1840,12 +1866,7 @@ pub const Shell = struct {
             self.last_exit = 1;
             return;
         }
-        posix.chdir(self.j_list[idx]) catch |err| {
-            std.debug.print("j: {s}: {s}\n", .{ self.j_list[idx], @errorName(err) });
-            self.last_exit = 1;
-            return;
-        };
-        self.noteSessionCwd();
+        if (!self.chdirTracked("j", self.j_list[idx])) return;
         self.last_exit = 0;
     }
 

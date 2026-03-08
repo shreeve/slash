@@ -569,6 +569,10 @@ check_script "exec subshell cwd" \
     "$(printf '(cd /tmp)\npwd\n')" \
     "$(pwd)"
 
+check_script "exec cd dash" \
+    "$(printf 'cd /tmp\ncd -\npwd\n')" \
+    "$(pwd)"
+
 # ==========================================================================
 # EXECUTION: BOOLEAN SHORT-CIRCUIT
 # ==========================================================================
