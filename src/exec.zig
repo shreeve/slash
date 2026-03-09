@@ -68,8 +68,9 @@ pub const Shell = struct {
     // Positional arguments ($1-$9, $*, $#)
     args: []const []const u8 = &.{},
 
-    // Scratch buffer for argv-to-string conversion (freed on next use)
+    // Scratch buffers (freed on next use)
     argv_str_scratch: ?[]const u8 = null,
+    tilde_scratch: ?[]const u8 = null,
 
     // Last j listing (for bare digit jump)
     j_list: [9][]const u8 = .{""} ** 9,
@@ -151,6 +152,7 @@ pub const Shell = struct {
         }
         self.key_bindings.deinit();
         if (self.argv_str_scratch) |s| self.allocator.free(s);
+        if (self.tilde_scratch) |s| self.allocator.free(s);
         self.clearJList();
         self.clearSessionDirs();
     }
@@ -917,6 +919,17 @@ pub const Shell = struct {
 
     fn expandToken(self: *Shell, text: []const u8) []const u8 {
         if (text.len == 0) return text;
+
+        if (text[0] == '~') {
+            if (text.len == 1) return posix.getenv("HOME") orelse "~";
+            if (text[1] == '/') {
+                const home = posix.getenv("HOME") orelse return text;
+                if (self.tilde_scratch) |old| self.allocator.free(old);
+                const result = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ home, text[1..] }) catch return text;
+                self.tilde_scratch = result;
+                return result;
+            }
+        }
 
         if (text[0] == '$') {
             if (text.len >= 2 and text[1] == '{') {
@@ -1951,20 +1964,13 @@ pub const Shell = struct {
 
     fn builtinCd(self: *Shell, argv: []const []const u8) void {
         const raw = if (argv.len > 1) argv[1] else posix.getenv("HOME") orelse "/";
-        var expand_buf: [4096]u8 = undefined;
         const target = if (raw.len == 1 and raw[0] == '-') blk: {
             break :blk self.lookupGlobalScalar("OLDPWD") orelse {
                 std.debug.print("cd: OLDPWD not set\n", .{});
                 self.last_exit = 1;
                 return;
             };
-        } else if (raw.len >= 2 and raw[0] == '~' and raw[1] == '/') blk: {
-            const home = posix.getenv("HOME") orelse break :blk raw;
-            break :blk std.fmt.bufPrint(&expand_buf, "{s}{s}", .{ home, raw[1..] }) catch raw;
-        } else if (raw.len == 1 and raw[0] == '~')
-            posix.getenv("HOME") orelse "/"
-        else
-            raw;
+        } else raw;
         if (!self.chdirTracked("cd", target)) return;
         self.last_exit = 0;
     }
