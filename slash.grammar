@@ -103,6 +103,7 @@ tokens {
 
     # Operators — assignment and default
     assign,         # =
+    plus_assign,    # +=
     default_op,     # ??
 
     # Punctuation
@@ -111,7 +112,8 @@ tokens {
     rparen,         # )
     lbrace,         # {
     rbrace,         # }
-    lbracket,       # [
+    list_start,     # [ in assignment context (after = or +=)
+    lbracket,       # [ (general)
     rbracket,       # ]
     question,       # ?
     comma,          # ,
@@ -277,6 +279,7 @@ defaults {
 ">="                                        → ge
 "=~"                                        → match
 "!~"                                        → nomatch
+"+="                                        → plus_assign, {math = 1}
 
 # Arithmetic
 "**"                                        → power
@@ -424,6 +427,8 @@ line      = stmt [COMMENT] NEWLINE           → 1
 
 stmt      = "=" expr                         → (display 2)
           | IDENT "=" "-"                    → (unset 1)
+          | IDENT "=" list_literal           → (assign_argv 1 3)
+          | IDENT "+=" list_literal          → (append_argv 1 3)
           | IDENT "=" expr                   → (assign 1 3)
           | cmd_def                         → 1
           | key_def                         → 1
@@ -677,3 +682,6 @@ atom      = VARIABLE
           | STRING_DQ
           | STRING_SQ
           | subshell_capture
+
+list_literal = LIST_START list_item* "]"       → (list ...2)
+list_item    = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG | REGEX | "-"

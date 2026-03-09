@@ -150,6 +150,12 @@ pub const Lexer = struct {
                     self.last_cat = if (mch == '/') .slash else .power;
                     return Token{ .cat = self.last_cat, .pre = ws_pre, .pos = @intCast(mp), .len = 1 };
                 }
+                if (mch == '[') {
+                    self.base.pos = mp + 1;
+                    self.base.math = 0;
+                    self.last_cat = .list_start;
+                    return Token{ .cat = .list_start, .pre = ws_pre, .pos = @intCast(mp), .len = 1 };
+                }
                 if (mch == '*') {
                     if (mp + 1 < self.base.source.len and self.base.source[mp + 1] == '*') {
                         self.base.pos = mp + 2;

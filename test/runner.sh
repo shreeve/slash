@@ -103,6 +103,9 @@ check "assign capture"          'x = $(ls)'                 "(assign x (capture 
 check "match rhs expr paren"    'if $x =~ (1) { echo yes }' "(if (match \$x 1) (block (cmd echo yes)))"
 check "nomatch rhs expr var"    'if $x !~ $y { echo no }'   "(if (nomatch \$x \$y) (block (cmd echo no)))"
 check "unset variable"          "name = -"                  "(unset name)"
+check "assign list literal"     'args = [find .]'           "(assign_argv args (list find .))"
+check "append list literal"     'args += [-iname "*foo*"]'  '(append_argv args (list -iname "*foo*"))'
+check "assign empty list"       'args = []'                 "(assign_argv args (list))"
 
 # ==========================================================================
 # PIPELINES
@@ -135,6 +138,8 @@ check "semicolon"               "a ; b"                     "(seq (cmd a) (cmd b
 check "semicolon three"         "a ; b ; c"                 "(seq (cmd a) (seq (cmd b) (cmd c)))"
 check "background"              "sleep 10 &"                "(bg (cmd sleep 10))"
 check "background + next"       "make & echo watching"      "(bg (cmd make) (cmd echo watching))"
+check "wait last pid exit"      'false & wait $! ; echo $?'  ""                        "1"
+check "wait all children"       'true & wait ; echo ok'      ""                        "ok"
 
 # ==========================================================================
 # REDIRECTIONS
@@ -501,6 +506,10 @@ check_script "exec uppercase export" \
     "$(printf 'FOO = \"bar\"\n/usr/bin/printenv FOO\n')" \
     "bar"
 
+check_script "exec lowercase not exported" \
+    "$(printf 'name = \"bar\"\n/usr/bin/printenv name\n')" \
+    ""
+
 check_script "exec nested capture" \
     "$(printf 'echo $(echo $(echo deep))\n')" \
     "deep"
@@ -705,6 +714,34 @@ check_script "exec cmd with defaults" \
     "$(printf 'cmd serve(port)\n    port = $port ?? 8080\n    echo $port\nserve\n')" \
     "8080"
 
+check_script "exec list builder command" \
+    "$(printf 'cmd greet(name)\n    args = [echo hello]\n    args += [$name]\n    run $args\ngreet world\n')" \
+    "hello world"
+
+check_script "exec list run with pipe" \
+    "$(printf 'args = [echo hello world]\nrun $args | wc -w\n')" \
+    "       2"
+
+check_script "exec list run with redirect" \
+    "$(printf 'args = [echo hello]\nrun $args > /tmp/_sl_list_redir.txt\ncat /tmp/_sl_list_redir.txt\n')" \
+    "hello"
+
+check_script "exec list splat positional" \
+    "$(printf 'cmd test_splat\n    args = [echo]\n    args += [$*]\n    run $args\ntest_splat hello world\n')" \
+    "hello world"
+
+check_script "exec list multi-if in cmd" \
+    "$(printf 'cmd f(name)\n    match = $name\n    args = [find /tmp -maxdepth 0]\n    if $name != "." { args += [-name tmp] }\n    if $name == "." { match = "" }\n    if $match != "" { run $args 2> /dev/null | grep -i $match }\n    if $match == "" { run $args 2> /dev/null }\nf tmp\n')" \
+    "/tmp"
+
+check_script "exec cmd locals do not leak" \
+    "$(printf 'name = \"outer\"\ncmd setname\n    name = \"inner\"\n    echo $name\nsetname\necho $name\n')" \
+    "$(printf 'inner\nouter')"
+
+check_script "exec cmd uppercase export stays local" \
+    "$(printf 'FOO = \"outer\"\ncmd show\n    FOO = \"inner\"\n    /usr/bin/printenv FOO\nshow\necho $FOO\n')" \
+    "$(printf 'inner\nouter')"
+
 # ==========================================================================
 # EXECUTION: COMPARISON OPERATORS
 # ==========================================================================
@@ -834,6 +871,9 @@ check_script "exec math multiply" \
 check_script "exec math power" \
     "$(printf '= 2 ** 5\n')" \
     "32"
+
+# Cleanup list test temp files
+rm -f /tmp/_sl_list_redir.txt
 
 # ==========================================================================
 # RESULTS

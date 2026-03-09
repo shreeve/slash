@@ -72,6 +72,9 @@ PATH = "$PATH:/usr/local/bin"
 name = -      # unset (bare minus)
 ```
 
+At the top level, assignments persist in the shell. Uppercase names are
+exported to child processes; lowercase names stay shell-local.
+
 **Inline math** — no `$(( ))` syntax, no calling `bc`:
 
 ```
@@ -118,6 +121,32 @@ cmd mkcd(dir) mkdir -p $dir && cd $dir
 cmd serve(port)
     port = $port ?? 8080
     python3 -m http.server $port
+```
+
+Each `cmd` invocation gets a fresh local variable scope. Assignments inside a
+`cmd` do not leak back into the shell, but uppercase variables are still
+exported to child processes launched by that command.
+
+**String lists** — build commands incrementally without flattening to a string:
+
+```
+args = [find . -type f]
+args += [-iname "*.zig"]
+run $args
+```
+
+Lists preserve argument boundaries. `run` expands a list-valued variable into
+real argv entries — redirections and pipes work normally:
+
+```
+cmd f(name)
+    match = $name
+    args = [find .]
+    args += [-not '(' -path '*/.*/*' -o -path '*/node_modules/*' ')']
+    if $name != "." { args += [-iname "*$name*"] }
+    if $name == "." { match = "" }
+    if $match != "" { run $args 2> /dev/null | grep -i $match }
+    if $match == "" { run $args 2> /dev/null }
 ```
 
 **Default values** with `??`:

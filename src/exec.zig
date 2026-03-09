@@ -27,6 +27,15 @@ const UserCmd = struct {
     source: []const u8,
 };
 
+pub const VarValue = union(enum) {
+    scalar: []const u8,
+    argv: [][]const u8,
+};
+
+const Scope = struct {
+    vars: std.StringHashMap(VarValue),
+};
+
 // =========================================================================
 // JOB CONTROL
 // =========================================================================
@@ -49,7 +58,8 @@ const MAX_JOBS = 64;
 
 pub const Shell = struct {
     allocator: Allocator,
-    vars: std.StringHashMap([]const u8),
+    vars: std.StringHashMap(VarValue),
+    local_scopes: std.ArrayListUnmanaged(Scope) = .{},
     last_exit: u8 = 0,
     flow: Flow = .normal,
     user_cmds: std.StringHashMap(UserCmd),
@@ -57,6 +67,9 @@ pub const Shell = struct {
 
     // Positional arguments ($1-$9, $*, $#)
     args: []const []const u8 = &.{},
+
+    // Scratch buffer for argv-to-string conversion (freed on next use)
+    argv_str_scratch: ?[]const u8 = null,
 
     // Last j listing (for bare digit jump)
     j_list: [9][]const u8 = .{""} ** 9,
@@ -83,7 +96,7 @@ pub const Shell = struct {
     pub fn init(alloc: Allocator) Shell {
         var sh: Shell = .{
             .allocator = alloc,
-            .vars = std.StringHashMap([]const u8).init(alloc),
+            .vars = std.StringHashMap(VarValue).init(alloc),
             .user_cmds = std.StringHashMap(UserCmd).init(alloc),
             .options = std.StringHashMap([]const u8).init(alloc),
             .key_bindings = std.StringHashMap([]const u8).init(alloc),
@@ -105,14 +118,9 @@ pub const Shell = struct {
     }
 
     pub fn deinit(self: *Shell) void {
-        {
-            var it = self.vars.iterator();
-            while (it.next()) |entry| {
-                self.allocator.free(entry.key_ptr.*);
-                self.allocator.free(entry.value_ptr.*);
-            }
-        }
-        self.vars.deinit();
+        while (self.local_scopes.items.len > 0) self.popLocalScope();
+        self.local_scopes.deinit(self.allocator);
+        self.deinitVarMap(&self.vars);
         {
             var it = self.user_cmds.iterator();
             while (it.next()) |entry| {
@@ -142,8 +150,99 @@ pub const Shell = struct {
             }
         }
         self.key_bindings.deinit();
+        if (self.argv_str_scratch) |s| self.allocator.free(s);
         self.clearJList();
         self.clearSessionDirs();
+    }
+
+    fn deinitVarValue(self: *Shell, value: VarValue) void {
+        switch (value) {
+            .scalar => |text| self.allocator.free(text),
+            .argv => |items| {
+                for (items) |item| self.allocator.free(item);
+                self.allocator.free(items);
+            },
+        }
+    }
+
+    fn deinitVarMap(self: *Shell, map: *std.StringHashMap(VarValue)) void {
+        var it = map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.deinitVarValue(entry.value_ptr.*);
+        }
+        map.deinit();
+    }
+
+    fn putOwnedVar(self: *Shell, map: *std.StringHashMap(VarValue), name_raw: []const u8, value: VarValue) bool {
+        if (map.getPtr(name_raw)) |slot| {
+            self.deinitVarValue(slot.*);
+            slot.* = value;
+            return true;
+        }
+        const name = self.allocator.dupe(u8, name_raw) catch {
+            self.deinitVarValue(value);
+            return false;
+        };
+        map.put(name, value) catch {
+            self.allocator.free(name);
+            self.deinitVarValue(value);
+            return false;
+        };
+        return true;
+    }
+
+    fn putScalarDupe(self: *Shell, map: *std.StringHashMap(VarValue), name_raw: []const u8, value_raw: []const u8) bool {
+        const value = self.allocator.dupe(u8, value_raw) catch return false;
+        return self.putOwnedVar(map, name_raw, .{ .scalar = value });
+    }
+
+    fn currentVarMap(self: *Shell) *std.StringHashMap(VarValue) {
+        if (self.local_scopes.items.len > 0) {
+            return &self.local_scopes.items[self.local_scopes.items.len - 1].vars;
+        }
+        return &self.vars;
+    }
+
+    pub fn lookupScopedValue(self: *const Shell, name: []const u8) ?VarValue {
+        var i = self.local_scopes.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.local_scopes.items[i].vars.get(name)) |val| return val;
+        }
+        return self.vars.get(name);
+    }
+
+    fn lookupGlobalScalar(self: *const Shell, name: []const u8) ?[]const u8 {
+        if (self.vars.get(name)) |val| {
+            return switch (val) {
+                .scalar => |text| text,
+                .argv => null,
+            };
+        }
+        return null;
+    }
+
+    fn hasExportOverride(self: *const Shell, name: []const u8) bool {
+        if (!shouldExportVar(name)) return false;
+        var i = self.local_scopes.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.local_scopes.items[i].vars.contains(name)) return true;
+        }
+        return self.vars.contains(name);
+    }
+
+    fn pushLocalScope(self: *Shell) bool {
+        const scope = Scope{ .vars = std.StringHashMap(VarValue).init(self.allocator) };
+        self.local_scopes.append(self.allocator, scope) catch return false;
+        return true;
+    }
+
+    fn popLocalScope(self: *Shell) void {
+        if (self.local_scopes.items.len == 0) return;
+        var scope = self.local_scopes.pop().?;
+        self.deinitVarMap(&scope.vars);
     }
 
     fn clearJList(self: *Shell) void {
@@ -165,20 +264,7 @@ pub const Shell = struct {
     }
 
     fn setVarDupe(self: *Shell, name_raw: []const u8, value_raw: []const u8) void {
-        const value = self.allocator.dupe(u8, value_raw) catch return;
-        if (self.vars.getPtr(name_raw)) |slot| {
-            self.allocator.free(slot.*);
-            slot.* = value;
-            return;
-        }
-        const name = self.allocator.dupe(u8, name_raw) catch {
-            self.allocator.free(value);
-            return;
-        };
-        self.vars.put(name, value) catch {
-            self.allocator.free(name);
-            self.allocator.free(value);
-        };
+        _ = self.putScalarDupe(&self.vars, name_raw, value_raw);
     }
 
     fn initCwdState(self: *Shell) void {
@@ -447,6 +533,8 @@ pub const Shell = struct {
             .subshell => self.evalSubshell(args, source),
             .display => self.evalDisplay(args, source),
             .assign => self.evalAssign(args, source),
+            .assign_argv => self.evalAssignArgv(args, source),
+            .append_argv => self.evalAppendArgv(args, source),
             .unset => self.evalUnset(args, source),
             .unless => self.evalUnless(args, source),
             .until => self.evalUntil(args, source),
@@ -517,6 +605,7 @@ pub const Shell = struct {
             switch (arg) {
                 .src => |s| {
                     const text = source[s.pos..][0..s.len];
+                    if (self.appendBareArgvVar(&argv_list, text)) continue;
                     const expanded = self.expandToken(text);
                     if (argv_list.items.len > 0 and s.pos > 0 and expanded.ptr == text.ptr) {
                         const prev = argv_list.items[argv_list.items.len - 1];
@@ -564,20 +653,33 @@ pub const Shell = struct {
             }
         }
 
-        // Expand globs and regex literals in arguments
         var expanded_argv: std.ArrayList([]const u8) = .empty;
         defer expanded_argv.deinit(self.allocator);
+        var owned_expansions: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (owned_expansions.items) |s| self.allocator.free(s);
+            owned_expansions.deinit(self.allocator);
+        }
         for (argv_list.items) |arg| {
             if (isRegexGlob(arg)) {
+                const before = expanded_argv.items.len;
                 expandRegexGlob(self.allocator, arg, &expanded_argv);
+                for (expanded_argv.items[before..]) |s| owned_expansions.append(self.allocator, s) catch {};
             } else if (hasGlobChars(arg)) {
+                const before = expanded_argv.items.len;
                 expandGlob(self.allocator, arg, &expanded_argv);
+                for (expanded_argv.items[before..]) |s| owned_expansions.append(self.allocator, s) catch {};
             } else {
                 expanded_argv.append(self.allocator, arg) catch {};
             }
         }
-        const argv = expanded_argv.items;
+        var argv = expanded_argv.items;
         if (argv.len == 0) return;
+
+        if (argv.len >= 1 and std.mem.eql(u8, argv[0], "run")) {
+            argv = if (argv.len > 1) argv[1..] else argv[0..0];
+            if (argv.len == 0) return;
+        }
 
         const redirs = redir_list.items;
         const has_redirs = redirs.len > 0;
@@ -773,7 +875,6 @@ pub const Shell = struct {
     }
 
     fn forkExecWithRedirects(self: *Shell, argv: []const []const u8, redirs: []const Redirect) void {
-        const cmd_text = self.allocator.dupe(u8, argv[0]) catch argv[0];
         const pid = posix.fork() catch {
             std.debug.print("slash: fork failed\n", .{});
             self.last_exit = 1;
@@ -796,6 +897,7 @@ pub const Shell = struct {
 
         if (self.interactive) {
             _ = libc.setpgid(pid, pid);
+            const cmd_text = self.allocator.dupe(u8, argv[0]) catch argv[0];
             const pids = [_]posix.pid_t{pid};
             const job_id = self.addJob(pid, .running, cmd_text, &pids);
             _ = libc.tcsetpgrp(self.tty_fd, pid);
@@ -842,6 +944,31 @@ pub const Shell = struct {
         return text;
     }
 
+    fn bareVarName(text: []const u8) ?[]const u8 {
+        if (text.len >= 2 and text[0] == '$') {
+            if (text[1] == '{') {
+                if (text.len < 4 or text[text.len - 1] != '}') return null;
+                const inner = std.mem.trim(u8, text[2 .. text.len - 1], " \t");
+                if (inner.len == 0 or std.mem.indexOf(u8, inner, "??") != null) return null;
+                return inner;
+            }
+            return text[1..];
+        }
+        return null;
+    }
+
+    fn appendBareArgvVar(self: *Shell, list: *std.ArrayList([]const u8), text: []const u8) bool {
+        const name = bareVarName(text) orelse return false;
+        const value = self.lookupScopedValue(name) orelse return false;
+        switch (value) {
+            .argv => |items| {
+                for (items) |item| list.append(self.allocator, item) catch {};
+                return true;
+            },
+            .scalar => return false,
+        }
+    }
+
     fn lookupVar(self: *Shell, name: []const u8) []const u8 {
         if (name.len == 0) return "";
         if (std.mem.eql(u8, name, "?")) return self.exitCodeStr();
@@ -852,9 +979,9 @@ pub const Shell = struct {
         }
         if (std.mem.eql(u8, name, "#")) return self.argCountStr();
         if (std.mem.eql(u8, name, "*")) return self.argJoinStr();
-        if (std.mem.eql(u8, name, "0")) return self.vars.get("0") orelse "slash";
+        if (std.mem.eql(u8, name, "0")) return self.lookupGlobalScalar("0") orelse "slash";
         if (std.mem.eql(u8, name, "!")) return self.lastBgPidStr();
-        if (self.vars.get(name)) |val| return val;
+        if (self.lookupScopedValue(name)) |val| return self.varValueToStr(val);
         return posix.getenv(name) orelse "";
     }
 
@@ -889,6 +1016,7 @@ pub const Shell = struct {
 
     var arg_join_buf: [4096]u8 = undefined;
 
+
     fn argJoinStr(self: *Shell) []const u8 {
         if (self.args.len == 0) return "";
         var pos: usize = 0;
@@ -903,6 +1031,35 @@ pub const Shell = struct {
             pos += n;
         }
         return arg_join_buf[0..pos];
+    }
+
+    fn varValueToStr(self: *Shell, value: VarValue) []const u8 {
+        return switch (value) {
+            .scalar => |text| text,
+            .argv => |items| self.joinArgvAlloc(items),
+        };
+    }
+
+    fn joinArgvAlloc(self: *Shell, items: []const []const u8) []const u8 {
+        if (self.argv_str_scratch) |old| {
+            self.allocator.free(old);
+            self.argv_str_scratch = null;
+        }
+        if (items.len == 0) return "";
+        var total: usize = 0;
+        for (items, 0..) |item, i| {
+            if (i > 0) total += 1;
+            total += item.len;
+        }
+        const buf = self.allocator.alloc(u8, total) catch return "";
+        var pos: usize = 0;
+        for (items, 0..) |item, i| {
+            if (i > 0) { buf[pos] = ' '; pos += 1; }
+            @memcpy(buf[pos..][0..item.len], item);
+            pos += item.len;
+        }
+        self.argv_str_scratch = buf;
+        return buf;
     }
 
     fn evalShift(self: *Shell) void {
@@ -1387,16 +1544,121 @@ pub const Shell = struct {
     // ASSIGNMENT
     // =========================================================================
 
+    fn buildArgvValue(self: *Shell, sexp: Sexp, source: []const u8) ?VarValue {
+        const items = switch (sexp) {
+            .list => |list_items| list_items,
+            else => return null,
+        };
+        if (items.len == 0 or items[0] != .tag or items[0].tag != .list) return null;
+
+        var result: std.ArrayListUnmanaged([]const u8) = .{};
+        errdefer {
+            for (result.items) |item| self.allocator.free(item);
+            result.deinit(self.allocator);
+        }
+
+        for (items[1..]) |item| {
+            switch (item) {
+                .src => |s| {
+                    const text = source[s.pos..][0..s.len];
+                    if (text.len >= 2 and text[0] == '$' and std.mem.eql(u8, text[1..], "*")) {
+                        for (self.args) |a| {
+                            result.append(self.allocator, self.allocator.dupe(u8, a) catch return null) catch return null;
+                        }
+                        continue;
+                    }
+                    if (text.len >= 2 and text[0] == '$') {
+                        const name = bareVarName(text) orelse {
+                            self.dupeExpandedToken(&result, text) orelse return null;
+                            continue;
+                        };
+                        if (self.lookupScopedValue(name)) |val| {
+                            switch (val) {
+                                .argv => |av| {
+                                    for (av) |a| result.append(self.allocator, self.allocator.dupe(u8, a) catch return null) catch return null;
+                                    continue;
+                                },
+                                .scalar => {},
+                            }
+                        }
+                    }
+                    self.dupeExpandedToken(&result, text) orelse return null;
+                },
+                else => {
+                    const text = self.sexpToExpandedStr(item, source);
+                    result.append(self.allocator, self.allocator.dupe(u8, text) catch return null) catch return null;
+                },
+            }
+        }
+        const owned = result.toOwnedSlice(self.allocator) catch return null;
+        return .{ .argv = owned };
+    }
+
+    fn dupeExpandedToken(self: *Shell, list: *std.ArrayListUnmanaged([]const u8), text: []const u8) ?void {
+        const expanded = self.expandToken(text);
+        const owned = self.allocator.dupe(u8, expanded) catch return null;
+        if (expanded.ptr != text.ptr and !isSourceSlice(expanded, text)) {
+            self.allocator.free(expanded);
+        }
+        list.append(self.allocator, owned) catch {
+            self.allocator.free(owned);
+            return null;
+        };
+    }
+
+    fn isSourceSlice(slice: []const u8, source: []const u8) bool {
+        const s_start = @intFromPtr(source.ptr);
+        const s_end = s_start + source.len;
+        const p = @intFromPtr(slice.ptr);
+        return p >= s_start and p < s_end;
+    }
+
     fn evalAssign(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
         const name_raw = self.sexpToStr(args[0], source) orelse return;
         const value = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch return;
-        if (self.vars.getPtr(name_raw)) |slot| {
-            self.allocator.free(slot.*);
-            slot.* = value;
+        _ = self.putOwnedVar(self.currentVarMap(), name_raw, .{ .scalar = value });
+        self.last_exit = 0;
+    }
+
+    fn evalAssignArgv(self: *Shell, args: []const Sexp, source: []const u8) void {
+        if (args.len < 2) return;
+        const name_raw = self.sexpToStr(args[0], source) orelse return;
+        const value = self.buildArgvValue(args[1], source) orelse return;
+        _ = self.putOwnedVar(self.currentVarMap(), name_raw, value);
+        self.last_exit = 0;
+    }
+
+    fn evalAppendArgv(self: *Shell, args: []const Sexp, source: []const u8) void {
+        if (args.len < 2) return;
+        const name_raw = self.sexpToStr(args[0], source) orelse return;
+        const extra = self.buildArgvValue(args[1], source) orelse return;
+        const append_items = switch (extra) {
+            .argv => |items| items,
+            .scalar => unreachable,
+        };
+        var map = self.currentVarMap();
+        if (map.getPtr(name_raw)) |slot| {
+            switch (slot.*) {
+                .argv => |existing| {
+                    const merged = self.allocator.alloc([]const u8, existing.len + append_items.len) catch {
+                        self.deinitVarValue(extra);
+                        return;
+                    };
+                    @memcpy(merged[0..existing.len], existing);
+                    @memcpy(merged[existing.len..][0..append_items.len], append_items);
+                    self.allocator.free(existing);
+                    self.allocator.free(append_items);
+                    slot.* = .{ .argv = merged };
+                },
+                .scalar => {
+                    self.deinitVarValue(extra);
+                    self.last_exit = 1;
+                    return;
+                },
+            }
         } else {
-            const name = self.allocator.dupe(u8, name_raw) catch return;
-            self.vars.put(name, value) catch return;
+            _ = self.putOwnedVar(map, name_raw, extra);
         }
         self.last_exit = 0;
     }
@@ -1404,9 +1666,9 @@ pub const Shell = struct {
     fn evalUnset(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
         const name = self.sexpToStr(args[0], source) orelse return;
-        if (self.vars.fetchRemove(name)) |kv| {
+        if (self.currentVarMap().fetchRemove(name)) |kv| {
             self.allocator.free(kv.key);
-            self.allocator.free(kv.value);
+            self.deinitVarValue(kv.value);
         }
         self.last_exit = 0;
     }
@@ -1444,13 +1706,7 @@ pub const Shell = struct {
                 const start: usize = if (items.len > 0 and items[0] == .tag) 1 else 0;
                 for (items[start..]) |item| {
                     const val = self.allocator.dupe(u8, self.sexpToExpandedStr(item, source)) catch continue;
-                    if (self.vars.getPtr(var_name)) |slot| {
-                        self.allocator.free(slot.*);
-                        slot.* = val;
-                    } else {
-                        const key = self.allocator.dupe(u8, var_name) catch continue;
-                        self.vars.put(key, val) catch continue;
-                    }
+                    _ = self.putOwnedVar(self.currentVarMap(), var_name, .{ .scalar = val });
                     self.eval(body, source);
                     if (self.flow != .normal) {
                         if (self.flow == .break_loop) self.flow = .normal;
@@ -1461,13 +1717,7 @@ pub const Shell = struct {
             },
             else => {
                 const val = self.allocator.dupe(u8, self.sexpToExpandedStr(word_list, source)) catch return;
-                if (self.vars.getPtr(var_name)) |slot| {
-                    self.allocator.free(slot.*);
-                    slot.* = val;
-                } else {
-                    const key = self.allocator.dupe(u8, var_name) catch return;
-                    self.vars.put(key, val) catch return;
-                }
+                _ = self.putOwnedVar(self.currentVarMap(), var_name, .{ .scalar = val });
                 self.eval(body, source);
             },
         }
@@ -1630,6 +1880,7 @@ pub const Shell = struct {
             switch (arg) {
                 .src => |s| {
                     const text = source[s.pos..][0..s.len];
+                    if (self.appendBareArgvVar(&argv_list, text)) continue;
                     argv_list.append(self.allocator, self.expandToken(text)) catch {};
                 },
                 .list => |items| {
@@ -1665,8 +1916,7 @@ pub const Shell = struct {
     // BUILTINS
     // =========================================================================
 
-    fn tryBuiltin(self: *Shell, argv: []const []const u8, source: []const u8) bool {
-        _ = source;
+    fn tryBuiltin(self: *Shell, argv: []const []const u8, _: []const u8) bool {
         const name = argv[0];
 
         if (std.mem.eql(u8, name, "cd")) { self.builtinCd(argv); return true; }
@@ -1690,6 +1940,7 @@ pub const Shell = struct {
         if (std.mem.eql(u8, name, "type")) { self.builtinType(argv); return true; }
         if (std.mem.eql(u8, name, "pwd")) { self.builtinPwd(); return true; }
         if (std.mem.eql(u8, name, "jobs")) { self.builtinJobs(); return true; }
+        if (std.mem.eql(u8, name, "wait")) { self.builtinWait(argv); return true; }
         if (std.mem.eql(u8, name, "history")) { self.builtinHistory(argv); return true; }
         if (std.mem.eql(u8, name, "j")) { self.builtinJ(argv); return true; }
         if (std.mem.eql(u8, name, "fg")) { self.builtinFg(argv); return true; }
@@ -1702,7 +1953,7 @@ pub const Shell = struct {
         const raw = if (argv.len > 1) argv[1] else posix.getenv("HOME") orelse "/";
         var expand_buf: [4096]u8 = undefined;
         const target = if (raw.len == 1 and raw[0] == '-') blk: {
-            break :blk self.vars.get("OLDPWD") orelse {
+            break :blk self.lookupGlobalScalar("OLDPWD") orelse {
                 std.debug.print("cd: OLDPWD not set\n", .{});
                 self.last_exit = 1;
                 return;
@@ -1749,6 +2000,113 @@ pub const Shell = struct {
             }
         }
         self.last_exit = 0;
+    }
+
+    fn builtinWait(self: *Shell, argv: []const []const u8) void {
+        // wait [job|pid]...
+        //
+        // Minimal semantics:
+        // - wait          : wait for all running jobs (interactive) or all children (script mode)
+        // - wait N        : if N matches a job id, wait for that job; otherwise treat as PID
+        // - wait $!       : works (PID of last background wrapper)
+        //
+        // Note: we intentionally avoid waiting on stopped jobs (it would hang and isn't
+        // interruptible because the shell ignores SIGINT).
+        if (argv.len == 1) {
+            if (self.interactive) {
+                // Wait for all running jobs (stopped jobs are ignored).
+                var waited_any = false;
+                while (true) {
+                    var next_id: ?u16 = null;
+                    for (&self.jobs) |*slot| {
+                        if (slot.*) |*job| {
+                            if (job.state == .running) {
+                                next_id = job.id;
+                                break;
+                            }
+                        }
+                    }
+                    if (next_id == null) break;
+                    waited_any = true;
+                    if (self.findJobById(next_id.?)) |job| {
+                        self.waitForForegroundJob(job.pgid, job.pid_count);
+                        if (job.state != .stopped) self.removeJob(job.id);
+                    }
+                }
+                if (!waited_any) self.last_exit = 0;
+                return;
+            }
+
+            // Script mode: wait for all remaining children.
+            var waited_any = false;
+            while (true) {
+                var status: i32 = 0;
+                const pid = libc.waitpid(-1, &status, libc.WUNTRACED);
+                if (pid <= 0) break;
+                waited_any = true;
+                const ustatus: u32 = @bitCast(status);
+                if (posix.W.IFSTOPPED(ustatus)) {
+                    self.last_exit = 1;
+                    return;
+                }
+                self.last_exit = statusToExit(ustatus);
+            }
+            if (!waited_any) self.last_exit = 0;
+            return;
+        }
+
+        for (argv[1..]) |tok| {
+            if (tok.len == 0) continue;
+
+            // Prefer job-id semantics when an existing job matches.
+            var handled = false;
+            if (std.fmt.parseInt(u16, tok, 10)) |jid| {
+                if (self.findJobById(jid)) |job| {
+                    if (job.state == .stopped) {
+                        std.debug.print("wait: {s}: job is stopped (use fg/bg)\n", .{tok});
+                        self.last_exit = 1;
+                        return;
+                    }
+                    self.waitForForegroundJob(job.pgid, job.pid_count);
+                    if (job.state != .stopped) self.removeJob(job.id);
+                    handled = true;
+                }
+            } else |_| {}
+            if (handled) continue;
+
+            // Otherwise treat as PID.
+            const pid = std.fmt.parseInt(posix.pid_t, tok, 10) catch {
+                std.debug.print("wait: {s}: invalid pid\n", .{tok});
+                self.last_exit = 1;
+                return;
+            };
+            if (pid <= 0) {
+                std.debug.print("wait: {s}: invalid pid\n", .{tok});
+                self.last_exit = 1;
+                return;
+            }
+
+            var status: i32 = 0;
+            const waited_pid = libc.waitpid(pid, &status, libc.WUNTRACED);
+            if (waited_pid <= 0) {
+                std.debug.print("wait: {s}: no such child\n", .{tok});
+                self.last_exit = 1;
+                return;
+            }
+            const ustatus: u32 = @bitCast(status);
+            if (posix.W.IFSTOPPED(ustatus)) {
+                self.last_exit = 1;
+                return;
+            }
+            self.last_exit = statusToExit(ustatus);
+
+            // If this PID is also tracked as a job pgid, clean it up.
+            if (self.interactive) {
+                if (self.findJobByPgid(pid)) |job| {
+                    if (job.state != .stopped) self.removeJob(job.id);
+                }
+            }
+        }
     }
 
     fn builtinFg(self: *Shell, argv: []const []const u8) void {
@@ -1898,7 +2256,7 @@ pub const Shell = struct {
 
     pub const builtin_names = [_][]const u8{
         "cd",      "echo",    "true",    "false",   "type",    "pwd",
-        "jobs",    "fg",      "bg",      "history", "j",
+        "jobs",    "fg",      "bg",      "wait",    "history", "j",
         "exec",    "exit",    "source",
         "set",     "cmd",     "key",
         "test",    "shift",   "break",   "continue",
@@ -1916,47 +2274,21 @@ pub const Shell = struct {
         const params = cmd.params;
         const call_args = argv[1..];
         const saved_args = self.args;
-
         self.args = call_args;
+        defer self.args = saved_args;
 
-        const saved = self.allocator.alloc(?[]const u8, params.len) catch return;
-        defer self.allocator.free(saved);
+        if (!self.pushLocalScope()) return;
+        defer self.popLocalScope();
+
+        const scope = self.currentVarMap();
         for (params, 0..) |pname, i| {
-            saved[i] = if (self.vars.get(pname)) |old|
-                self.allocator.dupe(u8, old) catch null
-            else
-                null;
             const raw = if (i < call_args.len) call_args[i] else "";
             const val = self.allocator.dupe(u8, raw) catch continue;
-            if (self.vars.getPtr(pname)) |slot| {
-                self.allocator.free(slot.*);
-                slot.* = val;
-            } else {
-                const key = self.allocator.dupe(u8, pname) catch continue;
-                self.vars.put(key, val) catch {};
-            }
+            _ = self.putOwnedVar(scope, pname, .{ .scalar = val });
         }
 
         self.eval(cmd.body, cmd.source);
         if (self.flow == .exit_cmd) self.flow = .normal;
-
-        for (params, 0..) |pname, i| {
-            if (saved[i]) |old| {
-                if (self.vars.getPtr(pname)) |slot| {
-                    self.allocator.free(slot.*);
-                    slot.* = old;
-                } else {
-                    const key = self.allocator.dupe(u8, pname) catch continue;
-                    self.vars.put(key, old) catch {};
-                }
-            } else {
-                if (self.vars.fetchRemove(pname)) |kv| {
-                    self.allocator.free(kv.key);
-                    self.allocator.free(kv.value);
-                }
-            }
-        }
-        self.args = saved_args;
     }
 
     // =========================================================================
@@ -2352,6 +2684,8 @@ fn toExecArgs(alloc: Allocator, argv: []const []const u8) ![*:null]const ?[*:0]c
 
 fn buildEnvP(alloc: Allocator, shell: *const Shell) [*:null]const ?[*:0]const u8 {
     var envp: std.ArrayList(?[*:0]const u8) = .empty;
+    var seen_exports: std.ArrayList([]const u8) = .empty;
+    defer seen_exports.deinit(alloc);
     const env = std.c.environ;
     var i: usize = 0;
     while (env[i]) |entry| : (i += 1) {
@@ -2361,21 +2695,41 @@ fn buildEnvP(alloc: Allocator, shell: *const Shell) [*:null]const ?[*:0]const u8
         const text = slice[0..len];
         const eq = std.mem.indexOfScalar(u8, text, '=') orelse text.len;
         const name = text[0..eq];
-        if (shouldExportVar(name) and shell.vars.contains(name)) continue;
+        if (shell.hasExportOverride(name)) continue;
         envp.append(alloc, alloc.dupeZ(u8, text) catch continue) catch continue;
+    }
+
+    var scope_index = shell.local_scopes.items.len;
+    while (scope_index > 0) {
+        scope_index -= 1;
+        var it = shell.local_scopes.items[scope_index].vars.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            if (!shouldExportVar(name) or sliceSeen(seen_exports.items, name)) continue;
+            seen_exports.append(alloc, name) catch continue;
+            const name_len = name.len;
+            const val = entry.value_ptr.*;
+            const total = name_len + 1 + varValueLen(val);
+            const pair = alloc.allocSentinel(u8, total, 0) catch continue;
+            @memcpy(pair[0..name_len], name);
+            pair[name_len] = '=';
+            writeVarValue(pair[name_len + 1 ..][0 .. total - name_len - 1], val);
+            envp.append(alloc, pair) catch continue;
+        }
     }
 
     var it = shell.vars.iterator();
     while (it.next()) |entry| {
         const name = entry.key_ptr.*;
-        if (!shouldExportVar(name)) continue;
+        if (!shouldExportVar(name) or sliceSeen(seen_exports.items, name)) continue;
+        seen_exports.append(alloc, name) catch continue;
         const name_len = name.len;
         const val = entry.value_ptr.*;
-        const total = name_len + 1 + val.len;
+        const total = name_len + 1 + varValueLen(val);
         const pair = alloc.allocSentinel(u8, total, 0) catch continue;
         @memcpy(pair[0..name_len], name);
         pair[name_len] = '=';
-        @memcpy(pair[name_len + 1 ..][0..val.len], val);
+        writeVarValue(pair[name_len + 1 ..][0 .. total - name_len - 1], val);
         envp.append(alloc, pair) catch continue;
     }
 
@@ -2385,6 +2739,44 @@ fn buildEnvP(alloc: Allocator, shell: *const Shell) [*:null]const ?[*:0]const u8
 
 fn shouldExportVar(name: []const u8) bool {
     return name.len > 0 and std.ascii.isUpper(name[0]);
+}
+
+fn sliceSeen(items: []const []const u8, needle: []const u8) bool {
+    for (items) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
+}
+
+fn varValueLen(value: VarValue) usize {
+    return switch (value) {
+        .scalar => |text| text.len,
+        .argv => |items| blk: {
+            var total: usize = 0;
+            for (items, 0..) |item, i| {
+                if (i > 0) total += 1;
+                total += item.len;
+            }
+            break :blk total;
+        },
+    };
+}
+
+fn writeVarValue(buf: []u8, value: VarValue) void {
+    switch (value) {
+        .scalar => |text| @memcpy(buf[0..text.len], text),
+        .argv => |items| {
+            var pos: usize = 0;
+            for (items, 0..) |item, i| {
+                if (i > 0) {
+                    buf[pos] = ' ';
+                    pos += 1;
+                }
+                @memcpy(buf[pos..][0..item.len], item);
+                pos += item.len;
+            }
+        },
+    }
 }
 
 fn parseFdToken(token: []const u8) ?posix.fd_t {

@@ -225,7 +225,13 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
 
     while (true) {
         ev.reapAndReport();
-        const fmt = ev.vars.get("PROMPT") orelse prompt.default_fmt;
+        const fmt = if (ev.lookupScopedValue("PROMPT")) |val|
+            switch (val) {
+                .scalar => |text| text,
+                .argv => prompt.default_fmt,
+            }
+        else
+            prompt.default_fmt;
         const ctx = prompt.Context{ .last_exit = ev.last_exit, .duration_ms = last_duration_ms };
         const ps = prompt.render(fmt, ctx);
         const line = readline.readLineEx(ps.str, ps.visible_len, &hist) orelse return;
