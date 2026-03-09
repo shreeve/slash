@@ -872,7 +872,71 @@ check_script "exec math power" \
     "$(printf '= 2 ** 5\n')" \
     "32"
 
-# Cleanup list test temp files
+# ==========================================================================
+# EXECUTION: TILDE EXPANSION
+# ==========================================================================
+
+check_script "exec tilde home" \
+    "$(printf 'echo ~\n')" \
+    "$HOME"
+
+check_script "exec tilde path" \
+    "$(printf 'echo ~/test\n')" \
+    "$HOME/test"
+
+check_script "exec tilde in command arg" \
+    "$(printf 'test -d ~ && echo yes\n')" \
+    "yes"
+
+# ==========================================================================
+# EXECUTION: FLAG=VALUE TOKENIZATION
+# ==========================================================================
+
+check "flag with value"         "grep --color=always"       "(cmd grep --color=always)"
+check "flag with path value"    "app --config=/etc/foo"     "(cmd app --config=/etc/foo)"
+check "flag with complex value" "app --output=a,b,c"        "(cmd app --output=a,b,c)"
+
+check_script "exec flag=value in cmd" \
+    "$(printf 'echo --color=always\n')" \
+    "--color=always"
+
+# ==========================================================================
+# EXECUTION: LIST APPEND TO NONEXISTENT
+# ==========================================================================
+
+check_script "exec list append creates" \
+    "$(printf 'args += [echo hello]\nrun $args\n')" \
+    "hello"
+
+# ==========================================================================
+# EXECUTION: LIST WITH VARIABLE SPLAT
+# ==========================================================================
+
+check_script "exec list splat argv var" \
+    "$(printf 'base = [echo hello]\nargs = [world]\nargs += [$base]\necho not-splatted\n')" \
+    "not-splatted"
+
+check_script "exec list with interpolated string" \
+    "$(printf 'name = \"world\"\nargs = [echo \"hello $name\"]\nrun $args\n')" \
+    "hello world"
+
+# ==========================================================================
+# EXECUTION: CMD SCOPE ISOLATION
+# ==========================================================================
+
+check_script "exec cmd list stays local" \
+    "$(printf 'cmd build\n    args = [echo inside]\n    run $args\nbuild\necho $args\n')" \
+    "$(printf 'inside\n')"
+
+check_script "exec cmd nested call scope" \
+    "$(printf 'cmd inner\n    x = "inner"\n    echo $x\ncmd outer\n    x = "outer"\n    inner\n    echo $x\nouter\n')" \
+    "$(printf 'inner\nouter')"
+
+check_script "exec cmd param does not leak" \
+    "$(printf 'cmd greet(name)\n    echo hello $name\ngreet world\necho $name\n')" \
+    "$(printf 'hello world\n')"
+
+# Cleanup temp files
 rm -f /tmp/_sl_list_redir.txt
 
 # ==========================================================================
