@@ -25,6 +25,31 @@ const UserCmd = struct {
     params: [][]const u8,
     body: Sexp,
     source: []const u8,
+
+    fn freeSexp(alloc: Allocator, sexp: Sexp) void {
+        switch (sexp) {
+            .list => |items| {
+                for (items) |item| freeSexp(alloc, item);
+                alloc.free(items);
+            },
+            .str => |s| alloc.free(s),
+            .nil, .tag, .src => {},
+        }
+    }
+
+    fn dupeSexp(alloc: Allocator, sexp: Sexp) Sexp {
+        return switch (sexp) {
+            .nil => .nil,
+            .tag => |t| .{ .tag = t },
+            .src => |s| .{ .src = s },
+            .str => |s| .{ .str = alloc.dupe(u8, s) catch "" },
+            .list => |items| blk: {
+                const copy = alloc.alloc(Sexp, items.len) catch break :blk .nil;
+                for (items, 0..) |item, i| copy[i] = dupeSexp(alloc, item);
+                break :blk .{ .list = copy };
+            },
+        };
+    }
 };
 
 pub const VarValue = union(enum) {
@@ -127,6 +152,7 @@ pub const Shell = struct {
             while (it.next()) |entry| {
                 self.allocator.free(entry.key_ptr.*);
                 const cmd = entry.value_ptr.*;
+                UserCmd.freeSexp(self.allocator, cmd.body);
                 self.allocator.free(cmd.source);
                 if (cmd.params.len > 0) {
                     for (cmd.params) |p| self.allocator.free(p);
@@ -2320,11 +2346,12 @@ pub const Shell = struct {
 
         const new_cmd = UserCmd{
             .params = params,
-            .body = args[args.len - 1],
+            .body = UserCmd.dupeSexp(self.allocator, args[args.len - 1]),
             .source = source_copy,
         };
 
         if (self.user_cmds.getPtr(name_raw)) |slot| {
+            UserCmd.freeSexp(self.allocator, slot.body);
             self.allocator.free(slot.source);
             if (slot.params.len > 0) {
                 for (slot.params) |p| self.allocator.free(p);
@@ -2343,6 +2370,7 @@ pub const Shell = struct {
         const name = self.sexpToStr(args[0], source) orelse return;
         if (self.user_cmds.fetchRemove(name)) |kv| {
             self.allocator.free(kv.key);
+            UserCmd.freeSexp(self.allocator, kv.value.body);
             self.allocator.free(kv.value.source);
             if (kv.value.params.len > 0) {
                 for (kv.value.params) |p| self.allocator.free(p);
@@ -2369,11 +2397,12 @@ pub const Shell = struct {
 
         const new_cmd = UserCmd{
             .params = params,
-            .body = args[body_idx],
+            .body = UserCmd.dupeSexp(self.allocator, args[body_idx]),
             .source = source_copy,
         };
 
         if (self.user_cmds.getPtr("???")) |slot| {
+            UserCmd.freeSexp(self.allocator, slot.body);
             self.allocator.free(slot.source);
             if (slot.params.len > 0) {
                 for (slot.params) |p| self.allocator.free(p);
@@ -2390,6 +2419,7 @@ pub const Shell = struct {
     fn evalCmdMissingDel(self: *Shell) void {
         if (self.user_cmds.fetchRemove("???")) |kv| {
             self.allocator.free(kv.key);
+            UserCmd.freeSexp(self.allocator, kv.value.body);
             self.allocator.free(kv.value.source);
             if (kv.value.params.len > 0) {
                 for (kv.value.params) |p| self.allocator.free(p);
