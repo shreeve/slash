@@ -495,7 +495,7 @@ pub const Shell = struct {
             self.last_exit = 2;
             return;
         };
-        self.eval(sexp, source);
+        self.eval(sexp, parse_source);
         if (self.flow == .exit_cmd) {
             self.flow = .normal;
             exit_requested = true;
