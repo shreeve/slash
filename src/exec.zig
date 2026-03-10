@@ -624,6 +624,8 @@ pub const Shell = struct {
 
         var argv_list: std.ArrayList([]const u8) = .empty;
         defer argv_list.deinit(self.allocator);
+        var literal_items: std.ArrayList(usize) = .empty;
+        defer literal_items.deinit(self.allocator);
         var redir_list: std.ArrayList(Redirect) = .empty;
         defer redir_list.deinit(self.allocator);
         var procsub_fds: std.ArrayList(ProcSubFd) = .empty;
@@ -633,7 +635,7 @@ pub const Shell = struct {
             switch (arg) {
                 .src => |s| {
                     const text = source[s.pos..][0..s.len];
-                    if (self.appendBareArgvVar(&argv_list, text)) continue;
+                    if (self.appendBareArgvVar(&argv_list, &literal_items, text)) continue;
                     const expanded = self.expandToken(text);
                     if (argv_list.items.len > 0 and s.pos > 0 and expanded.ptr == text.ptr) {
                         const prev = argv_list.items[argv_list.items.len - 1];
@@ -688,8 +690,13 @@ pub const Shell = struct {
             for (owned_expansions.items) |s| self.allocator.free(s);
             owned_expansions.deinit(self.allocator);
         }
-        for (argv_list.items) |arg| {
-            if (isRegexGlob(arg)) {
+        for (argv_list.items, 0..) |arg, idx| {
+            const is_literal = for (literal_items.items) |li| {
+                if (li == idx) break true;
+            } else false;
+            if (is_literal) {
+                expanded_argv.append(self.allocator, arg) catch {};
+            } else if (isRegexGlob(arg)) {
                 const before = expanded_argv.items.len;
                 expandRegexGlob(self.allocator, arg, &expanded_argv);
                 for (expanded_argv.items[before..]) |s| owned_expansions.append(self.allocator, s) catch {};
@@ -996,12 +1003,15 @@ pub const Shell = struct {
         return null;
     }
 
-    fn appendBareArgvVar(self: *Shell, list: *std.ArrayList([]const u8), text: []const u8) bool {
+    fn appendBareArgvVar(self: *Shell, list: *std.ArrayList([]const u8), literal_indices: ?*std.ArrayList(usize), text: []const u8) bool {
         const name = bareVarName(text) orelse return false;
         const value = self.lookupScopedValue(name) orelse return false;
         switch (value) {
             .argv => |items| {
-                for (items) |item| list.append(self.allocator, item) catch {};
+                for (items) |item| {
+                    if (literal_indices) |li| li.append(self.allocator, list.items.len) catch {};
+                    list.append(self.allocator, item) catch {};
+                }
                 return true;
             },
             .scalar => return false,
@@ -1636,20 +1646,10 @@ pub const Shell = struct {
     fn dupeExpandedToken(self: *Shell, list: *std.ArrayListUnmanaged([]const u8), text: []const u8) ?void {
         const expanded = self.expandToken(text);
         const owned = self.allocator.dupe(u8, expanded) catch return null;
-        if (expanded.ptr != text.ptr and !isSourceSlice(expanded, text)) {
-            self.allocator.free(expanded);
-        }
         list.append(self.allocator, owned) catch {
             self.allocator.free(owned);
             return null;
         };
-    }
-
-    fn isSourceSlice(slice: []const u8, source: []const u8) bool {
-        const s_start = @intFromPtr(source.ptr);
-        const s_end = s_start + source.len;
-        const p = @intFromPtr(slice.ptr);
-        return p >= s_start and p < s_end;
     }
 
     fn evalAssign(self: *Shell, args: []const Sexp, source: []const u8) void {
@@ -1919,7 +1919,7 @@ pub const Shell = struct {
             switch (arg) {
                 .src => |s| {
                     const text = source[s.pos..][0..s.len];
-                    if (self.appendBareArgvVar(&argv_list, text)) continue;
+                    if (self.appendBareArgvVar(&argv_list, null, text)) continue;
                     argv_list.append(self.allocator, self.expandToken(text)) catch {};
                 },
                 .list => |items| {
