@@ -639,10 +639,11 @@ These are registered in `isBuiltin()` in `exec.zig`:
 | `pwd` | Print working directory |
 | `jobs` | List all jobs |
 | `fg` / `bg` | Job control (foreground / background) |
+| `wait` | Wait for background jobs or specific PIDs |
 | `history` | Search/display command history |
 | `j` | List session MRU directories (deduped), optionally filtered by substring |
 | `exit` | Exit current context (command, script, or shell) |
-| `source` | Execute a script in current shell context |
+| `source` | Execute a script in current shell context. `$0` is set to the sourced file's path and restored on return. |
 | `set` | Set, show, reset, or list shell options |
 | `cmd` | Define, show, delete, or list user commands |
 | `key` | Define key bindings |
@@ -650,8 +651,44 @@ These are registered in `isBuiltin()` in `exec.zig`:
 | `shift` | Shift positional arguments |
 | `break` / `continue` | Loop control flow |
 
+`run` and `ok` are handled by stripping them from argv in `evalCmd`:
+
+| Command | Description |
+|---------|-------------|
+| `run $args` | Execute a list-valued variable as a command. Supports redirections and pipes. |
+| `ok <command>` | Run a command with stdout and stderr suppressed, return only the exit code. |
+
 `exec` is handled at the s-expression dispatch level (tag `.exec`), not
 through `tryBuiltin()` — it replaces the shell process via `execvpeZ`.
+
+## Variable Scoping
+
+- Top-level assignments persist in the shell.
+- Uppercase variables are exported to child processes; lowercase are not.
+- Each `cmd` invocation gets a fresh local variable scope.
+- Assignments inside a `cmd` do not leak back to the caller.
+- `$0` is set to the full absolute path of the executing script. Updated by
+  `source` and restored when the sourced file returns.
+
+## String Lists
+
+Variables can hold string lists for incremental command building:
+
+```
+args = [find . -type f]
+args += [-name "*.log"]
+run $args
+```
+
+List literals are parsed via a `list_start` token emitted by the lexer when
+`[` appears in math context (after `=` or `+=`). List-valued variables splat
+into real argv entries when used in command position via `run $args`. Items
+from list variables skip glob expansion (they are already fully resolved).
+
+## Tilde Expansion
+
+`~` and `~/path` are expanded to `$HOME` in all command arguments via
+`expandToken`. This happens before glob expansion.
 
 ---
 

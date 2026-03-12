@@ -75,7 +75,13 @@ Zig 0.15.2. See `docs/ZIG-0.15.2.md` for API changes (Writergate, ArrayList
 - Commit messages: imperative, 1-2 sentences focused on "why"
 - Uppercase variables are auto-exported; no `export` keyword
 - `cmd` is the single mechanism for user-defined commands (no aliases, no functions)
+- `cmd` bodies have automatic local scope — assignments do not leak
 - Block syntax: braces `{}` for one-liners, `INDENT`/`OUTDENT` for scripts — grammar is identical for both
+- String lists: `args = [find .]`, `args += [...]`, `run $args`
+- `ok` runs a command silently (suppresses stdout+stderr), returns exit code
+- `run` executes a list-valued variable as a command with redirections and pipes
+- `$0` is the full absolute path of the executing script
+- `~` and `~/path` expand to `$HOME` in all arguments
 
 ## Design Decisions
 
@@ -87,6 +93,7 @@ Zig 0.15.2. See `docs/ZIG-0.15.2.md` for API changes (Writergate, ArrayList
 - **`cmd ???`** — command-not-found hook, three characters
 - **Heredocs use `'''`/`"""`/`` ``` ``** — no `<<EOF` arbitrary tokens
 - **`= expr`** — bare `=` followed by expression evaluates and prints
+- **`unless ok`** — idempotent check pattern for infrastructure scripts
 
 ## Reference
 

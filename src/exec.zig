@@ -93,9 +93,11 @@ pub const Shell = struct {
     // Positional arguments ($1-$9, $*, $#)
     args: []const []const u8 = &.{},
 
-    // Scratch buffers (freed on next use)
+    // Scratch buffer for argv-to-string conversion (freed on next use)
     argv_str_scratch: ?[]const u8 = null,
-    tilde_scratch: ?[]const u8 = null,
+
+    // Per-command expansion tracking (freed after each evalCmd)
+    cmd_expansions: std.ArrayListUnmanaged([]const u8) = .{},
 
     // Last j listing (for bare digit jump)
     j_list: [9][]const u8 = .{""} ** 9,
@@ -178,7 +180,8 @@ pub const Shell = struct {
         }
         self.key_bindings.deinit();
         if (self.argv_str_scratch) |s| self.allocator.free(s);
-        if (self.tilde_scratch) |s| self.allocator.free(s);
+        for (self.cmd_expansions.items) |s| self.allocator.free(s);
+        self.cmd_expansions.deinit(self.allocator);
         self.clearJList();
         self.clearSessionDirs();
     }
@@ -489,10 +492,19 @@ pub const Shell = struct {
     // =========================================================================
 
     pub fn setScriptPath(self: *Shell, path: []const u8) void {
-        var buf: [4096]u8 = undefined;
-        const abs = if (path.len > 0 and path[0] == '/') path else blk: {
-            const cwd = posix.getcwd(&buf) catch break :blk path;
-            break :blk std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ cwd, path }) catch path;
+        if (path.len > 0 and path[0] == '/') {
+            self.setVarDupe("0", path);
+            return;
+        }
+        var cwd_buf: [4096]u8 = undefined;
+        var abs_buf: [4096]u8 = undefined;
+        const cwd = posix.getcwd(&cwd_buf) catch {
+            self.setVarDupe("0", path);
+            return;
+        };
+        const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ cwd, path }) catch {
+            self.setVarDupe("0", path);
+            return;
         };
         self.setVarDupe("0", abs);
     }
@@ -630,6 +642,14 @@ pub const Shell = struct {
 
     fn evalCmd(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len == 0) return;
+
+        const saved_expansion_count = self.cmd_expansions.items.len;
+        defer {
+            while (self.cmd_expansions.items.len > saved_expansion_count) {
+                const s = self.cmd_expansions.pop().?;
+                self.allocator.free(s);
+            }
+        }
 
         var argv_list: std.ArrayList([]const u8) = .empty;
         defer argv_list.deinit(self.allocator);
@@ -807,6 +827,7 @@ pub const Shell = struct {
 
         if (tag == .procsub_in) {
             if (pid == 0) {
+                resetChildSignals();
                 posix.close(pipe_fds[0]);
                 posix.dup2(pipe_fds[1], posix.STDOUT_FILENO) catch posix.exit(1);
                 posix.close(pipe_fds[1]);
@@ -818,6 +839,7 @@ pub const Shell = struct {
             return std.fmt.allocPrint(self.allocator, "/dev/fd/{d}", .{pipe_fds[0]}) catch null;
         } else {
             if (pid == 0) {
+                resetChildSignals();
                 posix.close(pipe_fds[1]);
                 posix.dup2(pipe_fds[0], posix.STDIN_FILENO) catch posix.exit(1);
                 posix.close(pipe_fds[0]);
@@ -976,9 +998,8 @@ pub const Shell = struct {
             if (text.len == 1) return posix.getenv("HOME") orelse "~";
             if (text[1] == '/') {
                 const home = posix.getenv("HOME") orelse return text;
-                if (self.tilde_scratch) |old| self.allocator.free(old);
                 const result = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ home, text[1..] }) catch return text;
-                self.tilde_scratch = result;
+                self.cmd_expansions.append(self.allocator, result) catch {};
                 return result;
             }
         }
@@ -1186,7 +1207,9 @@ pub const Shell = struct {
         const result = posix.waitpid(pid, 0);
         self.last_exit = statusToExit(result.status);
 
-        return std.mem.trimRight(u8, output, "\n");
+        const trimmed = std.mem.trimRight(u8, output, "\n");
+        self.cmd_expansions.append(self.allocator, output) catch {};
+        return trimmed;
     }
 
     // =========================================================================
@@ -1469,6 +1492,7 @@ pub const Shell = struct {
             return;
         };
         if (pid == 0) {
+            resetChildSignals();
             self.eval(args[0], source);
             posix.exit(self.last_exit);
         }
@@ -1602,13 +1626,12 @@ pub const Shell = struct {
                 if (job.state != .stopped) self.removeJob(job_id);
             }
         } else {
-            var worst_exit: u8 = 0;
+            var last_exit: u8 = 0;
             for (0..spawned) |i| {
                 const result = posix.waitpid(child_pids[i], 0);
-                const code = statusToExit(result.status);
-                if (code != 0) worst_exit = code;
+                if (i == spawned - 1) last_exit = statusToExit(result.status);
             }
-            self.last_exit = worst_exit;
+            self.last_exit = last_exit;
         }
     }
 
@@ -2877,11 +2900,13 @@ fn statusToExit(status: u32) u8 {
     return 1;
 }
 
-fn formatFloat(alloc: Allocator, val: f64) []const u8 {
+var float_buf: [64]u8 = undefined;
+
+fn formatFloat(_: Allocator, val: f64) []const u8 {
     if (val == @trunc(val) and @abs(val) < 1e15) {
-        return std.fmt.allocPrint(alloc, "{d}", .{@as(i64, @intFromFloat(val))}) catch "0";
+        return std.fmt.bufPrint(&float_buf, "{d}", .{@as(i64, @intFromFloat(val))}) catch "0";
     }
-    const raw = std.fmt.allocPrint(alloc, "{d:.10}", .{val}) catch return "0";
+    const raw = std.fmt.bufPrint(&float_buf, "{d:.10}", .{val}) catch return "0";
     var end: usize = raw.len;
     while (end > 0 and raw[end - 1] == '0') end -= 1;
     if (end > 0 and raw[end - 1] == '.') end -= 1;
