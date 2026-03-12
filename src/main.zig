@@ -114,6 +114,7 @@ pub fn main() !u8 {
         }
         var ev = exec.Shell.init(alloc);
         defer ev.deinit();
+        ev.setScriptPath(path);
         if (i < args.len) ev.setArgs(args[i..]);
         ev.execSource(source);
         return ev.last_exit;

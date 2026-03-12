@@ -488,6 +488,15 @@ pub const Shell = struct {
     // PUBLIC ENTRY POINTS
     // =========================================================================
 
+    pub fn setScriptPath(self: *Shell, path: []const u8) void {
+        var buf: [4096]u8 = undefined;
+        const abs = if (path.len > 0 and path[0] == '/') path else blk: {
+            const cwd = posix.getcwd(&buf) catch break :blk path;
+            break :blk std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ cwd, path }) catch path;
+        };
+        self.setVarDupe("0", abs);
+    }
+
     pub fn sourceFile(self: *Shell, path: []const u8) void {
         const content = std.fs.cwd().readFileAlloc(self.allocator, path, 10 * 1024 * 1024) catch return;
         defer self.allocator.free(content);
@@ -2562,7 +2571,14 @@ pub const Shell = struct {
             return;
         };
         defer self.allocator.free(content);
+        const saved_0 = self.lookupGlobalScalar("0");
+        const saved_0_copy = if (saved_0) |s| self.allocator.dupe(u8, s) catch null else null;
+        self.setScriptPath(path);
         self.execSource(content);
+        if (saved_0_copy) |old| {
+            self.setVarDupe("0", old);
+            self.allocator.free(old);
+        }
     }
 
     fn evalExit(self: *Shell, args: []const Sexp, source: []const u8) void {

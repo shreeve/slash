@@ -956,6 +956,14 @@ check_script "exec ok with id" \
     "$(printf 'if ok id -u root { echo found }\n')" \
     "found"
 
+# ==========================================================================
+# EXECUTION: $0 SCRIPT PATH
+# ==========================================================================
+
+check_script "exec \$0 is full path" \
+    "$(printf 'echo $0\n')" \
+    "/tmp/_slash_test_$$.slash"
+
 # Cleanup temp files
 rm -f /tmp/_sl_list_redir.txt
 
