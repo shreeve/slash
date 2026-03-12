@@ -711,11 +711,21 @@ pub const Shell = struct {
         var argv = expanded_argv.items;
         if (argv.len == 0) return;
 
+        var ok_mode = false;
+        if (argv.len >= 1 and std.mem.eql(u8, argv[0], "ok")) {
+            argv = if (argv.len > 1) argv[1..] else argv[0..0];
+            if (argv.len == 0) return;
+            ok_mode = true;
+        }
         if (argv.len >= 1 and std.mem.eql(u8, argv[0], "run")) {
             argv = if (argv.len > 1) argv[1..] else argv[0..0];
             if (argv.len == 0) return;
         }
 
+        if (ok_mode) {
+            redir_list.append(self.allocator, .{ .tag = .redir_out, .target = "/dev/null" }) catch {};
+            redir_list.append(self.allocator, .{ .tag = .redir_err, .target = "/dev/null" }) catch {};
+        }
         const redirs = redir_list.items;
         const has_redirs = redirs.len > 0;
         const is_builtin = isBuiltin(argv[0]);
@@ -1379,6 +1389,10 @@ pub const Shell = struct {
         if (args.len >= 1) self.eval(args[0], source);
         self.last_exit = if (self.last_exit == 0) 1 else 0;
     }
+
+
+
+
 
     fn evalSequence(self: *Shell, args: []const Sexp, source: []const u8) void {
         for (args) |child| {

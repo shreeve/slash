@@ -936,6 +936,26 @@ check_script "exec cmd param does not leak" \
     "$(printf 'cmd greet(name)\n    echo hello $name\ngreet world\necho $name\n')" \
     "$(printf 'hello world\n')"
 
+# ==========================================================================
+# EXECUTION: OK BUILTIN
+# ==========================================================================
+
+check_script "exec ok suppresses output" \
+    "$(printf 'if ok ls /tmp { echo yes } else { echo no }\n')" \
+    "yes"
+
+check_script "exec ok with failing command" \
+    "$(printf 'unless ok ls /nonexistent_xyz { echo missing }\n')" \
+    "missing"
+
+check_script "exec ok exit code passthrough" \
+    "$(printf 'ok ls /tmp\necho $?\n')" \
+    "0"
+
+check_script "exec ok with id" \
+    "$(printf 'if ok id -u root { echo found }\n')" \
+    "found"
+
 # Cleanup temp files
 rm -f /tmp/_sl_list_redir.txt
 
