@@ -23,11 +23,11 @@
 #   math      - Math context (1 = after `=`; lexer.zig intercepts / as division,
 #               ^ as power, * and bare numbers before ident patterns; cleared on newline)
 
-state beg = 1
+state beg     = 1
 state heredoc = 0
-state paren = 0
-state brace = 0
-state math = 0
+state paren   = 0
+state brace   = 0
+state math    = 0
 
 # ==============================================================================
 # TOKEN TYPES
