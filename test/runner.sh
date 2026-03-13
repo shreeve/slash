@@ -233,6 +233,7 @@ check "cmd ??? delete"         "cmd ??? -"                  "(cmd_missing_del)"
 # ==========================================================================
 check "key define string"      'key esc-l "ls -la"'         '(key esc-l "ls -la")'
 check "key define action"      "key esc-l dirs"             "(key esc-l dirs)"
+check "key define esc-equals"  "key esc-= j"                "(key (key_combo_eq esc-) j)"
 check "key delete"             "key esc-l -"                "(key_del esc-l)"
 
 # ==========================================================================
@@ -737,7 +738,7 @@ check_script_all "exec cmd list shows one-line definition" \
 
 check_script_all "exec cmd list shows full multiline definition" \
     "$(printf 'cmd greet(name)\n    echo hello $name\n    echo done\ncmd\n')" \
-    "$(printf 'cmd greet(name)\necho hello $name\n    echo done')"
+    "$(printf 'cmd greet(name)\n    echo hello $name\n    echo done')"
 
 check_script "exec cmd with defaults" \
     "$(printf 'cmd serve(port)\n    port = $port ?? 8080\n    echo $port\nserve\n')" \

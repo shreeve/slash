@@ -2563,7 +2563,7 @@ pub const Shell = struct {
         const span = sexpSourceSpan(cmd.body, cmd.source);
         if (span.len > 0) {
             if (std.mem.indexOfScalar(u8, span, '\n') != null) {
-                std.debug.print("\n{s}\n", .{span});
+                std.debug.print("\n    {s}\n", .{span});
             } else {
                 std.debug.print(" {s}\n", .{span});
             }
@@ -2616,7 +2616,9 @@ pub const Shell = struct {
 
     fn evalKey(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
-        const combo_raw = self.sexpToStr(args[0], source) orelse return;
+        var owned_combo: ?[]const u8 = null;
+        defer if (owned_combo) |s| self.allocator.free(s);
+        const combo_raw = self.keyComboText(args[0], source, &owned_combo) orelse return;
         const command = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch return;
         if (self.key_bindings.getPtr(combo_raw)) |slot| {
             self.allocator.free(slot.*);
@@ -2630,7 +2632,9 @@ pub const Shell = struct {
 
     fn evalKeyDel(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
-        const combo = self.sexpToStr(args[0], source) orelse return;
+        var owned_combo: ?[]const u8 = null;
+        defer if (owned_combo) |s| self.allocator.free(s);
+        const combo = self.keyComboText(args[0], source, &owned_combo) orelse return;
         if (self.key_bindings.fetchRemove(combo)) |kv| {
             self.allocator.free(kv.key);
             self.allocator.free(kv.value);
@@ -2646,6 +2650,22 @@ pub const Shell = struct {
 
     pub fn lookupKeyBinding(self: *Shell, combo: []const u8) ?[]const u8 {
         return self.key_bindings.get(combo);
+    }
+
+    fn keyComboText(self: *Shell, combo_sexp: Sexp, source: []const u8, owned_out: *?[]const u8) ?[]const u8 {
+        switch (combo_sexp) {
+            .src, .str => return self.sexpToStr(combo_sexp, source),
+            .list => |items| {
+                if (items.len >= 2 and items[0] == .tag and items[0].tag == .key_combo_eq) {
+                    const base = self.sexpToStr(items[1], source) orelse return null;
+                    const full = std.fmt.allocPrint(self.allocator, "{s}=", .{base}) catch return null;
+                    owned_out.* = full;
+                    return full;
+                }
+                return null;
+            },
+            else => return null,
+        }
     }
 
     fn evalSourceCmd(self: *Shell, args: []const Sexp, source: []const u8) void {

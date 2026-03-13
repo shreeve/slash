@@ -881,7 +881,6 @@ var overlay_return_buf: [4096]u8 = undefined;
 
 fn overlaySearch(
     title: []const u8,
-    title_width: usize,
     searchFn: *const fn (std.mem.Allocator, []const u8) []OverlayItem,
 ) ?OverlayItem {
     var query_buf: [256]u8 = undefined;
@@ -890,6 +889,7 @@ fn overlaySearch(
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+    const title_width = visibleWidth(title);
     var results = searchFn(alloc, "");
     var first_draw = true;
 
@@ -900,7 +900,8 @@ fn overlaySearch(
         writeAll(query_buf[0..qlen]);
         writeAll("\n");
         for (results, 0..) |item, i| {
-            if (i == selected) writeAll("\x1b[7m") else writeAll("  ");
+            if (i == selected)
+                writeAll("\x1b[7m");
             writeAll(item.text);
             if (i == selected) writeAll("\x1b[0m");
             writeAll(item.suffix);
@@ -983,10 +984,31 @@ fn historySearch(kh: KeyHandler) ?[]const u8 {
         }
     };
     wrapper.saved_fn = search_fn;
-    const result = overlaySearch("\x1b[7m History Search: \x1b[0m ", 19, &wrapper.search) orelse return null;
+    const result = overlaySearch("\x1b[7m History Search: \x1b[0m ", &wrapper.search) orelse return null;
     const len = @min(result.text.len, save_buf.len);
     @memcpy(save_buf[0..len], result.text[0..len]);
     return save_buf[0..len];
+}
+
+fn visibleWidth(text: []const u8) usize {
+    var i: usize = 0;
+    var width: usize = 0;
+    while (i < text.len) {
+        if (text[i] == 0x1b and i + 1 < text.len and text[i + 1] == '[') {
+            i += 2;
+            while (i < text.len) : (i += 1) {
+                const ch = text[i];
+                if ((ch >= 'A' and ch <= 'Z') or (ch >= 'a' and ch <= 'z')) {
+                    i += 1;
+                    break;
+                }
+            }
+            continue;
+        }
+        width += 1;
+        i += 1;
+    }
+    return width;
 }
 
 fn clearOverlay() void {

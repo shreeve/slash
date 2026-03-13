@@ -641,9 +641,19 @@ params    = LPAREN_TIGHT L(name) ")"        → 2
 # KEY BINDINGS: key
 # ==============================================================================
 
-key_def   = KEY word word                   → (key 2 3)
-          | KEY word "-"                    → (key_del 2)
+key_def   = KEY key_combo word              → (key 2 3)
+          | KEY key_combo "-"               → (key_del 2)
           | KEY >                           → (key_list)
+
+key_combo = IDENT "="                       → (key_combo_eq 1)
+          | IDENT
+          | STRING_SQ
+          | STRING_DQ
+          | INTEGER
+          | REAL
+          | VARIABLE
+          | VAR_BRACED
+          | FLAG
 
 # ==============================================================================
 # SHELL OPTIONS: set
