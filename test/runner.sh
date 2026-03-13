@@ -349,6 +349,23 @@ check_script_raw() {
     fi
 }
 
+check_script_all() {
+    local label="$1"
+    local script="$2"
+    local expect="$3"
+    local actual
+    local tmpf="/tmp/_slash_test_all_$$.slash"
+    printf '%s\n' "$script" > "$tmpf"
+    actual=$("$SLASH" "$tmpf" 2>&1)
+    rm -f "$tmpf"
+    if [ "$actual" = "$expect" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: ${label}\n    expect: ${expect}\n    actual: ${actual}\n"
+    fi
+}
+
 check_script_error() {
     local label="$1"
     local script="$2"
@@ -709,6 +726,14 @@ check_script "exec try else fallthrough" \
 check_script "exec cmd with params" \
     "$(printf 'cmd greet(name) echo hello $name\ngreet world\n')" \
     "hello world"
+
+check_script_all "exec cmd list shows one-line definition" \
+    "$(printf 'cmd greet(name) echo hello $name\ncmd\n')" \
+    "cmd greet(name) echo hello \$name"
+
+check_script_all "exec cmd list shows full multiline definition" \
+    "$(printf 'cmd greet(name)\n    echo hello $name\n    echo done\ncmd\n')" \
+    "$(printf 'cmd greet(name)\necho hello $name\n    echo done')"
 
 check_script "exec cmd with defaults" \
     "$(printf 'cmd serve(port)\n    port = $port ?? 8080\n    echo $port\nserve\n')" \
