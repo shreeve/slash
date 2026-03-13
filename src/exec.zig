@@ -2489,25 +2489,7 @@ pub const Shell = struct {
 
     fn showCmd(self: *Shell, name: []const u8) void {
         if (self.user_cmds.get(name)) |cmd| {
-            std.debug.print("cmd {s}", .{name});
-            if (cmd.params.len > 0) {
-                std.debug.print("(", .{});
-                for (cmd.params, 0..) |p, i| {
-                    if (i > 0) std.debug.print(", ", .{});
-                    std.debug.print("{s}", .{p});
-                }
-                std.debug.print(")", .{});
-            }
-            const span = sexpSourceSpan(cmd.body, cmd.source);
-            if (span.len > 0) {
-                if (std.mem.indexOfScalar(u8, span, '\n') != null) {
-                    std.debug.print("\n{s}\n", .{span});
-                } else {
-                    std.debug.print(" {s}\n", .{span});
-                }
-            } else {
-                std.debug.print("\n", .{});
-            }
+            printCmdDefinition(name, cmd);
         } else {
             std.debug.print("slash: cmd {s}: not defined\n", .{name});
         }
@@ -2519,16 +2501,31 @@ pub const Shell = struct {
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
             const cmd = entry.value_ptr.*;
-            const span = sexpSourceSpan(cmd.body, cmd.source);
-            if (span.len > 0 and std.mem.indexOfScalar(u8, span, '\n') != null) {
-                std.debug.print("cmd {s} ...\n", .{name});
-            } else if (span.len > 0) {
-                std.debug.print("cmd {s} {s}\n", .{ name, span });
-            } else {
-                std.debug.print("cmd {s}\n", .{name});
-            }
+            printCmdDefinition(name, cmd);
         }
         self.last_exit = 0;
+    }
+
+    fn printCmdDefinition(name: []const u8, cmd: UserCmd) void {
+        std.debug.print("cmd {s}", .{name});
+        if (cmd.params.len > 0) {
+            std.debug.print("(", .{});
+            for (cmd.params, 0..) |p, i| {
+                if (i > 0) std.debug.print(", ", .{});
+                std.debug.print("{s}", .{p});
+            }
+            std.debug.print(")", .{});
+        }
+        const span = sexpSourceSpan(cmd.body, cmd.source);
+        if (span.len > 0) {
+            if (std.mem.indexOfScalar(u8, span, '\n') != null) {
+                std.debug.print("\n{s}\n", .{span});
+            } else {
+                std.debug.print(" {s}\n", .{span});
+            }
+        } else {
+            std.debug.print("\n", .{});
+        }
     }
 
     fn sexpSourceSpan(sexp: Sexp, source: []const u8) []const u8 {
