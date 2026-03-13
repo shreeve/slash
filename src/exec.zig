@@ -2730,7 +2730,7 @@ pub const Shell = struct {
         if (args.len < 1) return;
         const name = self.sexpToStr(args[0], source) orelse return;
         if (self.options.get(name)) |val| {
-            std.debug.print("{s} = {s}\n", .{ name, val });
+            std.debug.print("{s}={s}\n", .{ name, val });
         } else {
             std.debug.print("{s}: not set\n", .{name});
         }
@@ -2739,7 +2739,7 @@ pub const Shell = struct {
 
     fn evalSetList(self: *Shell) void {
         var it = self.options.iterator();
-        while (it.next()) |entry| std.debug.print("{s} = {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+        while (it.next()) |entry| std.debug.print("{s}={s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         self.last_exit = 0;
     }
 

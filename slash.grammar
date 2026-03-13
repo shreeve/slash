@@ -660,7 +660,7 @@ key_combo = IDENT "="                       → (key_combo_eq 1)
 # ==============================================================================
 
 set_stmt  = SET name "-"                    → (set_reset 2)
-          | SET name word                   → (set 2 3)
+          | SET name "=" word               → (set 2 4)
           | SET name >                      → (set_show 2)
           | SET >                           → (set_list)
 

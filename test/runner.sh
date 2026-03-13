@@ -239,8 +239,9 @@ check "key delete"             "key esc-l -"                "(key_del esc-l)"
 # ==========================================================================
 # SHELL OPTIONS: set
 # ==========================================================================
-check "set option"             "set foo bar"                "(set foo bar)"
-check "set option true"        "set prompt-git true"        "(set prompt-git true)"
+check "set option"             "set foo=bar"                "(set foo bar)"
+check "set option spaced eq"   "set foo = bar"              "(set foo bar)"
+check "set option true"        "set prompt-git=true"        "(set prompt-git true)"
 check "set reset"              "set foo -"                  "(set_reset foo)"
 check "set show"               "set foo"                    "(set_show foo)"
 check "set list"               "set"                        "(set_list)"
