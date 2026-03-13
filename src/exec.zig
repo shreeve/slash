@@ -364,9 +364,10 @@ pub const Shell = struct {
         const id = self.next_job_id;
         self.next_job_id +%= 1;
         if (self.next_job_id == 0) self.next_job_id = 1;
+        const command_owned = self.allocator.dupe(u8, command) catch return 0;
         for (&self.jobs) |*slot| {
             if (slot.* == null) {
-                var job = Job{ .id = id, .pgid = pgid, .state = state, .exit_code = 0, .command = command };
+                var job = Job{ .id = id, .pgid = pgid, .state = state, .exit_code = 0, .command = command_owned };
                 for (pids, 0..) |pid, i| {
                     if (i >= MAX_JOB_PIDS) break;
                     job.pids[i] = pid;
@@ -377,6 +378,7 @@ pub const Shell = struct {
                 return id;
             }
         }
+        self.allocator.free(command_owned);
         return 0;
     }
 
@@ -975,7 +977,7 @@ pub const Shell = struct {
 
         if (self.interactive) {
             _ = libc.setpgid(pid, pid);
-            const cmd_text = self.allocator.dupe(u8, argv[0]) catch argv[0];
+            const cmd_text = argv[0];
             const pids = [_]posix.pid_t{pid};
             const job_id = self.addJob(pid, .running, cmd_text, &pids);
             _ = libc.tcsetpgrp(self.tty_fd, pid);
@@ -1477,7 +1479,7 @@ pub const Shell = struct {
         self.last_bg_pid = pid;
         if (self.interactive) {
             _ = libc.setpgid(pid, pid);
-            const cmd_text = self.allocator.dupe(u8, source[0..@min(source.len, 80)]) catch "";
+            const cmd_text = self.commandTextForJob(args[0], source);
             const pids = [_]posix.pid_t{pid};
             const job_id = self.addJob(pid, .running, cmd_text, &pids);
             std.debug.print("[{d}] {d}\n", .{ job_id, pid });
@@ -1620,7 +1622,7 @@ pub const Shell = struct {
         }
 
         if (self.interactive) {
-            const cmd_text = self.allocator.dupe(u8, source[0..@min(source.len, 80)]) catch "";
+            const cmd_text = self.sourceSpanForArgs(args[0..2], source);
             const job_id = self.addJob(pgid, .running, cmd_text, child_pids[0..spawned]);
             _ = libc.tcsetpgrp(self.tty_fd, pgid);
             self.waitForForegroundJob(pgid, @intCast(spawned));
@@ -2534,6 +2536,26 @@ pub const Shell = struct {
         sexpSpanWalk(sexp, &lo, &hi);
         if (lo >= hi) return "";
         return std.mem.trim(u8, source[lo..hi], " \t\n");
+    }
+
+    fn sourceSpanForArgs(self: *Shell, args: []const Sexp, source: []const u8) []const u8 {
+        var lo: u32 = @intCast(source.len);
+        var hi: u32 = 0;
+        for (args) |arg| sexpSpanWalk(arg, &lo, &hi);
+        if (lo < hi) return std.mem.trim(u8, source[lo..hi], " \t\n");
+        return self.commandTextFallback(source);
+    }
+
+    fn commandTextForJob(self: *Shell, sexp: Sexp, source: []const u8) []const u8 {
+        const span = sexpSourceSpan(sexp, source);
+        if (span.len > 0) return span;
+        return self.commandTextFallback(source);
+    }
+
+    fn commandTextFallback(_: *Shell, source: []const u8) []const u8 {
+        const prefix = source[0..@min(source.len, 80)];
+        const trimmed = std.mem.trim(u8, prefix, " \t\r\n");
+        return if (trimmed.len > 0) trimmed else "<job>";
     }
 
     fn sexpSpanWalk(sexp: Sexp, lo: *u32, hi: *u32) void {
