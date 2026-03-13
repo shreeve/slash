@@ -523,7 +523,9 @@ pub const Shell = struct {
         var p = Parser.init(self.allocator, source);
         defer p.deinit();
         const sexp = p.parseOneline() catch {
-            std.debug.print("parse error\n", .{});
+            if (!printJobspecShorthandHint(source)) {
+                std.debug.print("parse error\n", .{});
+            }
             self.last_exit = 2;
             return;
         };
@@ -540,7 +542,9 @@ pub const Shell = struct {
         var p = Parser.init(self.allocator, parse_source);
         defer p.deinit();
         const sexp = p.parseProgram() catch |err| {
-            std.debug.print("parse error: {s}\n", .{@errorName(err)});
+            if (!printJobspecShorthandHint(parse_source)) {
+                std.debug.print("parse error: {s}\n", .{@errorName(err)});
+            }
             self.last_exit = 2;
             return;
         };
@@ -549,6 +553,24 @@ pub const Shell = struct {
             self.flow = .normal;
             exit_requested = true;
         }
+    }
+
+    fn parseJobspecShorthand(source: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, source, " \t\r\n");
+        if (trimmed.len < 2 or trimmed[0] != '%') return null;
+        for (trimmed[1..]) |ch| {
+            if (ch < '0' or ch > '9') return null;
+        }
+        return trimmed;
+    }
+
+    fn printJobspecShorthandHint(source: []const u8) bool {
+        const tok = parseJobspecShorthand(source) orelse return false;
+        std.debug.print("parse error: jobspec shorthand '{s}' is not supported; use: fg {s}\n", .{
+            tok,
+            tok[1..],
+        });
+        return true;
     }
 
     // =========================================================================
@@ -2071,17 +2093,37 @@ pub const Shell = struct {
     }
 
     fn builtinJobs(self: *Shell) void {
-        for (&self.jobs) |*slot| {
-            if (slot.*) |job| {
-                const state_str = switch (job.state) {
-                    .running => "Running",
-                    .stopped => "Stopped",
-                    .done => "Done",
-                };
-                std.debug.print("[{d}]  {s}\t\t{s}\n", .{ job.id, state_str, job.command });
-            }
+        var ordered: [MAX_JOBS]Job = undefined;
+        const count = self.collectJobsOrdered(&ordered);
+        for (ordered[0..count]) |job| {
+            const state_str = switch (job.state) {
+                .running => "Running",
+                .stopped => "Stopped",
+                .done => "Done",
+            };
+            std.debug.print("[{d}]  {s}\t\t{s}\n", .{ job.id, state_str, job.command });
         }
         self.last_exit = 0;
+    }
+
+    fn collectJobsOrdered(self: *Shell, out: *[MAX_JOBS]Job) usize {
+        var count: usize = 0;
+        for (&self.jobs) |*slot| {
+            if (slot.*) |job| {
+                out[count] = job;
+                count += 1;
+            }
+        }
+        var i: usize = 1;
+        while (i < count) : (i += 1) {
+            var j = i;
+            while (j > 0 and out[j - 1].id > out[j].id) : (j -= 1) {
+                const tmp = out[j - 1];
+                out[j - 1] = out[j];
+                out[j] = tmp;
+            }
+        }
+        return count;
     }
 
     fn builtinWait(self: *Shell, argv: []const []const u8) void {
@@ -3118,4 +3160,42 @@ fn ensureTrailingNewlineAlloc(alloc: Allocator, source: []const u8) ![]const u8 
     @memcpy(buf[0..source.len], source);
     buf[source.len] = '\n';
     return buf;
+}
+
+test "jobspec shorthand parsing" {
+    try std.testing.expect(Shell.parseJobspecShorthand("%3") != null);
+    try std.testing.expect(Shell.parseJobspecShorthand("  %12  \n") != null);
+    try std.testing.expect(Shell.parseJobspecShorthand("%") == null);
+    try std.testing.expect(Shell.parseJobspecShorthand("%x") == null);
+    try std.testing.expect(Shell.parseJobspecShorthand("fg 3") == null);
+}
+
+test "job ordering and stop resume bookkeeping" {
+    var sh = Shell.init(std.testing.allocator);
+    defer sh.deinit();
+
+    const p1 = [_]posix.pid_t{1111};
+    const p2 = [_]posix.pid_t{2222};
+    const p3 = [_]posix.pid_t{3333};
+
+    const id1 = sh.addJob(1111, .running, "job-one", &p1);
+    const id2 = sh.addJob(2222, .running, "job-two", &p2);
+    sh.removeJob(id1);
+    const id3 = sh.addJob(3333, .running, "job-three", &p3);
+
+    // Reusing a free slot can scramble table order; listing must still be ID-ordered.
+    var ordered: [MAX_JOBS]Job = undefined;
+    var count = sh.collectJobsOrdered(&ordered);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(id2, ordered[0].id);
+    try std.testing.expectEqual(id3, ordered[1].id);
+
+    // Stop then resume the older job and ensure bookkeeping reflects transitions.
+    if (sh.findJobById(id2)) |j| j.state = .stopped;
+    count = sh.collectJobsOrdered(&ordered);
+    try std.testing.expect(ordered[0].state == .stopped);
+
+    if (sh.findJobById(id2)) |j| j.state = .running;
+    count = sh.collectJobsOrdered(&ordered);
+    try std.testing.expect(ordered[0].state == .running);
 }

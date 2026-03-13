@@ -444,6 +444,10 @@ check_script_raw "exec no trailing newline" \
 check_script_error "exec malformed dedent" \
     "$(printf 'if true\n    echo yes\n  echo bad\n')"
 
+check_script_all "exec jobspec shorthand parse hint" \
+    "$(printf '%%3\n')" \
+    "parse error: jobspec shorthand '%3' is not supported; use: fg 3"
+
 check_script "exec indent if else" \
     "$(printf 'if true\n    echo yes\nelse\n    echo no\n')" \
     "yes"
@@ -998,6 +1002,6 @@ rm -f /tmp/_sl_list_redir.txt
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed ($(( PASS + FAIL )) total)"
 if [ "$FAIL" -gt 0 ]; then
-    printf "$ERRORS"
+    printf "%b" "$ERRORS"
     exit 1
 fi
