@@ -296,9 +296,9 @@ defaults {
 "2>>"                                       → redir_err_app
 "2>"                                        → redir_err
 "2>&1"                                      → redir_dup
-[0-9]+ '>' '&' [0-9]+                      → redir_fd_dup
-[0-9]+ '>'                                 → redir_fd_out
-[0-9]+ '<'                                 → redir_fd_in
+[0-9]+ '>' '&' [0-9]+                       → redir_fd_dup
+[0-9]+ '>'                                  → redir_fd_out
+[0-9]+ '<'                                  → redir_fd_in
 
 # ==============================================================================
 # FLAGS
@@ -422,14 +422,14 @@ oneline!  = stmt                            → 1
 # LINE STRUCTURE
 # ==============================================================================
 
-line      = stmt [COMMENT] NEWLINE           → 1
+line      = stmt [COMMENT] NEWLINE          → 1
           | [COMMENT] NEWLINE               → _
 
-stmt      = "=" expr                         → (display 2)
-          | IDENT "=" "-"                    → (unset 1)
-          | IDENT "=" list_literal           → (assign_argv 1 3)
-          | IDENT "+=" list_literal          → (append_argv 1 3)
-          | IDENT "=" expr                   → (assign 1 3)
+stmt      = "=" expr                        → (display 2)
+          | IDENT "=" "-"                   → (unset 1)
+          | IDENT "=" list_literal          → (assign_argv 1 3)
+          | IDENT "+=" list_literal         → (append_argv 1 3)
+          | IDENT "=" expr                  → (assign 1 3)
           | cmd_def                         → 1
           | key_def                         → 1
           | set_stmt                        → 1
@@ -448,14 +448,14 @@ stmt      = "=" expr                         → (display 2)
 # A pipeline is one or more simple commands connected by pipes.
 # Command lists chain pipelines with &&, ||, ;, or &.
 
-cmdlist   = pipeline "&&"  cmdlist           → (and 1 3)
-          | pipeline AND   cmdlist           → (and 1 3)
-          | pipeline "||"  cmdlist           → (or 1 3)
-          | pipeline OR    cmdlist           → (or 1 3)
-          | pipeline XOR   cmdlist           → (xor 1 3)
-          | pipeline ";"   cmdlist           → (seq 1 3)
-          | pipeline "&"   cmdlist           → (bg 1 3)
-          | pipeline "&"                     → (bg 1)
+cmdlist   = pipeline "&&"  cmdlist          → (and 1 3)
+          | pipeline AND   cmdlist          → (and 1 3)
+          | pipeline "||"  cmdlist          → (or 1 3)
+          | pipeline OR    cmdlist          → (or 1 3)
+          | pipeline XOR   cmdlist          → (xor 1 3)
+          | pipeline ";"   cmdlist          → (seq 1 3)
+          | pipeline "&"   cmdlist          → (bg 1 3)
+          | pipeline "&"                    → (bg 1)
           | pipeline
 
 pipeline  = command "|&" pipeline           → (pipe_err 1 3)
@@ -543,8 +543,8 @@ else_clause = ELSE if_stmt                  → 2
 condition = comparison
           | cmdlist
 
-comparison = cmp_term AND comparison          → (and 1 3)
-           | cmp_term OR  comparison          → (or 1 3)
+comparison = cmp_term AND comparison        → (and 1 3)
+           | cmp_term OR  comparison        → (or 1 3)
            | cmp_term
 
 cmp_term   = expr "==" expr                 → (eq 1 3)
@@ -553,8 +553,8 @@ cmp_term   = expr "==" expr                 → (eq 1 3)
            | expr ">"  expr                 → (gt 1 3)
            | expr "<=" expr                 → (le 1 3)
            | expr ">=" expr                 → (ge 1 3)
-           | expr "=~" REGEX               → (match 1 3)
-           | expr "!~" REGEX               → (nomatch 1 3)
+           | expr "=~" REGEX                → (match 1 3)
+           | expr "!~" REGEX                → (nomatch 1 3)
            | expr "=~" expr                 → (match 1 3)
            | expr "!~" expr                 → (nomatch 1 3)
            | NOT cmp_term                   → (not 2)
@@ -599,7 +599,7 @@ try_arm    = REGEX block                    → (arm 1 2)
 # Blocks are either brace-delimited or indentation-delimited.
 # The lexer emits INDENT/OUTDENT for indentation form.
 
-block     = "{" brace_item* "}"              → (block ...2)
+block     = "{" brace_item* "}"             → (block ...2)
           | INDENT line* OUTDENT            → (block ...2)
 
 brace_item = stmt                           → 1
@@ -623,7 +623,7 @@ brace_item = stmt                           → 1
 # enter the params? branch. LPAREN_TIGHT (pre==0) is a distinct token
 # from LPAREN so the parser can unambiguously enter the params rule.
 
-cmd_def   = CMD MISSING params? block        → (cmd_missing 3 4)
+cmd_def   = CMD MISSING params? block       → (cmd_missing 3 4)
           | CMD MISSING params? stmt        → (cmd_missing 3 4)
           | CMD MISSING "-"                 → (cmd_missing_del)
           | CMD MISSING                     → (cmd_missing_show)
@@ -660,19 +660,19 @@ set_stmt  = SET name "-"                    → (set_reset 2)
 # Expressions are used in comparisons, variable assignments, inline math,
 # and default values. Arithmetic follows standard precedence.
 
-expr      = expr "+" term                        → (add 1 3)
-          | expr "-" term                        → (sub 1 3)
-          | expr "??" expr                       → (default 1 3)
+expr      = expr "+" term                   → (add 1 3)
+          | expr "-" term                   → (sub 1 3)
+          | expr "??" expr                  → (default 1 3)
           | term
-term      = term "*" factor                      → (mul 1 3)
-          | term "/" factor                      → (div 1 3)
-          | term "%" factor                      → (mod 1 3)
+term      = term "*" factor                 → (mul 1 3)
+          | term "/" factor                 → (div 1 3)
+          | term "%" factor                 → (mod 1 3)
           | factor
-factor    = base "**" factor                     → (pow 1 3)
+factor    = base "**" factor                → (pow 1 3)
           | base
-base      = "(" expr ")"                         → 2
-          | "-" base                             → (neg 2)
-          | "+" base                             → 2
+base      = "(" expr ")"                    → 2
+          | "-" base                        → (neg 2)
+          | "+" base                        → 2
           | atom
 
 atom      = VARIABLE
@@ -683,5 +683,5 @@ atom      = VARIABLE
           | STRING_SQ
           | subshell_capture
 
-list_literal = LIST_START list_item* "]"       → (list ...2)
+list_literal = LIST_START list_item* "]"    → (list ...2)
 list_item    = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG | REGEX | "-"
