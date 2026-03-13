@@ -266,6 +266,9 @@ Both parent and child call `setpgid` to close the fork race condition. Signal
 defaults are restored before `exec` in children. Background reaping is
 poll-based at prompt boundaries rather than using a `SIGCHLD` handler.
 
+Job control uses numeric job ids (`fg 3`, `bg 2`). Bash/Zsh jobspec shorthand
+like `%3` is intentionally not supported; Slash prints a hint to use `fg 3`.
+
 ### Key Bindings
 
 Human-readable syntax with `key`:

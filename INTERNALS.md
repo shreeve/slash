@@ -393,6 +393,9 @@ cmd                       → (cmd_list)
 params = ( name, name, ... )
 ```
 
+`cmd` list output shows full command definitions by default (including
+multiline bodies), while `cmd name` shows a single named definition.
+
 **Parsing rule:** `cmd name(params)` with `(` touching the name (pre=0) means
 a parameter list. `cmd name (body)` with a space (pre>0) means subshell body.
 
@@ -576,8 +579,8 @@ const Job = struct {
     pgid: posix.pid_t,
     state: JobState,            // running, stopped, done
     exit_code: u8,
-    command: []const u8,        // original command string for display
-    pids: [8]posix.pid_t,       // individual PIDs in the pipeline
+    command: []const u8,        // command span shown by jobs/fg
+    pids: [16]posix.pid_t,      // individual PIDs in the pipeline
     pid_count: u8,
 };
 ```
@@ -638,7 +641,7 @@ These are registered in `isBuiltin()` in `exec.zig`:
 | `type` | Show whether a name is a builtin, command, or external |
 | `pwd` | Print working directory |
 | `jobs` | List all jobs |
-| `fg` / `bg` | Job control (foreground / background) |
+| `fg` / `bg` | Job control (foreground / background) by numeric id (`fg 2`, `bg 1`). `%N` shorthand is not supported. |
 | `wait` | Wait for background jobs or specific PIDs |
 | `history` | Search/display command history |
 | `j` | List session MRU directories (deduped), optionally filtered by substring |
