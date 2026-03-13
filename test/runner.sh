@@ -377,12 +377,12 @@ check_script_error() {
     actual=$("$SLASH" "$tmpf" 2>&1 || true)
     rm -f "$tmpf"
     case "$actual" in
-        *"parse error"*)
+        *"invalid syntax"*)
             PASS=$((PASS + 1))
             ;;
         *)
             FAIL=$((FAIL + 1))
-            ERRORS="${ERRORS}\n  FAIL: ${label}\n    expect parse error\n    actual: ${actual}\n"
+            ERRORS="${ERRORS}\n  FAIL: ${label}\n    expect invalid syntax\n    actual: ${actual}\n"
             ;;
     esac
 }
@@ -446,9 +446,13 @@ check_script_raw "exec no trailing newline" \
 check_script_error "exec malformed dedent" \
     "$(printf 'if true\n    echo yes\n  echo bad\n')"
 
-check_script_all "exec jobspec shorthand parse hint" \
+check_script_all "exec jobspec shorthand invalid syntax" \
     "$(printf '%%3\n')" \
-    "parse error: jobspec shorthand '%3' is not supported; use: fg 3"
+    "invalid syntax"
+
+check_script_all "exec single question invalid syntax" \
+    "$(printf '?\n')" \
+    "invalid syntax"
 
 check_script "exec indent if else" \
     "$(printf 'if true\n    echo yes\nelse\n    echo no\n')" \

@@ -523,9 +523,7 @@ pub const Shell = struct {
         var p = Parser.init(self.allocator, source);
         defer p.deinit();
         const sexp = p.parseOneline() catch {
-            if (!printJobspecShorthandHint(source)) {
-                std.debug.print("parse error\n", .{});
-            }
+            std.debug.print("invalid syntax\n", .{});
             self.last_exit = 2;
             return;
         };
@@ -541,10 +539,8 @@ pub const Shell = struct {
         defer if (parse_source.ptr != source.ptr) self.allocator.free(parse_source);
         var p = Parser.init(self.allocator, parse_source);
         defer p.deinit();
-        const sexp = p.parseProgram() catch |err| {
-            if (!printJobspecShorthandHint(parse_source)) {
-                std.debug.print("parse error: {s}\n", .{@errorName(err)});
-            }
+        const sexp = p.parseProgram() catch {
+            std.debug.print("invalid syntax\n", .{});
             self.last_exit = 2;
             return;
         };
@@ -553,24 +549,6 @@ pub const Shell = struct {
             self.flow = .normal;
             exit_requested = true;
         }
-    }
-
-    fn parseJobspecShorthand(source: []const u8) ?[]const u8 {
-        const trimmed = std.mem.trim(u8, source, " \t\r\n");
-        if (trimmed.len < 2 or trimmed[0] != '%') return null;
-        for (trimmed[1..]) |ch| {
-            if (ch < '0' or ch > '9') return null;
-        }
-        return trimmed;
-    }
-
-    fn printJobspecShorthandHint(source: []const u8) bool {
-        const tok = parseJobspecShorthand(source) orelse return false;
-        std.debug.print("parse error: jobspec shorthand '{s}' is not supported; use: fg {s}\n", .{
-            tok,
-            tok[1..],
-        });
-        return true;
     }
 
     // =========================================================================
@@ -3180,14 +3158,6 @@ fn ensureTrailingNewlineAlloc(alloc: Allocator, source: []const u8) ![]const u8 
     @memcpy(buf[0..source.len], source);
     buf[source.len] = '\n';
     return buf;
-}
-
-test "jobspec shorthand parsing" {
-    try std.testing.expect(Shell.parseJobspecShorthand("%3") != null);
-    try std.testing.expect(Shell.parseJobspecShorthand("  %12  \n") != null);
-    try std.testing.expect(Shell.parseJobspecShorthand("%") == null);
-    try std.testing.expect(Shell.parseJobspecShorthand("%x") == null);
-    try std.testing.expect(Shell.parseJobspecShorthand("fg 3") == null);
 }
 
 test "job ordering and stop resume bookkeeping" {
