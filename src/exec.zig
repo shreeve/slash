@@ -2695,6 +2695,7 @@ pub const Shell = struct {
             }
         }
         const result = content.toOwnedSlice(self.allocator) catch "";
+        self.cmd_expansions.append(self.allocator, result) catch {};
         list.append(self.allocator, .{ .tag = .herestring, .target = result }) catch {};
     }
 
@@ -2713,9 +2714,14 @@ pub const Shell = struct {
                 } else {
                     const name_start = i + 1;
                     var name_end = name_start;
-                    while (name_end < text.len and (std.ascii.isAlphanumeric(text[name_end]) or text[name_end] == '_' or
-                        (name_end == name_start and (text[name_end] == '?' or text[name_end] == '$' or
-                        text[name_end] == '#' or text[name_end] == '*' or text[name_end] == '!')))) : (name_end += 1) {}
+                    if (name_end < text.len and (text[name_end] == '?' or text[name_end] == '$' or
+                        text[name_end] == '#' or text[name_end] == '*' or text[name_end] == '!' or
+                        (text[name_end] >= '0' and text[name_end] <= '9')))
+                    {
+                        name_end += 1;
+                    } else {
+                        while (name_end < text.len and (std.ascii.isAlphanumeric(text[name_end]) or text[name_end] == '_')) : (name_end += 1) {}
+                    }
                     if (name_end > name_start) {
                         const val = self.lookupVar(text[name_start..name_end]);
                         buf.appendSlice(self.allocator, val) catch {};

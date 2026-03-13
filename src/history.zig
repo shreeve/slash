@@ -194,24 +194,29 @@ pub const Db = struct {
         const out = std.fs.cwd().createFile(tmp, .{}) catch return;
         var closed = false;
         defer if (!closed) out.close();
+        var write_ok = true;
         for (self.entries.items) |e| {
-            const escaped_cwd = escapeFieldAlloc(self.alloc, e.cwd) catch continue;
+            const escaped_cwd = escapeFieldAlloc(self.alloc, e.cwd) catch { write_ok = false; continue; };
             defer self.alloc.free(escaped_cwd);
-            const escaped_command = escapeFieldAlloc(self.alloc, e.command) catch continue;
+            const escaped_command = escapeFieldAlloc(self.alloc, e.command) catch { write_ok = false; continue; };
             defer self.alloc.free(escaped_command);
             var prefix_buf: [96]u8 = undefined;
             const prefix = std.fmt.bufPrint(&prefix_buf, "{d}\t{d}\t{d}\t", .{
                 e.timestamp, e.exit_code, e.duration_ms,
-            }) catch continue;
-            out.writeAll(prefix) catch {};
-            out.writeAll(escaped_cwd) catch {};
-            out.writeAll("\t") catch {};
-            out.writeAll(escaped_command) catch {};
-            out.writeAll("\n") catch {};
+            }) catch { write_ok = false; continue; };
+            out.writeAll(prefix) catch { write_ok = false; };
+            out.writeAll(escaped_cwd) catch { write_ok = false; };
+            out.writeAll("\t") catch { write_ok = false; };
+            out.writeAll(escaped_command) catch { write_ok = false; };
+            out.writeAll("\n") catch { write_ok = false; };
         }
         out.close();
         closed = true;
-        std.fs.cwd().rename(tmp, self.path) catch {};
+        if (write_ok) {
+            std.fs.cwd().rename(tmp, self.path) catch {};
+        } else {
+            std.fs.cwd().deleteFile(tmp) catch {};
+        }
     }
 };
 

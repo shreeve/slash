@@ -167,14 +167,14 @@ fn needsContinuation(line: []const u8) bool {
     return @import("lexer.zig").lineNeedsContinuation(line);
 }
 
-var user_cmd_names_buf: [64][]const u8 = undefined;
+var user_cmd_names_buf: [512][]const u8 = undefined;
 
 fn getUserCmdNames() []const []const u8 {
     if (repl_shell) |sh| {
         var it = sh.user_cmds.iterator();
         var i: usize = 0;
         while (it.next()) |entry| {
-            if (i >= 64) break;
+            if (i >= user_cmd_names_buf.len) break;
             user_cmd_names_buf[i] = entry.key_ptr.*;
             i += 1;
         }
@@ -183,14 +183,14 @@ fn getUserCmdNames() []const []const u8 {
     return &.{};
 }
 
-var shell_var_names_buf: [64][]const u8 = undefined;
+var shell_var_names_buf: [512][]const u8 = undefined;
 
 fn getShellVarNames() []const []const u8 {
     if (repl_shell) |sh| {
         var it = sh.vars.iterator();
         var i: usize = 0;
         while (it.next()) |entry| {
-            if (i >= 64) break;
+            if (i >= shell_var_names_buf.len) break;
             shell_var_names_buf[i] = entry.key_ptr.*;
             i += 1;
         }

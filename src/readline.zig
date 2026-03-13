@@ -115,9 +115,11 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
             },
             127, 8 => {
                 if (cursor > 0) {
-                    std.mem.copyForwards(u8, line_buf[cursor - 1 ..], line_buf[cursor..len]);
-                    len -= 1;
-                    cursor -= 1;
+                    var del: usize = 1;
+                    while (del < cursor and (line_buf[cursor - del] & 0xC0) == 0x80) del += 1;
+                    std.mem.copyForwards(u8, line_buf[cursor - del ..], line_buf[cursor..len]);
+                    len -= del;
+                    cursor -= del;
                     updateGhost(line_buf[0..len]);
                     refreshLine(line_buf[0..len], cursor);
                 }
@@ -368,7 +370,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                             }
                         }
                     }
-                } else if (ch >= 32 and ch < 127) {
+                } else if (ch >= 32) {
                     // Space after dir completion: replace trailing / with space
                     if (ch == ' ' and completed_dir_slash and cursor > 0 and cursor == len and line_buf[cursor - 1] == '/') {
                         line_buf[cursor - 1] = ' ';
@@ -377,13 +379,19 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                         refreshLine(line_buf[0..len], cursor);
                     } else {
                         completed_dir_slash = false;
-                        if (len < line_buf.len - 1) {
+                        const byte_count: usize = if (ch < 0x80) 1 else if (ch < 0xE0) 2 else if (ch < 0xF0) 3 else 4;
+                        if (len + byte_count <= line_buf.len - 1) {
                             if (cursor < len) {
-                                std.mem.copyBackwards(u8, line_buf[cursor + 1 .. len + 1], line_buf[cursor..len]);
+                                std.mem.copyBackwards(u8, line_buf[cursor + byte_count .. len + byte_count], line_buf[cursor..len]);
                             }
                             line_buf[cursor] = ch;
-                            len += 1;
-                            cursor += 1;
+                            if (byte_count > 1) {
+                                var extra: [3]u8 = undefined;
+                                const got = posix.read(STDIN, extra[0 .. byte_count - 1]) catch 0;
+                                for (0..got) |j| line_buf[cursor + 1 + j] = extra[j];
+                            }
+                            len += byte_count;
+                            cursor += byte_count;
                             updateGhost(line_buf[0..len]);
                             refreshLine(line_buf[0..len], cursor);
                         }
