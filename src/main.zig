@@ -37,7 +37,12 @@ pub fn main() !u8 {
     setupSignals();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    defer {
+        const leak_status = gpa.deinit();
+        if (leak_status == .leak) {
+            std.debug.print("slash: memory leaks detected\n", .{});
+        }
+    }
     const alloc = gpa.allocator();
 
     const args = try std.process.argsAlloc(alloc);
@@ -222,6 +227,7 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
     ev.history_db = hdb;
 
     var hist = readline.History.init(alloc);
+    defer hist.deinit();
     var last_duration_ms: u64 = 0;
 
     while (true) {

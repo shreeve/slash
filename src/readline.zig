@@ -22,6 +22,18 @@ pub const History = struct {
         return .{ .alloc = alloc };
     }
 
+    pub fn deinit(self: *History) void {
+        const live = @min(self.count, CAPACITY);
+        for (0..live) |i| {
+            const slot = i % CAPACITY;
+            if (self.lines[slot].len > 0) {
+                self.alloc.free(self.lines[slot]);
+                self.lines[slot] = "";
+            }
+        }
+        self.count = 0;
+    }
+
     pub fn add(self: *History, line: []const u8) void {
         if (line.len == 0) return;
         if (self.count > 0 and std.mem.eql(u8, self.lines[(self.count - 1) % CAPACITY], line)) return;
@@ -1004,4 +1016,20 @@ fn enableRawMode() ?posix.termios {
 
 fn disableRawMode(orig: posix.termios) void {
     posix.tcsetattr(STDIN, .NOW, orig) catch {};
+}
+
+test "History deinit frees retained lines" {
+    var hist = History.init(std.testing.allocator);
+    defer hist.deinit();
+
+    // Fill past ring capacity so both overwrite and retained slots are exercised.
+    var i: usize = 0;
+    while (i < History.CAPACITY + 16) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "line-{d}", .{i});
+        hist.add(line);
+    }
+
+    try std.testing.expect(hist.count == History.CAPACITY + 16);
+    try std.testing.expect(hist.get(hist.count - 1).len > 0);
 }
