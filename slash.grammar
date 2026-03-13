@@ -408,7 +408,6 @@ defaults {
 # ------------------------------------------------------------------------------
 
 name     = IDENT
-word     = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG
 cmd_name = IDENT
 
 # ==============================================================================
@@ -439,7 +438,7 @@ stmt      = "=" expr                        → (display 2)
           | while_stmt                      → 1
           | until_stmt                      → 1
           | try_stmt                        → 1
-          | cmdlist                         → 1
+          | cmdlist <                       → 1
 
 # ==============================================================================
 # PIPELINES AND COMMAND LISTS
@@ -456,7 +455,7 @@ cmdlist   = pipeline "&&"  cmdlist          → (and 1 3)
           | pipeline ";"   cmdlist          → (seq 1 3)
           | pipeline "&"   cmdlist          → (bg 1 3)
           | pipeline "&"                    → (bg 1)
-          | pipeline
+          | pipeline >                      → 1
 
 pipeline  = command "|&" pipeline           → (pipe_err 1 3)
           | command "|"  pipeline           → (pipe 1 3)
@@ -488,6 +487,8 @@ cmd_arg   = argument
 # ==============================================================================
 # ARGUMENTS
 # ==============================================================================
+
+word      = IDENT < | STRING_SQ < | STRING_DQ < | INTEGER < | REAL < | VARIABLE < | VAR_BRACED < | FLAG <
 
 argument  = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG | REGEX | "-"
           | proc_sub
@@ -541,7 +542,7 @@ else_clause = ELSE if_stmt                  → 2
             | ELSE block                    → (else 2)
 
 condition = comparison
-          | cmdlist
+          | cmdlist >                       → 1
 
 comparison = cmp_term AND comparison        → (and 1 3)
            | cmp_term OR  comparison        → (or 1 3)
@@ -626,12 +627,12 @@ brace_item = stmt                           → 1
 cmd_def   = CMD MISSING params? block       → (cmd_missing 3 4)
           | CMD MISSING params? stmt        → (cmd_missing 3 4)
           | CMD MISSING "-"                 → (cmd_missing_del)
-          | CMD MISSING                     → (cmd_missing_show)
+          | CMD MISSING >                   → (cmd_missing_show)
           | CMD name params? block          → (cmd_def 2 3 4)
           | CMD name params? stmt           → (cmd_def 2 3 4)
           | CMD name "-"                    → (cmd_del 2)
-          | CMD name                        → (cmd_show 2)
-          | CMD                             → (cmd_list)
+          | CMD name >                      → (cmd_show 2)
+          | CMD >                           → (cmd_list)
 
 # L(X) — comma-separated list of X (expands to: X ("," X)*)
 params    = LPAREN_TIGHT L(name) ")"        → 2
@@ -642,7 +643,7 @@ params    = LPAREN_TIGHT L(name) ")"        → 2
 
 key_def   = KEY word word                   → (key 2 3)
           | KEY word "-"                    → (key_del 2)
-          | KEY                             → (key_list)
+          | KEY >                           → (key_list)
 
 # ==============================================================================
 # SHELL OPTIONS: set
@@ -650,8 +651,8 @@ key_def   = KEY word word                   → (key 2 3)
 
 set_stmt  = SET name "-"                    → (set_reset 2)
           | SET name word                   → (set 2 3)
-          | SET name                        → (set_show 2)
-          | SET                             → (set_list)
+          | SET name >                      → (set_show 2)
+          | SET >                           → (set_list)
 
 # ==============================================================================
 # EXPRESSIONS
@@ -660,9 +661,11 @@ set_stmt  = SET name "-"                    → (set_reset 2)
 # Expressions are used in comparisons, variable assignments, inline math,
 # and default values. Arithmetic follows standard precedence.
 
-expr      = expr "+" term                   → (add 1 3)
-          | expr "-" term                   → (sub 1 3)
-          | expr "??" expr                  → (default 1 3)
+expr      = coalesce
+coalesce  = sum "??" coalesce               → (default 1 3)
+          | sum
+sum       = sum "+" term                    → (add 1 3)
+          | sum "-" term                    → (sub 1 3)
           | term
 term      = term "*" factor                 → (mul 1 3)
           | term "/" factor                 → (div 1 3)

@@ -567,6 +567,14 @@ pub const Shell = struct {
     }
 
     fn dispatch(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8) void {
+        // Tags that collide with Zig keywords can't appear as switch prongs.
+        if (tag == .@"if") return self.evalIf(args, source);
+        if (tag == .@"for") return self.evalFor(args, source);
+        if (tag == .@"while") return self.evalWhile(args, source);
+        if (tag == .@"try") return self.evalTry(args, source);
+        if (tag == .@"else") return self.evalElse(args, source);
+        if (tag == .@"test") return self.evalTest(args, source);
+        if (tag == .@"set") return self.evalSet(args, source);
         switch (tag) {
             .program => if (self.interactive) self.evalSequence(args, source) else self.evalProgram(args, source),
             .block => self.evalSequence(args, source),
@@ -607,21 +615,15 @@ pub const Shell = struct {
             .shift => self.evalShift(),
             .@"break" => { self.flow = .break_loop; self.last_exit = 0; },
             .@"continue" => { self.flow = .continue_loop; self.last_exit = 0; },
-            else => self.dispatchKeyword(tag, args, source),
+            else => {
+                std.debug.print("slash: unhandled tag: {s}\n", .{@tagName(tag)});
+                self.last_exit = 1;
+            },
         }
     }
 
-    fn dispatchKeyword(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8) void {
-        const tag_name = @tagName(tag);
-        if (std.mem.eql(u8, tag_name, "if")) return self.evalIf(args, source);
-        if (std.mem.eql(u8, tag_name, "for")) return self.evalFor(args, source);
-        if (std.mem.eql(u8, tag_name, "while")) return self.evalWhile(args, source);
-        if (std.mem.eql(u8, tag_name, "try")) return self.evalTry(args, source);
-        if (std.mem.eql(u8, tag_name, "else")) { if (args.len >= 1) self.eval(args[0], source); return; }
-        if (std.mem.eql(u8, tag_name, "test")) return self.evalTest(args, source);
-        if (std.mem.eql(u8, tag_name, "set")) return self.evalSet(args, source);
-        std.debug.print("slash: unhandled tag: {s}\n", .{tag_name});
-        self.last_exit = 1;
+    fn evalElse(self: *Shell, args: []const Sexp, source: []const u8) void {
+        if (args.len >= 1) self.eval(args[0], source);
     }
 
     // =========================================================================

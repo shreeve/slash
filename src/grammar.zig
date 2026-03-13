@@ -1454,6 +1454,7 @@ const ParserRule = struct {
     firsts: ParserSymbolSet = .{},
     exclude_char: u8 = 0, // X "c" - exclude rule when next char matches
     prefer_reduce: bool = false, // < hint - prefer reduce on S/R conflict
+    prefer_shift: bool = false, // > hint - prefer shift on S/R conflict
 
     const ParserAction = struct {
         template: []const u8, // Original action string like (set 2? ...3)
@@ -1526,6 +1527,7 @@ const ParsedAlternative = struct {
     action: ?[]const u8,
     exclude_char: u8 = 0, // X "c" hint
     prefer_reduce: bool = false, // < hint - prefer reduce on S/R conflict
+    prefer_shift: bool = false, // > hint - prefer shift on S/R conflict
 };
 
 /// Parsed element within an alternative
@@ -1961,6 +1963,7 @@ const ParserDSLParser = struct {
         var action: ?[]const u8 = null;
         var exclude_char: u8 = 0;
         var prefer_reduce: bool = false;
+        var prefer_shift: bool = false;
 
         while (true) {
             if (self.current.kind == .comment) {
@@ -1971,6 +1974,13 @@ const ParserDSLParser = struct {
             // Check for < (tight binding / prefer reduce) hint
             if (self.current.kind == .langle) {
                 prefer_reduce = true;
+                self.advance();
+                continue;
+            }
+
+            // Check for > (prefer shift) hint
+            if (self.current.kind == .rangle) {
+                prefer_shift = true;
                 self.advance();
                 continue;
             }
@@ -2036,6 +2046,7 @@ const ParserDSLParser = struct {
             .action = action,
             .exclude_char = exclude_char,
             .prefer_reduce = prefer_reduce,
+            .prefer_shift = prefer_shift,
         });
     }
 
@@ -2496,6 +2507,7 @@ const ParserGenerator = struct {
                 .action = new_action,
                 .exclude_char = alt.exclude_char,
                 .prefer_reduce = alt.prefer_reduce,
+                .prefer_shift = alt.prefer_shift,
             });
         }
 
@@ -2722,6 +2734,7 @@ const ParserGenerator = struct {
                         .action = if (expanded_alt.action) |a| .{ .template = a, .kind = .sexp } else null,
                         .exclude_char = expanded_alt.exclude_char,
                         .prefer_reduce = expanded_alt.prefer_reduce,
+                        .prefer_shift = expanded_alt.prefer_shift,
                     });
                     try self.symbols.items[lhs_id].rules.append(self.allocator, rule_id);
                 }
@@ -3597,6 +3610,16 @@ const ParserGenerator = struct {
                             } else if (rule.prefer_reduce) {
                                 // < hint: prefer reduce (tight binding)
                                 current.* = .{ .reduce = item.rule_id };
+                            } else if (rule.prefer_shift) {
+                                // > hint: prefer shift (keep existing shift action)
+                            } else if (std.mem.startsWith(u8, lhs_sym.name, "_star_") or
+                                std.mem.eql(u8, lhs_sym.name, "cmdlist") or
+                                (std.mem.eql(u8, lhs_sym.name, "stmt") and std.mem.indexOfScalar(u8, fname, '(') != null))
+                            {
+                                // Structural shift-preference that can't be expressed via grammar hints:
+                                //   _star_*  — generated repetition tails always prefer shift (greedy)
+                                //   cmdlist  — greedy parsing of chained &&/||/;/& operators
+                                //   stmt/(  — IDENT "=" "(" is assignment, not subshell; shift to see more
                             } else {
                                 // Default: shift wins (no conflict hint needed)
                                 self.conflicts += 1;
@@ -3641,6 +3664,11 @@ const ParserGenerator = struct {
         defer {
             for (table) |row| self.allocator.free(row);
             self.allocator.free(table);
+        }
+
+        if (self.conflicts > 0) {
+            std.debug.print("❌ Parser has {d} unresolved conflict(s). Add explicit < or > hints, or refactor grammar.\n", .{self.conflicts});
+            return error.ParseConflict;
         }
 
         // Collect tags from actions
@@ -4875,11 +4903,7 @@ pub fn main() !void {
                 parser_gen.?.states.items.len,
             });
 
-            if (parser_gen.?.conflicts > 0) {
-                std.debug.print("   ⚠️  {d} conflicts detected\n", .{parser_gen.?.conflicts});
-            }
-
-            // Generate combined code
+            // Generate combined code (buildParseTable runs inside and enforces zero conflicts)
             final_code = parser_gen.?.generateParserCode(lexer_code, &lexer_parser.spec) catch |err| {
                 std.debug.print("❌ Parser generation error: {any}\n", .{err});
                 return;
