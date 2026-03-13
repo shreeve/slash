@@ -395,7 +395,6 @@ defaults {
 @as = [ident, exit     ]
 @as = [ident, break    ]
 @as = [ident, continue ]
-@as = [ident, shift    ]
 @as = [ident, exec     ]
 
 # Word-form boolean operators are handled via @as keywords (AND, OR, NOT, XOR)
@@ -428,7 +427,7 @@ stmt      = "=" expr                        → (display 2)
           | IDENT "=" "-"                   → (unset 1)
           | IDENT "=" list_literal          → (assign_argv 1 3)
           | IDENT "+=" list_literal         → (append_argv 1 3)
-          | IDENT "=" expr                  → (assign 1 3)
+          | IDENT "=" assign_rhs            → (assign 1 3)
           | cmd_def                         → 1
           | key_def                         → 1
           | set_stmt                        → 1
@@ -474,7 +473,6 @@ command   = "!" command                     → (not 2)
           | EXIT [INTEGER]                  → (exit 2)
           | BREAK                           → (break)
           | CONTINUE                        → (continue)
-          | SHIFT                           → (shift)
           | SOURCE word                     → (source 2)
           | EXEC simple_cmd                 → (exec 2)
           | simple_cmd
@@ -575,7 +573,7 @@ wordlist   = word+                          → (list ...1)
 # PATTERN MATCHING: try
 # ==============================================================================
 
-try_stmt   = TRY expr try_block             → (try 2 3)
+try_stmt   = TRY try_subject try_block      → (try 2 3)
 
 try_block  = "{" try_bitem+ "}"             → (...2)
            | INDENT try_iline+ OUTDENT      → (...2)
@@ -695,6 +693,12 @@ atom      = VARIABLE
           | STRING_DQ
           | STRING_SQ
           | subshell_capture
+
+shift_value = IDENT                         → (shift_value 1)
+assign_rhs  = shift_value
+            | expr
+try_subject = shift_value
+            | expr
 
 list_literal = LIST_START list_item* "]"    → (list ...2)
 list_item    = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG | REGEX | "-"

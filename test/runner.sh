@@ -207,6 +207,7 @@ check "until loop"             "until true { echo y }"     "(until (cmd true) (b
 # ==========================================================================
 check "try with arms"          'try $x { "a" { echo a } "b" { echo b } }'  '(try $x ((arm "a" (block (cmd echo a))) (arm "b" (block (cmd echo b)))))'
 check "try with else"          'try $x { "a" { echo a } else { echo z } }' '(try $x ((arm "a" (block (cmd echo a))) (arm_else (block (cmd echo z)))))'
+check "try shift value"        'try shift { "a" { echo y } else { echo n } }' '(try (shift_value shift) ((arm "a" (block (cmd echo y))) (arm_else (block (cmd echo n)))))'
 check "try regex exec"         'try "test" { /te.*/ { echo yes } else { echo no } }' "" "yes"
 
 # ==========================================================================
@@ -254,7 +255,8 @@ check "test -d"                "test -d src"                "(test -d src)"
 check "test -e"                "test -e /tmp"               "(test -e /tmp)"
 check "exit code"              "exit 1"                     "(exit 1)"
 check "exit no arg"            "exit"                       "(exit)"
-check "shift"                  "shift"                      "(shift)"
+check "shift"                  "shift"                      "(cmd shift)"
+check "shift count"            "shift 2"                    "(cmd shift 2)"
 check "break"                  "break"                      "(break)"
 check "continue"               "continue"                   "(continue)"
 check "source"                 "source file.slash"          "(source file.slash)"
@@ -325,6 +327,24 @@ check_script() {
     local tmpf="/tmp/_slash_test_$$.slash"
     printf '%s\n' "$script" > "$tmpf"
     actual=$("$SLASH" "$tmpf" 2>/dev/null)
+    rm -f "$tmpf"
+    if [ "$actual" = "$expect" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: ${label}\n    expect: ${expect}\n    actual: ${actual}\n"
+    fi
+}
+
+check_script_args() {
+    local label="$1"
+    local script="$2"
+    local expect="$3"
+    shift 3
+    local actual
+    local tmpf="/tmp/_slash_test_args_$$.slash"
+    printf '%s\n' "$script" > "$tmpf"
+    actual=$("$SLASH" "$tmpf" "$@" 2>/dev/null)
     rm -f "$tmpf"
     if [ "$actual" = "$expect" ]; then
         PASS=$((PASS + 1))
@@ -423,8 +443,8 @@ check_script "exec assign + math" \
     "$(printf 'x = 2 ** 8\necho $x\n')" \
     "256"
 
-check_script "exec unset" \
-    "$(printf 'x = hello\nx = -\necho $x\n')" \
+check_script "exec clear variable" \
+    "$(printf '__slash_test_clear_var__ = hello\n__slash_test_clear_var__ = -\necho $__slash_test_clear_var__\n')" \
     ""
 
 check_script "exec for loop" \
@@ -852,6 +872,21 @@ check_script "exec positional args" \
 check_script "exec shift" \
     "$(printf 'echo $1\nshift\necho $1\n')" \
     "$(printf '\n')"
+
+check_script_args "exec shift 2" \
+    "$(printf 'echo $1 $2 $3\nshift 2\necho $1 $2 $3\n')" \
+    "$(printf 'a b c\nc  ')" \
+    a b c
+
+check_script_args "exec shift value assignment" \
+    "$(printf 'x = shift\necho $x\necho $1\n')" \
+    "$(printf 'a\nb')" \
+    a b
+
+check_script_args "exec try shift value" \
+    "$(printf 'try shift\n    "--foo" { echo foo }\n    else { echo other }\n')" \
+    "foo" \
+    --foo
 
 check_script "exec test -e" \
     "$(printf 'if test -e build.zig { echo exists }\n')" \

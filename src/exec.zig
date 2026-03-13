@@ -614,7 +614,7 @@ pub const Shell = struct {
             .key_del => self.evalKeyDel(args, source),
             .key_list => self.evalKeyList(),
             .eq, .ne, .lt, .gt, .le, .ge, .match, .nomatch => self.evalComparison(tag, args, source),
-            .shift => self.evalShift(),
+            .shift_value => _ = self.evalShiftValue(args, source),
             .@"break" => { self.flow = .break_loop; self.last_exit = 0; },
             .@"continue" => { self.flow = .continue_loop; self.last_exit = 0; },
             else => {
@@ -1155,11 +1155,22 @@ pub const Shell = struct {
         return buf;
     }
 
-    fn evalShift(self: *Shell) void {
-        if (self.args.len > 0) {
-            self.args = self.args[1..];
+    fn evalShiftValue(self: *Shell, args: []const Sexp, source: []const u8) []const u8 {
+        if (args.len >= 1) {
+            const raw = self.sexpToStr(args[0], source) orelse "";
+            if (!std.mem.eql(u8, raw, "shift")) {
+                self.last_exit = 0;
+                return self.expandToken(raw);
+            }
         }
+        if (self.args.len == 0) {
+            self.last_exit = 1;
+            return "";
+        }
+        const val = self.args[0];
+        self.args = self.args[1..];
         self.last_exit = 0;
+        return val;
     }
 
     var exit_str_buf: [3]u8 = undefined;
@@ -1292,6 +1303,10 @@ pub const Shell = struct {
                                 const out = self.evalCapture(a, source) orelse break :blk @as(f64, 0);
                                 break :blk std.fmt.parseFloat(f64, std.mem.trim(u8, out, " \t\n")) catch 0;
                             },
+                            .shift_value => blk: {
+                                const out = self.evalShiftValue(a, source);
+                                break :blk std.fmt.parseFloat(f64, std.mem.trim(u8, out, " \t\n")) catch 0;
+                            },
                             else => 0,
                         };
                     },
@@ -1387,6 +1402,7 @@ pub const Shell = struct {
                     switch (items[0]) {
                         .tag => |t| {
                             if (t == .capture) return self.evalCapture(items[1..], source) orelse "";
+                            if (t == .shift_value) return self.evalShiftValue(items[1..], source);
                             if (isArithTag(t)) return self.evalMathToStr(sexp, source);
                         },
                         else => {},
@@ -2028,6 +2044,7 @@ pub const Shell = struct {
         if (std.mem.eql(u8, name, "false")) { self.last_exit = 1; return true; }
         if (std.mem.eql(u8, name, "type")) { self.builtinType(argv); return true; }
         if (std.mem.eql(u8, name, "pwd")) { self.builtinPwd(); return true; }
+        if (std.mem.eql(u8, name, "shift")) { self.builtinShift(argv); return true; }
         if (std.mem.eql(u8, name, "jobs")) { self.builtinJobs(); return true; }
         if (std.mem.eql(u8, name, "wait")) { self.builtinWait(argv); return true; }
         if (std.mem.eql(u8, name, "history")) { self.builtinHistory(argv); return true; }
@@ -2058,6 +2075,28 @@ pub const Shell = struct {
             stdout.writeAll(arg) catch {};
         }
         stdout.writeAll("\n") catch {};
+        self.last_exit = 0;
+    }
+
+    fn builtinShift(self: *Shell, argv: []const []const u8) void {
+        var count: usize = 1;
+        if (argv.len > 2) {
+            std.debug.print("slash: shift: too many arguments\n", .{});
+            self.last_exit = 1;
+            return;
+        }
+        if (argv.len == 2) {
+            count = std.fmt.parseInt(usize, argv[1], 10) catch {
+                std.debug.print("slash: shift: invalid count: {s}\n", .{argv[1]});
+                self.last_exit = 1;
+                return;
+            };
+        }
+        if (count >= self.args.len) {
+            self.args = self.args[self.args.len..];
+        } else {
+            self.args = self.args[count..];
+        }
         self.last_exit = 0;
     }
 
