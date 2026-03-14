@@ -826,16 +826,17 @@ pub const Shell = struct {
         const is_user_cmd = self.user_cmds.get(argv[0]) != null;
 
         if (is_builtin or is_user_cmd) {
-            var saved: [3]posix.fd_t = .{ -1, -1, -1 };
+            var saved: ?[3]posix.fd_t = null;
             if (has_redirs) {
-                saved[0] = posix.dup(posix.STDIN_FILENO) catch -1;
-                saved[1] = posix.dup(posix.STDOUT_FILENO) catch -1;
-                saved[2] = posix.dup(posix.STDERR_FILENO) catch -1;
+                saved = saveStdFds() orelse {
+                    std.debug.print("slash: failed to save stdio for redirection\n", .{});
+                    self.last_exit = 1;
+                    self.cleanupProcSubs(procsub_fds.items);
+                    return;
+                };
                 if (!applyRedirects(self.allocator, redirs)) {
                     self.last_exit = 1;
-                    if (saved[0] != -1) { posix.dup2(saved[0], posix.STDIN_FILENO) catch {}; posix.close(saved[0]); }
-                    if (saved[1] != -1) { posix.dup2(saved[1], posix.STDOUT_FILENO) catch {}; posix.close(saved[1]); }
-                    if (saved[2] != -1) { posix.dup2(saved[2], posix.STDERR_FILENO) catch {}; posix.close(saved[2]); }
+                    _ = restoreStdFds(saved.?);
                     self.cleanupProcSubs(procsub_fds.items);
                     return;
                 }
@@ -845,10 +846,11 @@ pub const Shell = struct {
             } else if (self.user_cmds.get(argv[0])) |cmd| {
                 self.invokeUserCmd(cmd, argv);
             }
-            if (has_redirs) {
-                if (saved[0] != -1) { posix.dup2(saved[0], posix.STDIN_FILENO) catch {}; posix.close(saved[0]); }
-                if (saved[1] != -1) { posix.dup2(saved[1], posix.STDOUT_FILENO) catch {}; posix.close(saved[1]); }
-                if (saved[2] != -1) { posix.dup2(saved[2], posix.STDERR_FILENO) catch {}; posix.close(saved[2]); }
+            if (saved) |saved_fds| {
+                if (!restoreStdFds(saved_fds)) {
+                    std.debug.print("slash: failed to restore stdio after redirection\n", .{});
+                    self.last_exit = 1;
+                }
             }
             self.cleanupProcSubs(procsub_fds.items);
             return;
@@ -3330,6 +3332,46 @@ fn parseFdDupToken(token: []const u8) ?struct { src_fd: posix.fd_t, dest_fd: pos
     const src_fd = std.fmt.parseInt(posix.fd_t, token[0..sep], 10) catch return null;
     const dest_fd = std.fmt.parseInt(posix.fd_t, token[sep + 2 ..], 10) catch return null;
     return .{ .src_fd = src_fd, .dest_fd = dest_fd };
+}
+
+fn saveStdFds() ?[3]posix.fd_t {
+    var saved: [3]posix.fd_t = .{ -1, -1, -1 };
+    saved[0] = posix.dup(posix.STDIN_FILENO) catch {
+        return null;
+    };
+    saved[1] = posix.dup(posix.STDOUT_FILENO) catch {
+        posix.close(saved[0]);
+        return null;
+    };
+    saved[2] = posix.dup(posix.STDERR_FILENO) catch {
+        posix.close(saved[1]);
+        posix.close(saved[0]);
+        return null;
+    };
+    return saved;
+}
+
+fn restoreStdFds(saved: [3]posix.fd_t) bool {
+    var ok = true;
+    if (saved[0] != -1) {
+        posix.dup2(saved[0], posix.STDIN_FILENO) catch {
+            ok = false;
+        };
+        posix.close(saved[0]);
+    }
+    if (saved[1] != -1) {
+        posix.dup2(saved[1], posix.STDOUT_FILENO) catch {
+            ok = false;
+        };
+        posix.close(saved[1]);
+    }
+    if (saved[2] != -1) {
+        posix.dup2(saved[2], posix.STDERR_FILENO) catch {
+            ok = false;
+        };
+        posix.close(saved[2]);
+    }
+    return ok;
 }
 
 fn resetChildSignals() void {
