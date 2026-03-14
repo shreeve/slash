@@ -971,9 +971,18 @@ pub const Shell = struct {
             return true;
         }
         if (tag == .redir_fd_dup) {
-            if (args.len < 1) return true;
-            const token = self.sexpToStr(args[0], source) orelse return true;
-            const parsed = parseFdDupToken(token) orelse return true;
+            if (args.len < 1) {
+                std.debug.print("slash: invalid redirection: missing fd dup token\n", .{});
+                return false;
+            }
+            const token = self.sexpToStr(args[0], source) orelse {
+                std.debug.print("slash: invalid redirection: malformed fd dup token\n", .{});
+                return false;
+            };
+            const parsed = parseFdDupToken(token) orelse {
+                std.debug.print("slash: invalid redirection: {s}\n", .{token});
+                return false;
+            };
             list.append(self.allocator, .{
                 .tag = tag,
                 .src_fd = parsed.src_fd,
@@ -982,10 +991,22 @@ pub const Shell = struct {
             return true;
         }
         if (tag == .redir_fd_out or tag == .redir_fd_in) {
-            if (args.len < 2) return true;
-            const fd_token = self.sexpToStr(args[0], source) orelse return true;
-            const fd = parseFdToken(fd_token) orelse return true;
-            const target = self.sexpToStr(args[1], source) orelse return true;
+            if (args.len < 2) {
+                std.debug.print("slash: invalid redirection: missing fd target\n", .{});
+                return false;
+            }
+            const fd_token = self.sexpToStr(args[0], source) orelse {
+                std.debug.print("slash: invalid redirection: malformed fd token\n", .{});
+                return false;
+            };
+            const fd = parseFdToken(fd_token) orelse {
+                std.debug.print("slash: invalid redirection: {s}\n", .{fd_token});
+                return false;
+            };
+            const target = self.sexpToStr(args[1], source) orelse {
+                std.debug.print("slash: invalid redirection: missing target path\n", .{});
+                return false;
+            };
             list.append(self.allocator, .{
                 .tag = tag,
                 .target = target,
@@ -993,11 +1014,17 @@ pub const Shell = struct {
             }) catch return false;
             return true;
         }
-        if (args.len < 1) return true;
+        if (args.len < 1) {
+            std.debug.print("slash: invalid redirection: missing target\n", .{});
+            return false;
+        }
         const target = if (tag == .herestring)
             self.sexpToExpandedStr(args[0], source)
         else
-            self.sexpToStr(args[0], source) orelse return true;
+            self.sexpToStr(args[0], source) orelse {
+                std.debug.print("slash: invalid redirection: malformed target\n", .{});
+                return false;
+            };
         list.append(self.allocator, .{ .tag = tag, .target = target }) catch return false;
         return true;
     }
