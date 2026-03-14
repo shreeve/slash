@@ -78,16 +78,33 @@ pub const Db = struct {
         defer self.alloc.free(escaped_cwd);
         const escaped_command = escapeFieldAlloc(self.alloc, command) catch return;
         defer self.alloc.free(escaped_command);
+        var persisted = true;
         if (self.file) |f| {
             var prefix_buf: [96]u8 = undefined;
             const prefix = std.fmt.bufPrint(&prefix_buf, "{d}\t{d}\t{d}\t", .{
                 now, exit_code, duration_ms,
             }) catch return;
-            f.writeAll(prefix) catch {};
-            f.writeAll(escaped_cwd) catch {};
-            f.writeAll("\t") catch {};
-            f.writeAll(escaped_command) catch {};
-            f.writeAll("\n") catch {};
+            f.writeAll(prefix) catch {
+                persisted = false;
+            };
+            f.writeAll(escaped_cwd) catch {
+                persisted = false;
+            };
+            f.writeAll("\t") catch {
+                persisted = false;
+            };
+            f.writeAll(escaped_command) catch {
+                persisted = false;
+            };
+            f.writeAll("\n") catch {
+                persisted = false;
+            };
+            if (!persisted) {
+                f.close();
+                self.file = null;
+                std.debug.print("slash: history: append failed, disabling persistent history for this session\n", .{});
+                return;
+            }
         }
         const cwd_copy = self.alloc.dupe(u8, cwd) catch return;
         errdefer self.alloc.free(cwd_copy);

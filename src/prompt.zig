@@ -199,23 +199,33 @@ fn parseHex(s: []const u8) ?[3]u8 {
     if (s.len == 0 or s[0] != '#') return null;
     const hex = s[1..];
     return switch (hex.len) {
-        6 => .{ hex2(hex[0..2]), hex2(hex[2..4]), hex2(hex[4..6]) },
-        3 => .{ hex1(hex[0]) * 17, hex1(hex[1]) * 17, hex1(hex[2]) * 17 },
-        1 => .{ hex1(hex[0]) * 17, hex1(hex[0]) * 17, hex1(hex[0]) * 17 },
+        6 => .{ hex2(hex[0..2]) orelse return null, hex2(hex[2..4]) orelse return null, hex2(hex[4..6]) orelse return null },
+        3 => .{
+            (hex1(hex[0]) orelse return null) * 17,
+            (hex1(hex[1]) orelse return null) * 17,
+            (hex1(hex[2]) orelse return null) * 17,
+        },
+        1 => .{
+            (hex1(hex[0]) orelse return null) * 17,
+            (hex1(hex[0]) orelse return null) * 17,
+            (hex1(hex[0]) orelse return null) * 17,
+        },
         else => null,
     };
 }
 
-fn hex2(pair: *const [2]u8) u8 {
-    return (hex1(pair[0]) << 4) | hex1(pair[1]);
+fn hex2(pair: *const [2]u8) ?u8 {
+    const hi = hex1(pair[0]) orelse return null;
+    const lo = hex1(pair[1]) orelse return null;
+    return (hi << 4) | lo;
 }
 
-fn hex1(ch: u8) u8 {
+fn hex1(ch: u8) ?u8 {
     return switch (ch) {
         '0'...'9' => ch - '0',
         'a'...'f' => ch - 'a' + 10,
         'A'...'F' => ch - 'A' + 10,
-        else => 0,
+        else => null,
     };
 }
 

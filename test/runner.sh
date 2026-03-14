@@ -1043,6 +1043,68 @@ check_script "exec \$0 is full path" \
 rm -f /tmp/_sl_list_redir.txt
 
 # ==========================================================================
+# EXECUTION: SUBSHELL CAPTURE IN LIST LITERALS
+# ==========================================================================
+
+check "list with capture sexp" \
+    'x = [$(echo hello)]' \
+    "(assign_argv x (list (capture (cmd echo hello))))"
+
+check_script "exec list with capture" \
+    "$(printf 'x = [$(echo hello)]\necho $x\n')" \
+    "hello"
+
+check_script "exec list with capture and literal" \
+    "$(printf 'x = [one $(echo two) three]\necho $x\n')" \
+    "one two three"
+
+# ==========================================================================
+# EXECUTION: DQ STRING MULTI-VARIABLE INTERPOLATION
+# ==========================================================================
+
+check_script "exec dq multi-var interpolation" \
+    "$(printf 'a = hello\nb = world\necho "$a $b"\n')" \
+    "hello world"
+
+check_script "exec dq interpolation with escape" \
+    "$(printf 'name = slash\necho "hello\\t$name"\n')" \
+    "$(printf 'hello\tslash')"
+
+check_script "exec dq nested braced var" \
+    "$(printf 'x = 42\necho "val=${x}px"\n')" \
+    "val=42px"
+
+# ==========================================================================
+# EXECUTION: BUILTIN OUTPUT TO STDOUT
+# ==========================================================================
+
+check_script "exec type to stdout" \
+    "$(printf 'type echo > /tmp/_sl_type_out.txt\necho $(cat /tmp/_sl_type_out.txt)\n')" \
+    "echo is a shell builtin"
+
+rm -f /tmp/_sl_type_out.txt
+
+check_script "exec set show to stdout" \
+    "$(printf 'set myopt = hello\nset myopt\n')" \
+    "myopt=hello"
+
+# ==========================================================================
+# EXECUTION: MATH DISPLAY FORMATTING
+# ==========================================================================
+
+check_script "exec display integer result" \
+    "$(printf '= 100 / 4\n')" \
+    "25"
+
+check_script "exec display float result" \
+    "$(printf '= 1 / 3\n')" \
+    "0.3333333333"
+
+check_script "exec display negative" \
+    "$(printf '= -5 * 3\n')" \
+    "-15"
+
+# ==========================================================================
 # RESULTS
 # ==========================================================================
 echo ""

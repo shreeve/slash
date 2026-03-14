@@ -828,7 +828,11 @@ pub const Shell = struct {
     fn spawnProcSub(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, fds: *std.ArrayList(ProcSubFd)) ?[]const u8 {
         if (args.len < 1) return null;
         const pipe_fds = posix.pipe() catch return null;
-        const pid = posix.fork() catch return null;
+        const pid = posix.fork() catch {
+            posix.close(pipe_fds[0]);
+            posix.close(pipe_fds[1]);
+            return null;
+        };
 
         if (tag == .procsub_in) {
             if (pid == 0) {
@@ -840,8 +844,20 @@ pub const Shell = struct {
                 posix.exit(self.last_exit);
             }
             posix.close(pipe_fds[1]);
-            fds.append(self.allocator, .{ .pipe_fd = pipe_fds[0], .child_pid = pid }) catch {};
-            return std.fmt.allocPrint(self.allocator, "/dev/fd/{d}", .{pipe_fds[0]}) catch null;
+            fds.append(self.allocator, .{ .pipe_fd = pipe_fds[0], .child_pid = pid }) catch {
+                posix.close(pipe_fds[0]);
+                posix.kill(pid, posix.SIG.TERM) catch {};
+                _ = posix.waitpid(pid, 0) catch {};
+                return null;
+            };
+            const path = std.fmt.allocPrint(self.allocator, "/dev/fd/{d}", .{pipe_fds[0]}) catch {
+                _ = fds.pop();
+                posix.close(pipe_fds[0]);
+                posix.kill(pid, posix.SIG.TERM) catch {};
+                _ = posix.waitpid(pid, 0) catch {};
+                return null;
+            };
+            return path;
         } else {
             if (pid == 0) {
                 resetChildSignals();
@@ -852,8 +868,20 @@ pub const Shell = struct {
                 posix.exit(self.last_exit);
             }
             posix.close(pipe_fds[0]);
-            fds.append(self.allocator, .{ .pipe_fd = pipe_fds[1], .child_pid = pid }) catch {};
-            return std.fmt.allocPrint(self.allocator, "/dev/fd/{d}", .{pipe_fds[1]}) catch null;
+            fds.append(self.allocator, .{ .pipe_fd = pipe_fds[1], .child_pid = pid }) catch {
+                posix.close(pipe_fds[1]);
+                posix.kill(pid, posix.SIG.TERM) catch {};
+                _ = posix.waitpid(pid, 0) catch {};
+                return null;
+            };
+            const path = std.fmt.allocPrint(self.allocator, "/dev/fd/{d}", .{pipe_fds[1]}) catch {
+                _ = fds.pop();
+                posix.close(pipe_fds[1]);
+                posix.kill(pid, posix.SIG.TERM) catch {};
+                _ = posix.waitpid(pid, 0) catch {};
+                return null;
+            };
+            return path;
         }
     }
 

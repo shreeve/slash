@@ -1009,7 +1009,15 @@ fn clearOverlay() void {
 }
 
 fn writeAll(data: []const u8) void {
-    _ = posix.write(STDOUT, data) catch {};
+    var written: usize = 0;
+    while (written < data.len) {
+        const n = posix.write(STDOUT, data[written..]) catch |err| switch (err) {
+            error.Interrupted => continue,
+            else => return,
+        };
+        if (n == 0) return;
+        written += n;
+    }
 }
 
 fn enableRawMode() ?posix.termios {

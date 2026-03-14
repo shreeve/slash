@@ -675,6 +675,7 @@ pub const Parser = struct {
 
     state_stack: std.ArrayListUnmanaged(u16) = .{},
     value_stack: std.ArrayListUnmanaged(Sexp) = .{},
+    had_oom: bool = false,
 
     pub fn init(backing_allocator: std.mem.Allocator, source: []const u8) Parser {
         var p = Parser{
@@ -697,6 +698,7 @@ pub const Parser = struct {
 
     fn doParse(self: *Parser, start_sym: u16) !Sexp {
         const start_state = getStartState(start_sym);
+        self.had_oom = false;
         self.state_stack.clearRetainingCapacity();
         self.value_stack.clearRetainingCapacity();
         try self.state_stack.append(self.allocator(), start_state);
@@ -743,6 +745,7 @@ pub const Parser = struct {
                 }
 
                 const result = self.executeAction(rule_id, pass[0..len]);
+                if (self.had_oom) return error.OutOfMemory;
 
                 if (isAcceptRule(rule_id)) return result;
 
@@ -756,19 +759,24 @@ pub const Parser = struct {
         }
     }
 
+    inline fn oom(self: *Parser) Sexp {
+        self.had_oom = true;
+        return .nil;
+    }
+
     /// Spread list helper: [head, ...tail]
     fn spreadList(self: *Parser, head: Sexp, tail: Sexp) Sexp {
         var out: std.ArrayListUnmanaged(Sexp) = .{};
-        out.append(self.allocator(), head) catch return .nil;
-        if (tail == .list) for (tail.list) |item| out.append(self.allocator(), item) catch return .nil;
-        return .{ .list = out.toOwnedSlice(self.allocator()) catch &[_]Sexp{} };
+        out.append(self.allocator(), head) catch return self.oom();
+        if (tail == .list) for (tail.list) |item| out.append(self.allocator(), item) catch return self.oom();
+        return .{ .list = out.toOwnedSlice(self.allocator()) catch return self.oom() };
     }
 
     /// Spread only: [...tail]
     fn spreadOnly(self: *Parser, tail: Sexp) Sexp {
         var out: std.ArrayListUnmanaged(Sexp) = .{};
-        if (tail == .list) for (tail.list) |item| out.append(self.allocator(), item) catch return .nil;
-        return .{ .list = out.toOwnedSlice(self.allocator()) catch &[_]Sexp{} };
+        if (tail == .list) for (tail.list) |item| out.append(self.allocator(), item) catch return self.oom();
+        return .{ .list = out.toOwnedSlice(self.allocator()) catch return self.oom() };
     }
 
     /// Default list handler
@@ -776,20 +784,20 @@ pub const Parser = struct {
         if (pass.len == 0) return .nil;
         if (pass.len == 1) return pass[0];
         var out: std.ArrayListUnmanaged(Sexp) = .{};
-        for (pass) |v| out.append(self.allocator(), v) catch return .nil;
-        return .{ .list = out.toOwnedSlice(self.allocator()) catch &[_]Sexp{} };
+        for (pass) |v| out.append(self.allocator(), v) catch return self.oom();
+        return .{ .list = out.toOwnedSlice(self.allocator()) catch return self.oom() };
     }
 
     /// Build S-expression: (tag items...) with trailing nil trimming
     inline fn sexp(self: *Parser, comptime tag: Tag, items: []const Sexp) Sexp {
         if (items.len == 0) {
-            const result = self.allocator().alloc(Sexp, 1) catch return .nil;
+            const result = self.allocator().alloc(Sexp, 1) catch return self.oom();
             result[0] = .{ .tag = tag };
             return .{ .list = result };
         }
         var len = items.len;
         while (len > 0 and items[len - 1] == .nil) len -= 1;
-        const result = self.allocator().alloc(Sexp, len + 1) catch return .nil;
+        const result = self.allocator().alloc(Sexp, len + 1) catch return self.oom();
         result[0] = .{ .tag = tag };
         if (len > 0) @memcpy(result[1..][0..len], items[0..len]);
         return .{ .list = result };
@@ -800,7 +808,7 @@ pub const Parser = struct {
         const items = if (spread == .list) spread.list else &[_]Sexp{};
         var len = items.len;
         while (len > 0 and items[len - 1] == .nil) len -= 1;
-        const result = self.allocator().alloc(Sexp, len + 1) catch return .nil;
+        const result = self.allocator().alloc(Sexp, len + 1) catch return self.oom();
         result[0] = .{ .tag = tag };
         if (len > 0) @memcpy(result[1..][0..len], items[0..len]);
         return .{ .list = result };
@@ -813,7 +821,7 @@ pub const Parser = struct {
         while (len > 0 and items[len - 1] == .nil) len -= 1;
         const skip_pos = (pos == .nil and len == 0);
         const total = if (skip_pos) 1 else len + 2;
-        const result = self.allocator().alloc(Sexp, total) catch return .nil;
+        const result = self.allocator().alloc(Sexp, total) catch return self.oom();
         result[0] = .{ .tag = tag };
         if (!skip_pos) {
             result[1] = pos;
