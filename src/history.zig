@@ -39,6 +39,7 @@ pub const Db = struct {
         var path_buf: [4096]u8 = undefined;
         const path_tmp = std.fmt.bufPrint(&path_buf, "{s}/.slash/history", .{home}) catch return error.PathTooLong;
         const path = alloc.dupe(u8, path_tmp) catch return error.OutOfMemory;
+        errdefer alloc.free(path);
 
         const self = alloc.create(Db) catch return error.OutOfMemory;
         self.* = .{
@@ -106,7 +107,6 @@ pub const Db = struct {
                 f.close();
                 self.file = null;
                 std.debug.print("slash: history: append failed, disabling persistent history for this session\n", .{});
-                return;
             }
         }
         const cwd_copy = self.alloc.dupe(u8, cwd) catch return;
@@ -135,7 +135,10 @@ pub const Db = struct {
             if (query.len > 0 and !containsSubstring(cmd, query)) continue;
             if (seen.contains(cmd)) continue;
             const dupe = alloc.dupe(u8, cmd) catch continue;
-            results.append(alloc, dupe) catch {};
+            results.append(alloc, dupe) catch {
+                alloc.free(dupe);
+                continue;
+            };
             seen.put(dupe, {}) catch {};
             if (results.items.len >= limit) break;
         }
@@ -285,4 +288,35 @@ fn unescapeFieldAlloc(alloc: std.mem.Allocator, value: []const u8) ![]u8 {
         }
     }
     return try buf.toOwnedSlice(alloc);
+}
+
+test "record keeps in-memory history when persistence write fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        const f = try tmp.dir.createFile("history.tsv", .{ .truncate = true });
+        f.close();
+    }
+    const read_only = try tmp.dir.openFile("history.tsv", .{ .mode = .read_only });
+
+    var db = Db{
+        .alloc = std.testing.allocator,
+        .entries = .{},
+        .file = read_only,
+        .path = try std.testing.allocator.dupe(u8, "/tmp/.slash-history-test"),
+    };
+    defer {
+        if (db.file) |f| f.close();
+        for (db.entries.items) |e| {
+            std.testing.allocator.free(e.cwd);
+            std.testing.allocator.free(e.command);
+        }
+        db.entries.deinit(std.testing.allocator);
+        std.testing.allocator.free(db.path);
+    }
+
+    db.record("echo hi", "/tmp", 0, 1);
+    try std.testing.expect(db.file == null);
+    try std.testing.expectEqual(@as(usize, 1), db.entries.items.len);
+    try std.testing.expectEqualStrings("echo hi", db.entries.items[0].command);
 }
