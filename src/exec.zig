@@ -985,6 +985,25 @@ pub const Shell = struct {
         return true;
     }
 
+    fn reportExecError(context: []const u8, cmd: []const u8, err: posix.ExecveError) noreturn {
+        var code: u8 = 126;
+        var msg: []const u8 = @errorName(err);
+        switch (err) {
+            error.FileNotFound => {
+                code = 127;
+                msg = "command not found";
+            },
+            error.AccessDenied, error.PermissionDenied => msg = "permission denied",
+            error.InvalidExe => msg = "exec format error",
+            error.IsDir => msg = "is a directory",
+            error.NotDir => msg = "not a directory",
+            error.FileBusy => msg = "text file busy",
+            else => {},
+        }
+        std.debug.print("slash: {s}{s}: {s}\n", .{ context, cmd, msg });
+        posix.exit(code);
+    }
+
     fn writeAllFd(fd: posix.fd_t, data: []const u8) bool {
         var written: usize = 0;
         while (written < data.len) {
@@ -1046,9 +1065,8 @@ pub const Shell = struct {
             if (!applyRedirects(self.allocator, redirs)) posix.exit(1);
             const argv_z = toExecArgs(self.allocator, argv) catch posix.exit(127);
             const envp = buildEnvP(self.allocator, self);
-            posix.execvpeZ(argv_z[0].?, argv_z, envp) catch {};
-            std.debug.print("slash: {s}: command not found\n", .{argv[0]});
-            posix.exit(127);
+            const err = posix.execvpeZ(argv_z[0].?, argv_z, envp);
+            reportExecError("", argv[0], err);
         }
 
         if (self.interactive) {
@@ -2086,9 +2104,8 @@ pub const Shell = struct {
             return;
         };
         const envp = buildEnvP(self.allocator, self);
-        posix.execvpeZ(argv_z[0].?, argv_z, envp) catch {};
-        std.debug.print("slash: exec: {s}: command not found\n", .{argv[0]});
-        posix.exit(127);
+        const err = posix.execvpeZ(argv_z[0].?, argv_z, envp);
+        reportExecError("exec: ", argv[0], err);
     }
 
     // =========================================================================

@@ -908,6 +908,20 @@ check_script "exec source" \
 
 rm -f /tmp/_sl_source.slash
 
+check_script_all "exec missing command diagnostic" \
+    "$(printf 'no_such_command_for_exec_test\n')" \
+    "slash: no_such_command_for_exec_test: command not found"
+
+check_script_all "exec permission denied diagnostic" \
+    "$(printf 'echo hi > /tmp/_sl_noexec_cmd.sh\nchmod 644 /tmp/_sl_noexec_cmd.sh\n/tmp/_sl_noexec_cmd.sh\n')" \
+    "slash: /tmp/_sl_noexec_cmd.sh: permission denied"
+
+check_script_all "exec builtin permission denied diagnostic" \
+    "$(printf 'echo hi > /tmp/_sl_noexec_builtin.sh\nchmod 644 /tmp/_sl_noexec_builtin.sh\nexec /tmp/_sl_noexec_builtin.sh\n')" \
+    "slash: exec: /tmp/_sl_noexec_builtin.sh: permission denied"
+
+rm -f /tmp/_sl_noexec_cmd.sh /tmp/_sl_noexec_builtin.sh
+
 check_script "exec xor" \
     "$(printf 'cmd a true xor false\na\necho $?\n')" \
     "0"
