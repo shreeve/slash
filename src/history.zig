@@ -103,6 +103,11 @@ pub const Db = struct {
             f.writeAll("\n") catch {
                 persisted = false;
             };
+            if (persisted) {
+                posix.fsync(f.handle) catch {
+                    persisted = false;
+                };
+            }
             if (!persisted) {
                 f.close();
                 self.file = null;
@@ -237,15 +242,39 @@ pub const Db = struct {
             out.writeAll(escaped_command) catch { write_ok = false; };
             out.writeAll("\n") catch { write_ok = false; };
         }
+        if (write_ok) {
+            posix.fsync(out.handle) catch {
+                write_ok = false;
+            };
+        }
         out.close();
         closed = true;
         if (write_ok) {
-            std.fs.cwd().rename(tmp, self.path) catch {};
+            std.fs.cwd().rename(tmp, self.path) catch {
+                std.debug.print("slash: history: failed to replace history file\n", .{});
+                return;
+            };
+            syncParentDir(self.path);
         } else {
-            std.fs.cwd().deleteFile(tmp) catch {};
+            std.fs.cwd().deleteFile(tmp) catch {
+                std.debug.print("slash: history: failed to clean temporary history file\n", .{});
+            };
         }
     }
 };
+
+fn syncParentDir(path: []const u8) void {
+    const parent = std.fs.path.dirname(path) orelse ".";
+    if (std.fs.path.isAbsolute(parent)) {
+        var dir = std.fs.openDirAbsolute(parent, .{}) catch return;
+        defer dir.close();
+        posix.fsync(dir.fd) catch {};
+    } else {
+        var dir = std.fs.cwd().openDir(parent, .{}) catch return;
+        defer dir.close();
+        posix.fsync(dir.fd) catch {};
+    }
+}
 
 fn containsSubstring(haystack: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, haystack, needle) != null;
