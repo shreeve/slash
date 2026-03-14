@@ -1249,7 +1249,25 @@ pub const Shell = struct {
         }
 
         if (text.len >= 2 and text[0] == '\'' and text[text.len - 1] == '\'') {
-            return text[1 .. text.len - 1];
+            const inner = text[1 .. text.len - 1];
+            if (std.mem.indexOf(u8, inner, "''") != null) {
+                var buf: std.ArrayListUnmanaged(u8) = .{};
+                defer buf.deinit(self.allocator);
+                var i: usize = 0;
+                while (i < inner.len) {
+                    if (i + 1 < inner.len and inner[i] == '\'' and inner[i + 1] == '\'') {
+                        buf.append(self.allocator, '\'') catch return inner;
+                        i += 2;
+                    } else {
+                        buf.append(self.allocator, inner[i]) catch return inner;
+                        i += 1;
+                    }
+                }
+                const result = buf.toOwnedSlice(self.allocator) catch return inner;
+                self.cmd_expansions.append(self.allocator, result) catch {};
+                return result;
+            }
+            return inner;
         }
 
         return text;
@@ -2095,6 +2113,7 @@ pub const Shell = struct {
         if (args.len < 2) return;
         while (true) {
             self.eval(args[0], source);
+            if (self.flow != .normal) break;
             if (self.last_exit != 0) break;
             self.eval(args[1], source);
             if (self.flow != .normal) {
@@ -2109,6 +2128,7 @@ pub const Shell = struct {
         if (args.len < 2) return;
         while (true) {
             self.eval(args[0], source);
+            if (self.flow != .normal) break;
             if (self.last_exit == 0) break;
             self.eval(args[1], source);
             if (self.flow != .normal) {
@@ -2299,16 +2319,21 @@ pub const Shell = struct {
         const argv = argv_list.items;
         if (argv.len == 0) return;
 
-        var saved: [3]posix.fd_t = .{ -1, -1, -1 };
         const has_redirs = redir_list.items.len > 0;
+        var saved: ?[3]posix.fd_t = null;
         if (has_redirs) {
-            saved[0] = posix.dup(posix.STDIN_FILENO) catch -1;
-            saved[1] = posix.dup(posix.STDOUT_FILENO) catch -1;
-            saved[2] = posix.dup(posix.STDERR_FILENO) catch -1;
+            saved = saveStdFds() orelse {
+                std.debug.print("slash: failed to save stdio for exec redirection\n", .{});
+                self.last_exit = 1;
+                self.cleanupProcSubs(procsub_fds.items);
+                return;
+            };
         }
         defer {
-            if (has_redirs and !restoreStdFds(saved)) {
-                std.debug.print("slash: failed to restore stdio after exec redirections\n", .{});
+            if (saved) |saved_fds| {
+                if (!restoreStdFds(saved_fds)) {
+                    std.debug.print("slash: failed to restore stdio after exec redirections\n", .{});
+                }
             }
             self.cleanupProcSubs(procsub_fds.items);
         }
@@ -2324,10 +2349,12 @@ pub const Shell = struct {
         const argv_z = toExecArgs(temp_alloc, argv) catch {
             std.debug.print("slash: exec: allocation failed\n", .{});
             self.last_exit = 1;
+            if (self.interactive) restoreShellSignals();
             return;
         };
         const envp = buildEnvP(temp_alloc, self);
         const err = posix.execvpeZ(argv_z[0].?, argv_z, envp);
+        if (self.interactive) restoreShellSignals();
         self.last_exit = reportExecErrorNoExit("exec: ", argv[0], err);
     }
 
@@ -3482,6 +3509,19 @@ fn resetChildSignals() void {
     posix.sigaction(posix.SIG.PIPE, &dfl, null);
 }
 
+fn restoreShellSignals() void {
+    const ign = posix.Sigaction{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.INT, &ign, null);
+    posix.sigaction(posix.SIG.QUIT, &ign, null);
+    posix.sigaction(posix.SIG.TSTP, &ign, null);
+    posix.sigaction(posix.SIG.TTOU, &ign, null);
+    posix.sigaction(posix.SIG.TTIN, &ign, null);
+}
+
 fn statusToExit(status: u32) u8 {
     if (posix.W.IFSIGNALED(status)) return 128 +| @as(u8, @truncate(posix.W.TERMSIG(status)));
     if (posix.W.IFEXITED(status)) return @truncate(posix.W.EXITSTATUS(status));
@@ -3579,6 +3619,10 @@ fn parseRegexGlob(arg: []const u8) ?ParsedRegex {
     return .{ .dir = "", .pattern = pattern, .ignore_case = ignore_case };
 }
 
+fn hasDoubleStarGlob(pattern: []const u8) bool {
+    return std.mem.indexOf(u8, pattern, "**") != null;
+}
+
 fn expandGlob(alloc: Allocator, pattern: []const u8, out: *std.ArrayList([]const u8)) void {
     const re_pattern = globToRegex(alloc, pattern) orelse {
         out.append(alloc, pattern) catch {};
@@ -3590,6 +3634,11 @@ fn expandGlob(alloc: Allocator, pattern: []const u8, out: *std.ArrayList([]const
         return;
     };
     defer re.free();
+
+    if (hasDoubleStarGlob(pattern)) {
+        expandGlobRecursive(alloc, pattern, &re, out);
+        return;
+    }
 
     var dir_end: usize = 0;
     for (pattern, 0..) |ch, i| {
@@ -3624,6 +3673,66 @@ fn expandGlob(alloc: Allocator, pattern: []const u8, out: *std.ArrayList([]const
     if (matches.items.len == 0) return;
     std.mem.sort([]const u8, matches.items, {}, lessThanStr);
     for (matches.items) |m| out.append(alloc, m) catch {};
+}
+
+fn expandGlobRecursive(alloc: Allocator, pattern: []const u8, re: *Regex, out: *std.ArrayList([]const u8)) void {
+    var base_end: usize = 0;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        if (pattern[i] == '*' or pattern[i] == '?' or pattern[i] == '[' or pattern[i] == '{') break;
+        if (pattern[i] == '/') base_end = i + 1;
+    }
+    const base_dir = if (base_end > 0) pattern[0 .. base_end - 1] else "";
+    const base_path = if (base_dir.len > 0) base_dir else ".";
+    const show_hidden = base_end < pattern.len and pattern[base_end] == '.';
+
+    var matches: std.ArrayList([]const u8) = .empty;
+    defer matches.deinit(alloc);
+
+    walkDirRecursive(alloc, base_path, base_dir, show_hidden, re, &matches, 0);
+
+    if (matches.items.len == 0) return;
+    std.mem.sort([]const u8, matches.items, {}, lessThanStr);
+    for (matches.items) |m| out.append(alloc, m) catch {};
+}
+
+fn walkDirRecursive(
+    alloc: Allocator,
+    dir_path: []const u8,
+    prefix: []const u8,
+    show_hidden: bool,
+    re: *Regex,
+    matches: *std.ArrayList([]const u8),
+    depth: usize,
+) void {
+    if (depth > 32) return;
+
+    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.name[0] == '.' and !show_hidden) continue;
+
+        const full = if (prefix.len > 0)
+            std.fmt.allocPrint(alloc, "{s}/{s}", .{ prefix, entry.name }) catch continue
+        else
+            alloc.dupe(u8, entry.name) catch continue;
+
+        const matched = re.search(full);
+        if (matched) {
+            matches.append(alloc, full) catch {
+                alloc.free(full);
+                continue;
+            };
+        }
+        if (entry.kind == .directory) {
+            walkDirRecursive(alloc, full, full, show_hidden, re, matches, depth + 1);
+            if (!matched) alloc.free(full);
+        } else if (!matched) {
+            alloc.free(full);
+        }
+    }
 }
 
 fn globToRegex(alloc: Allocator, pattern: []const u8) ?[]const u8 {

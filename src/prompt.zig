@@ -68,19 +68,20 @@ pub fn render(fmt: []const u8, ctx: Context) struct { str: []const u8, visible_l
     var out: usize = 0;
     var vis: usize = 0;
     var i: usize = 0;
+    var color_buf: [64]u8 = undefined;
 
     while (i < fmt.len) {
         if (fmt[i] == '%' and i + 1 < fmt.len) {
             switch (fmt[i + 1]) {
                 'f' => {
-                    if (parseFgBg(fmt, i, true)) |result| {
+                    if (parseFgBg(fmt, i, true, &color_buf)) |result| {
                         emit(&out, result.esc);
                         i = result.end;
                         continue;
                     }
                 },
                 'b' => {
-                    if (parseFgBg(fmt, i, false)) |result| {
+                    if (parseFgBg(fmt, i, false, &color_buf)) |result| {
                         emit(&out, result.esc);
                         i = result.end;
                         continue;
@@ -206,9 +207,7 @@ fn displayWidth(s: []const u8) usize {
 
 const ColorResult = struct { esc: []const u8, end: usize };
 
-var esc_buf: [64]u8 = undefined;
-
-fn parseFgBg(fmt: []const u8, start: usize, is_fg: bool) ?ColorResult {
+fn parseFgBg(fmt: []const u8, start: usize, is_fg: bool, buf: *[64]u8) ?ColorResult {
     const prefix = if (is_fg) "fg(" else "bg(";
     const after_pct = start + 1;
     if (after_pct + prefix.len > fmt.len) return null;
@@ -220,7 +219,7 @@ fn parseFgBg(fmt: []const u8, start: usize, is_fg: bool) ?ColorResult {
 
     const rgb = parseHex(color_str) orelse return null;
     const code: u8 = if (is_fg) 38 else 48;
-    const esc = std.fmt.bufPrint(&esc_buf, "\x1b[{d};2;{d};{d};{d}m", .{
+    const esc = std.fmt.bufPrint(buf, "\x1b[{d};2;{d};{d};{d}m", .{
         code, rgb[0], rgb[1], rgb[2],
     }) catch return null;
 

@@ -21,7 +21,7 @@ pub const Lexer = struct {
     hd_type: u8 = 0,
     hd_margin: u32 = 0,
     hd_scanned: bool = false,
-    hd_buf: [64]Token = undefined,
+    hd_buf: [255]Token = undefined,
     hd_buf_count: u8 = 0,
     hd_buf_pos: u8 = 0,
     pending_err: bool = false,
@@ -238,7 +238,7 @@ pub const Lexer = struct {
             while (true) {
                 const t = self.base.matchRules();
                 if (t.cat == .newline or t.cat == .eof) break;
-                if (self.hd_buf_count < 64) {
+                if (self.hd_buf_count < self.hd_buf.len) {
                     self.hd_buf[self.hd_buf_count] = t;
                     self.hd_buf_count += 1;
                 } else {
@@ -311,7 +311,7 @@ pub const Lexer = struct {
                         while (true) {
                             const t = self.base.matchRules();
                             if (t.cat == .newline) {
-                                if (self.hd_buf_count < 64) {
+                                if (self.hd_buf_count < self.hd_buf.len) {
                                     self.hd_buf[self.hd_buf_count] = t;
                                     self.hd_buf_count += 1;
                                 } else {
@@ -320,7 +320,7 @@ pub const Lexer = struct {
                                 break;
                             }
                             if (t.cat == .eof) break;
-                            if (self.hd_buf_count < 64) {
+                            if (self.hd_buf_count < self.hd_buf.len) {
                                 self.hd_buf[self.hd_buf_count] = t;
                                 self.hd_buf_count += 1;
                             } else {
