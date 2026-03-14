@@ -434,21 +434,7 @@ pub const Shell = struct {
             const pid = libc.waitpid(-1, &status, libc.WNOHANG);
             if (pid <= 0) break;
             const result_status: u32 = @bitCast(status);
-            for (&self.jobs) |*slot| {
-                if (slot.*) |*job| {
-                    if (job.state == .running) {
-                        for (job.pids[0..job.pid_count], 0..) |jpid, i| {
-                            if (jpid == pid) {
-                                job.pids[i] = 0;
-                                if (job.running_count > 0) job.running_count -= 1;
-                                job.exit_code = statusToExit(result_status);
-                                if (job.running_count == 0) job.state = .done;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+            self.markReapedPid(pid, result_status);
         }
         // Report and remove done jobs
         for (&self.jobs) |*slot| {
@@ -457,6 +443,22 @@ pub const Shell = struct {
                     std.debug.print("[{d}]  Done\t\t{s}\n", .{ job.id, job.command });
                     self.allocator.free(job.command);
                     slot.* = null;
+                }
+            }
+        }
+    }
+
+    fn markReapedPid(self: *Shell, pid: posix.pid_t, status: u32) void {
+        for (&self.jobs) |*slot| {
+            if (slot.*) |*job| {
+                for (job.pids[0..job.pid_count], 0..) |jpid, i| {
+                    if (jpid == pid) {
+                        job.pids[i] = 0;
+                        if (job.running_count > 0) job.running_count -= 1;
+                        job.exit_code = statusToExit(status);
+                        if (job.running_count == 0) job.state = .done;
+                        return;
+                    }
                 }
             }
         }
@@ -3293,4 +3295,23 @@ test "job ordering and stop resume bookkeeping" {
     if (sh.findJobById(id2)) |j| j.state = .running;
     count = sh.collectJobsOrdered(&ordered);
     try std.testing.expect(ordered[0].state == .running);
+
+    sh.removeJob(id2);
+    sh.removeJob(id3);
+}
+
+test "reaped stopped job transitions to done" {
+    var sh = Shell.init(std.testing.allocator);
+    defer sh.deinit();
+
+    const pids = [_]posix.pid_t{4444};
+    const job_id = sh.addJob(4444, .running, "job-stopped", &pids);
+    const job = sh.findJobById(job_id).?;
+    job.state = .stopped;
+
+    sh.markReapedPid(4444, 0);
+
+    try std.testing.expectEqual(@as(u8, 0), job.running_count);
+    try std.testing.expect(job.state == .done);
+    sh.removeJob(job_id);
 }
