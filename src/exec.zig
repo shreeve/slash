@@ -484,18 +484,20 @@ pub const Shell = struct {
     }
 
     fn waitForForegroundJob(self: *Shell, pgid: posix.pid_t, pid_count: u8) void {
-        if (self.findJobByPgid(pgid)) |job| {
+        var tracked_job = self.findJobByPgid(pgid);
+        if (tracked_job) |job| {
             if (job.state == .done) {
                 self.last_exit = job.exit_code;
                 self.reclaimTerminal();
                 return;
             }
         }
-        var remaining = pid_count;
-        const rightmost_pid = if (self.findJobByPgid(pgid)) |job|
-            job.pids[job.pid_count - 1]
-        else
-            0;
+        var remaining: u8 = if (tracked_job) |job| job.running_count else pid_count;
+        if (remaining == 0) {
+            self.reclaimTerminal();
+            return;
+        }
+        const rightmost_pid = if (tracked_job) |job| rightmostLivePid(job.*) else 0;
         var last_status: ?u32 = null;
         while (remaining > 0) {
             const result = posix.waitpid(-pgid, posix.W.UNTRACED);
@@ -510,7 +512,13 @@ pub const Shell = struct {
                 return;
             }
 
-            remaining -= 1;
+            self.markReapedPid(result.pid, result.status);
+            tracked_job = self.findJobByPgid(pgid);
+            if (tracked_job) |job| {
+                remaining = job.running_count;
+            } else {
+                remaining -= 1;
+            }
             if (result.pid == rightmost_pid) self.last_exit = statusToExit(result.status);
             last_status = result.status;
         }
@@ -2583,10 +2591,21 @@ pub const Shell = struct {
         const j = job.?;
         std.debug.print("{s}\n", .{j.command});
 
-        if (self.interactive) _ = libc.tcsetpgrp(self.tty_fd, j.pgid);
+        if (self.interactive and libc.tcsetpgrp(self.tty_fd, j.pgid) != 0) {
+            std.debug.print("fg: failed to set foreground process group\n", .{});
+            self.last_exit = 1;
+            self.reclaimTerminal();
+            return;
+        }
         if (j.state == .stopped) {
+            std.posix.kill(-j.pgid, std.posix.SIG.CONT) catch {
+                std.debug.print("fg: failed to continue job\n", .{});
+                j.state = .stopped;
+                self.last_exit = 1;
+                self.reclaimTerminal();
+                return;
+            };
             j.state = .running;
-            std.posix.kill(-j.pgid, std.posix.SIG.CONT) catch {};
         }
         self.waitForForegroundJob(j.pgid, j.pid_count);
         if (j.state != .stopped) self.removeJob(j.id);
@@ -2615,9 +2634,14 @@ pub const Shell = struct {
             return;
         }
         const j = job.?;
+        std.posix.kill(-j.pgid, std.posix.SIG.CONT) catch {
+            std.debug.print("bg: failed to continue job\n", .{});
+            j.state = .stopped;
+            self.last_exit = 1;
+            return;
+        };
         j.state = .running;
         std.debug.print("[{d}]  {s} &\n", .{ j.id, j.command });
-        std.posix.kill(-j.pgid, std.posix.SIG.CONT) catch {};
         self.last_exit = 0;
     }
 
@@ -3358,6 +3382,16 @@ fn parseFdDupToken(token: []const u8) ?struct { src_fd: posix.fd_t, dest_fd: pos
     return .{ .src_fd = src_fd, .dest_fd = dest_fd };
 }
 
+fn rightmostLivePid(job: Job) posix.pid_t {
+    var i = job.pid_count;
+    while (i > 0) {
+        i -= 1;
+        const pid = job.pids[i];
+        if (pid != 0) return pid;
+    }
+    return 0;
+}
+
 fn saveStdFds() ?[3]posix.fd_t {
     var saved: [3]posix.fd_t = .{ -1, -1, -1 };
     saved[0] = posix.dup(posix.STDIN_FILENO) catch {
@@ -3686,4 +3720,23 @@ test "wait consumes done job status after reap reporting" {
     sh.builtinWait(&argv);
     try std.testing.expectEqual(@as(u8, 7), sh.last_exit);
     try std.testing.expect(sh.findJobById(job_id) == null);
+}
+
+test "rightmostLivePid prefers last unreaped child" {
+    var job = Job{
+        .id = 1,
+        .pgid = 1001,
+        .state = .running,
+        .exit_code = 0,
+        .command = "job",
+    };
+    job.pids[0] = 1001;
+    job.pids[1] = 1002;
+    job.pids[2] = 0;
+    job.pid_count = 3;
+
+    try std.testing.expectEqual(@as(posix.pid_t, 1002), rightmostLivePid(job));
+
+    job.pids[1] = 0;
+    try std.testing.expectEqual(@as(posix.pid_t, 1001), rightmostLivePid(job));
 }
