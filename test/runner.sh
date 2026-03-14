@@ -1134,6 +1134,29 @@ check_script "exec display negative" \
     "-15"
 
 # ==========================================================================
+# HISTORY FILE PERMISSIONS
+# ==========================================================================
+
+check_history_mode() {
+    local label="$1"
+    local tmp_home="/tmp/_slash_hist_home_$$"
+    rm -rf "$tmp_home"
+    mkdir -p "$tmp_home"
+    printf 'exit\n' | HOME="$tmp_home" "$SLASH" >/dev/null 2>&1
+    local mode
+    mode="$(stat -f "%Lp" "$tmp_home/.slash/history" 2>/dev/null || true)"
+    rm -rf "$tmp_home"
+    if [ "$mode" = "600" ]; then
+        PASS=$((PASS + 1))
+    else
+        FAIL=$((FAIL + 1))
+        ERRORS="${ERRORS}\n  FAIL: ${label}\n    expect: 600\n    actual: ${mode}\n"
+    fi
+}
+
+check_history_mode "history file mode 600"
+
+# ==========================================================================
 # RESULTS
 # ==========================================================================
 echo ""

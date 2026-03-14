@@ -52,8 +52,11 @@ pub const Db = struct {
         self.prune();
 
         self.file = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch
-            std.fs.cwd().createFile(path, .{}) catch null;
-        if (self.file) |f| f.seekFromEnd(0) catch {};
+            std.fs.cwd().createFile(path, .{ .mode = 0o600 }) catch null;
+        if (self.file) |f| {
+            posix.fchmod(f.handle, 0o600) catch {};
+            f.seekFromEnd(0) catch {};
+        }
 
         return self;
     }
@@ -211,7 +214,8 @@ pub const Db = struct {
     fn rewrite(self: *Db) void {
         const tmp = std.fmt.allocPrint(self.alloc, "{s}.tmp", .{self.path}) catch return;
         defer self.alloc.free(tmp);
-        const out = std.fs.cwd().createFile(tmp, .{}) catch return;
+        const out = std.fs.cwd().createFile(tmp, .{ .mode = 0o600 }) catch return;
+        posix.fchmod(out.handle, 0o600) catch {};
         var closed = false;
         defer if (!closed) out.close();
         var write_ok = true;
