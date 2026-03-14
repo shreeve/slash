@@ -1781,6 +1781,8 @@ pub const Shell = struct {
             if (pid == 0) {
                 if (self.interactive) _ = libc.setpgid(0, if (pgid != 0) pgid else 0);
                 resetChildSignals();
+                // Pipeline stage children should never run nested foreground job-control.
+                self.interactive = false;
 
                 if (i > 0) {
                     posix.dup2(pipe_fds[i - 1][0], posix.STDIN_FILENO) catch posix.exit(1);
