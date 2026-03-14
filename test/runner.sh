@@ -842,6 +842,10 @@ check_script "exec if =~" \
     "$(printf 'x = "hello.zig"\nif $x =~ /\\.zig$/ { echo yes } else { echo no }\n')" \
     "yes"
 
+check_script "exec regex char class slash" \
+    "$(printf 'x = "a/b"\nif $x =~ /[a/b]/ { echo yes } else { echo no }\n')" \
+    "yes"
+
 check_script "exec if !~" \
     "$(printf 'x = "hello.txt"\nif $x !~ /\\.zig$/ { echo yes } else { echo no }\n')" \
     "yes"

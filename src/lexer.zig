@@ -394,13 +394,24 @@ pub const Lexer = struct {
     fn scanRegex(self: *Lexer, start: u32) Token {
         const delim = self.base.source[self.base.pos];
         self.base.pos += 1;
+        var in_class = false;
         while (self.base.pos < self.base.source.len) {
             const ch = self.base.source[self.base.pos];
             if (ch == '\\' and self.base.pos + 1 < self.base.source.len) {
                 self.base.pos += 2;
                 continue;
             }
-            if (ch == delim) {
+            if (ch == '[' and !in_class) {
+                in_class = true;
+                self.base.pos += 1;
+                continue;
+            }
+            if (ch == ']' and in_class) {
+                in_class = false;
+                self.base.pos += 1;
+                continue;
+            }
+            if (ch == delim and !in_class) {
                 self.base.pos += 1;
                 while (self.base.pos < self.base.source.len) {
                     const f = self.base.source[self.base.pos];

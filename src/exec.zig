@@ -1494,8 +1494,13 @@ pub const Shell = struct {
         var ignore_case = false;
         var fi = end + 1;
         while (fi < raw.len and std.ascii.isAlphabetic(raw[fi])) : (fi += 1) {
-            if (raw[fi] == 'i') ignore_case = true;
+            if (raw[fi] == 'i') {
+                ignore_case = true;
+            } else {
+                return null;
+            }
         }
+        if (fi != raw.len) return null;
         return .{ .pattern = raw[start..end], .ignore_case = ignore_case };
     }
 
@@ -3390,4 +3395,10 @@ test "reaped stopped job transitions to done" {
     try std.testing.expectEqual(@as(u8, 0), job.running_count);
     try std.testing.expect(job.state == .done);
     sh.removeJob(job_id);
+}
+
+test "parseRegexSpec rejects unsupported flags" {
+    try std.testing.expect(Shell.parseRegexSpec("/abc/i") != null);
+    try std.testing.expect(Shell.parseRegexSpec("/abc/m") == null);
+    try std.testing.expect(Shell.parseRegexSpec("~|abc|x") == null);
 }
