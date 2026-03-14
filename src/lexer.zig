@@ -282,7 +282,10 @@ pub const Lexer = struct {
                 const is_closing = after >= self.base.source.len or
                     self.base.source[after] == '\n' or self.base.source[after] == ' ' or
                     self.base.source[after] == '\t' or self.base.source[after] == '|' or
-                    self.base.source[after] == '\r';
+                    self.base.source[after] == '\r' or self.base.source[after] == ';' or
+                    self.base.source[after] == '&' or self.base.source[after] == '<' or
+                    self.base.source[after] == '>' or self.base.source[after] == ')' or
+                    self.base.source[after] == '}' or self.base.source[after] == '#';
                 if (is_closing) {
                     const close_cat: TokenCat = switch (self.hd_type) {
                         1 => .heredoc_sq,
