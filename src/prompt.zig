@@ -384,10 +384,25 @@ fn resolveGitHeadPath(path_buf: *[4096]u8, git_path: []const u8) ?usize {
     const prefix = "gitdir: ";
     if (!std.mem.startsWith(u8, line, prefix)) return null;
     const gitdir = line[prefix.len..];
-    if (gitdir.len + head_suffix.len > path_buf.len) return null;
-    @memcpy(path_buf[0..gitdir.len], gitdir);
-    @memcpy(path_buf[gitdir.len..][0..head_suffix.len], head_suffix);
-    const indirect_len = gitdir.len + head_suffix.len;
+
+    var indirect_len: usize = 0;
+    if (gitdir.len > 0 and gitdir[0] == '/') {
+        if (gitdir.len + head_suffix.len > path_buf.len) return null;
+        @memcpy(path_buf[0..gitdir.len], gitdir);
+        @memcpy(path_buf[gitdir.len..][0..head_suffix.len], head_suffix);
+        indirect_len = gitdir.len + head_suffix.len;
+    } else {
+        const sep = std.mem.lastIndexOfScalar(u8, git_path, '/') orelse return null;
+        const base_dir = git_path[0..sep];
+        if (base_dir.len + 1 + gitdir.len + head_suffix.len > path_buf.len) return null;
+        @memcpy(path_buf[0..base_dir.len], base_dir);
+        path_buf[base_dir.len] = '/';
+        @memcpy(path_buf[base_dir.len + 1 ..][0..gitdir.len], gitdir);
+        const end = base_dir.len + 1 + gitdir.len;
+        @memcpy(path_buf[end..][0..head_suffix.len], head_suffix);
+        indirect_len = end + head_suffix.len;
+    }
+
     if (std.fs.cwd().access(path_buf[0..indirect_len], .{})) |_|
         return indirect_len
     else |_|
@@ -404,4 +419,53 @@ fn formatDuration(buf: *[16]u8, ms: u64) []const u8 {
     const mins = total_secs / 60;
     const secs = total_secs % 60;
     return std.fmt.bufPrint(buf, "{d}m{d}s", .{ mins, secs }) catch "";
+}
+
+test "resolveGitHeadPath handles relative gitdir file" {
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd = std.posix.getcwd(&cwd_buf) catch return error.SkipZigTest;
+
+    var root_buf: [4096]u8 = undefined;
+    const root = std.fmt.bufPrint(&root_buf, "/tmp/slash-prompt-relgit-{d}", .{std.time.nanoTimestamp()}) catch return error.SkipZigTest;
+    defer std.fs.cwd().deleteTree(root) catch {};
+
+    var wt_buf: [4096]u8 = undefined;
+    const wt = std.fmt.bufPrint(&wt_buf, "{s}/wt", .{root}) catch return error.SkipZigTest;
+    var main_git_wt_buf: [4096]u8 = undefined;
+    const main_git_wt = std.fmt.bufPrint(&main_git_wt_buf, "{s}/main/.git/worktrees/wt", .{root}) catch return error.SkipZigTest;
+    std.fs.cwd().makePath(wt) catch return error.SkipZigTest;
+    std.fs.cwd().makePath(main_git_wt) catch return error.SkipZigTest;
+
+    var git_file_path_buf: [4096]u8 = undefined;
+    const git_file_path = std.fmt.bufPrint(&git_file_path_buf, "{s}/.git", .{wt}) catch return error.SkipZigTest;
+    {
+        const f = std.fs.cwd().createFile(git_file_path, .{ .truncate = true }) catch return error.SkipZigTest;
+        defer f.close();
+        f.writeAll("gitdir: ../main/.git/worktrees/wt\n") catch return error.SkipZigTest;
+    }
+
+    var head_path_buf: [4096]u8 = undefined;
+    const head_path = std.fmt.bufPrint(&head_path_buf, "{s}/HEAD", .{main_git_wt}) catch return error.SkipZigTest;
+    {
+        const f = std.fs.cwd().createFile(head_path, .{ .truncate = true }) catch return error.SkipZigTest;
+        defer f.close();
+        f.writeAll("ref: refs/heads/main\n") catch return error.SkipZigTest;
+    }
+
+    var resolved_buf: [4096]u8 = undefined;
+    const resolved_len = resolveGitHeadPath(&resolved_buf, git_file_path) orelse return error.SkipZigTest;
+    const resolved = resolved_buf[0..resolved_len];
+    const abs = if (std.mem.startsWith(u8, resolved, "/"))
+        resolved
+    else blk: {
+        var abs_buf: [4096]u8 = undefined;
+        const joined = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ cwd, resolved }) catch return error.SkipZigTest;
+        break :blk joined;
+    };
+
+    const head = std.fs.openFileAbsolute(abs, .{}) catch return error.SkipZigTest;
+    defer head.close();
+    var read_buf: [64]u8 = undefined;
+    const n = head.read(&read_buf) catch return error.SkipZigTest;
+    try std.testing.expect(std.mem.startsWith(u8, read_buf[0..n], "ref: refs/heads/main"));
 }
