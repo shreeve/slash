@@ -18,13 +18,25 @@ pub const Regex = struct {
     }
 
     fn compileWithOpts(pattern: []const u8, flags: c_int) !Regex {
-        var pat_buf: [4096]u8 = undefined;
-        if (pattern.len >= pat_buf.len) return error.CompileError;
+        var self: Regex = undefined;
+
+        if (pattern.len < 4096) {
+            var pat_buf: [4096]u8 = undefined;
+            @memcpy(pat_buf[0..pattern.len], pattern);
+            pat_buf[pattern.len] = 0;
+            if (c.regcomp(&self.inner, @ptrCast(&pat_buf), flags) != 0)
+                return error.CompileError;
+            return self;
+        }
+
+        const alloc = std.heap.page_allocator;
+        const pat_buf = alloc.alloc(u8, pattern.len + 1) catch return error.OutOfMemory;
+        defer alloc.free(pat_buf);
         @memcpy(pat_buf[0..pattern.len], pattern);
         pat_buf[pattern.len] = 0;
-        var self: Regex = undefined;
-        if (c.regcomp(&self.inner, @ptrCast(&pat_buf), flags) != 0)
+        if (c.regcomp(&self.inner, @ptrCast(pat_buf.ptr), flags) != 0)
             return error.CompileError;
+
         return self;
     }
 
