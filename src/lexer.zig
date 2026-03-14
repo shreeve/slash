@@ -415,7 +415,7 @@ pub const Lexer = struct {
                 self.base.pos += 1;
                 while (self.base.pos < self.base.source.len) {
                     const f = self.base.source[self.base.pos];
-                    if (f == 'g' or f == 'i' or f == 'm' or f == 's' or f == 'u' or f == 'x') {
+                    if (f == 'i') {
                         self.base.pos += 1;
                     } else break;
                 }

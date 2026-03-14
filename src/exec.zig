@@ -1550,12 +1550,23 @@ pub const Shell = struct {
         const delim = raw[start];
         start += 1;
         var end = start;
+        var in_class = false;
         while (end < raw.len) {
             if (raw[end] == '\\' and end + 1 < raw.len) {
                 end += 2;
                 continue;
             }
-            if (raw[end] == delim) break;
+            if (raw[end] == '[' and !in_class) {
+                in_class = true;
+                end += 1;
+                continue;
+            }
+            if (raw[end] == ']' and in_class) {
+                in_class = false;
+                end += 1;
+                continue;
+            }
+            if (raw[end] == delim and !in_class) break;
             end += 1;
         }
         if (end >= raw.len) return null;
