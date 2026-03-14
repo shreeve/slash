@@ -395,6 +395,7 @@ defaults {
 @as = [ident, exit     ]
 @as = [ident, break    ]
 @as = [ident, continue ]
+@as = [ident, shift    ]
 @as = [ident, exec     ]
 
 # Word-form boolean operators are handled via @as keywords (AND, OR, NOT, XOR)
@@ -475,6 +476,8 @@ command   = "!" command                     → (not 2)
           | EXIT [INTEGER]                  → (exit 2)
           | BREAK                           → (break)
           | CONTINUE                        → (continue)
+          | SHIFT INTEGER                   → (shift 2)
+          | SHIFT                           → (shift)
           | SOURCE word                     → (source 2)
           | EXEC simple_cmd                 → (exec 2)
           | simple_cmd
@@ -698,10 +701,13 @@ atom      = VARIABLE
           | STRING_SQ
           | subshell_capture
 
-shift_value = IDENT                         → (shift_value 1)
+shift_value = SHIFT                         → (shift_value)
+bare_value  = IDENT
 assign_rhs  = shift_value
+            | bare_value
             | expr
 try_subject = shift_value
+            | bare_value
             | expr
 
 list_literal = LIST_START list_item* "]"    → (list ...2)

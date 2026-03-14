@@ -107,7 +107,7 @@ check "unset variable"          "name = -"                  "(unset name)"
 check "assign list literal"     'args = [find .]'           "(assign_argv args (list find .))"
 check "append list literal"     'args += [-iname "*foo*"]'  '(append_argv args (list -iname "*foo*"))'
 check "assign empty list"       'args = []'                 "(assign_argv args (list))"
-check "assign absolute path"    'tool = /usr/bin'           "(assign tool (shift_value /usr/bin))"
+check "assign absolute path"    'tool = /usr/bin'           "(assign tool /usr/bin)"
 
 # ==========================================================================
 # PIPELINES
@@ -209,7 +209,7 @@ check "until loop"             "until true { echo y }"     "(until (cmd true) (b
 # ==========================================================================
 check "try with arms"          'try $x { "a" { echo a } "b" { echo b } }'  '(try $x ((arm "a" (block (cmd echo a))) (arm "b" (block (cmd echo b)))))'
 check "try with else"          'try $x { "a" { echo a } else { echo z } }' '(try $x ((arm "a" (block (cmd echo a))) (arm_else (block (cmd echo z)))))'
-check "try shift value"        'try shift { "a" { echo y } else { echo n } }' '(try (shift_value shift) ((arm "a" (block (cmd echo y))) (arm_else (block (cmd echo n)))))'
+check "try shift value"        'try shift { "a" { echo y } else { echo n } }' '(try (shift_value) ((arm "a" (block (cmd echo y))) (arm_else (block (cmd echo n)))))'
 check "try regex exec"         'try "test" { /te.*/ { echo yes } else { echo no } }' "" "yes"
 
 # ==========================================================================
@@ -259,8 +259,8 @@ check "test -d"                "test -d src"                "(test -d src)"
 check "test -e"                "test -e /tmp"               "(test -e /tmp)"
 check "exit code"              "exit 1"                     "(exit 1)"
 check "exit no arg"            "exit"                       "(exit)"
-check "shift"                  "shift"                      "(cmd shift)"
-check "shift count"            "shift 2"                    "(cmd shift 2)"
+check "shift"                  "shift"                      "(shift)"
+check "shift count"            "shift 2"                    "(shift 2)"
 check "break"                  "break"                      "(break)"
 check "continue"               "continue"                   "(continue)"
 check "source"                 "source file.slash"          "(source file.slash)"

@@ -652,6 +652,7 @@ pub const Shell = struct {
             .key_del => self.evalKeyDel(args, source),
             .key_list => self.evalKeyList(),
             .eq, .ne, .lt, .gt, .le, .ge, .match, .nomatch => self.evalComparison(tag, args, source),
+            .shift => self.evalShift(args, source),
             .shift_value => _ = self.evalShiftValue(args, source),
             .@"break" => { self.flow = .break_loop; self.last_exit = 0; },
             .@"continue" => { self.flow = .continue_loop; self.last_exit = 0; },
@@ -1374,13 +1375,33 @@ pub const Shell = struct {
         return buf;
     }
 
-    fn evalShiftValue(self: *Shell, args: []const Sexp, source: []const u8) []const u8 {
+    fn evalShift(self: *Shell, args: []const Sexp, source: []const u8) void {
+        var count: usize = 1;
         if (args.len >= 1) {
-            const raw = self.sexpToStr(args[0], source) orelse "";
-            if (!std.mem.eql(u8, raw, "shift")) {
-                self.last_exit = 0;
-                return self.expandToken(raw);
+            switch (args[0]) {
+                .src => |s| {
+                    const text = source[s.pos..][0..s.len];
+                    count = std.fmt.parseInt(usize, text, 10) catch {
+                        std.debug.print("slash: shift: invalid count: {s}\n", .{text});
+                        self.last_exit = 1;
+                        return;
+                    };
+                },
+                else => {},
             }
+        }
+        if (count >= self.args.len) {
+            self.args = self.args[self.args.len..];
+        } else {
+            self.args = self.args[count..];
+        }
+        self.last_exit = 0;
+    }
+
+    fn evalShiftValue(self: *Shell, args: []const Sexp, _: []const u8) []const u8 {
+        if (args.len != 0) {
+            self.last_exit = 1;
+            return "";
         }
         if (self.args.len == 0) {
             self.last_exit = 1;
