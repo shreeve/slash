@@ -107,6 +107,10 @@ const LexerSpec = struct {
     }
 
     fn deinit(self: *LexerSpec) void {
+        for (self.rules.items) |rule| {
+            self.allocator.free(rule.guards);
+            self.allocator.free(rule.actions);
+        }
         self.states.deinit(self.allocator);
         self.defaults.deinit(self.allocator);
         self.tokens.deinit(self.allocator);
@@ -204,6 +208,10 @@ const LexerParser = struct {
     fn parseIdentifier(self: *LexerParser) ?[]const u8 {
         self.skipWhitespace();
         const start = self.pos;
+        if (self.pos >= self.source.len) return null;
+        const first = self.source[self.pos];
+        if (!((first >= 'a' and first <= 'z') or (first >= 'A' and first <= 'Z') or first == '_')) return null;
+        self.pos += 1;
         while (self.pos < self.source.len) {
             const c = self.source[self.pos];
             if ((c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
@@ -356,6 +364,7 @@ const LexerParser = struct {
         while (self.pos < self.source.len) {
             self.skipWhitespaceAndNewlines();
             if (self.expect('}')) break;
+            const before = self.pos;
 
             // Parse {var = val}
             if (self.expect('{')) {
@@ -364,7 +373,10 @@ const LexerParser = struct {
                 const value = self.parseInt() orelse return error.ExpectedValue;
                 if (!self.expect('}')) return error.ExpectedCloseBrace;
                 try self.spec.defaults.append(self.allocator, .{ .variable = name, .value = value });
+                continue;
             }
+
+            if (self.pos == before) return error.ExpectedOpenBrace;
         }
     }
 
@@ -375,12 +387,14 @@ const LexerParser = struct {
         while (self.pos < self.source.len) {
             self.skipWhitespaceAndNewlines();
             if (self.expect('}')) break;
+            const before = self.pos;
 
-            const name = self.parseIdentifier() orelse continue;
+            const name = self.parseIdentifier() orelse return error.ExpectedIdentifier;
             try self.spec.tokens.append(self.allocator, .{ .name = name });
 
             // Skip comma if present
             _ = self.expect(',');
+            if (self.pos == before) return error.ExpectedIdentifier;
         }
     }
 
@@ -806,6 +820,49 @@ fn isRegexSpecial(c: u8) bool {
 /// start at the following element.
 fn firstCharsOfRegex(regex: []const u8, flags: *[256]bool) void {
     if (regex.len == 0) return;
+
+    // Top-level alternation: union first-chars from every branch.
+    {
+        var saw_alt = false;
+        var branch_start: usize = 0;
+        var i: usize = 0;
+        var in_class = false;
+        var escaped = false;
+        var paren_depth: usize = 0;
+        while (i < regex.len) : (i += 1) {
+            const ch = regex[i];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (in_class) {
+                if (ch == ']') in_class = false;
+                continue;
+            }
+            switch (ch) {
+                '[' => in_class = true,
+                '(' => paren_depth += 1,
+                ')' => {
+                    if (paren_depth > 0) paren_depth -= 1;
+                },
+                '|' => if (paren_depth == 0) {
+                    saw_alt = true;
+                    firstCharsOfRegex(regex[branch_start..i], flags);
+                    branch_start = i + 1;
+                },
+                else => {},
+            }
+        }
+        if (saw_alt) {
+            firstCharsOfRegex(regex[branch_start..], flags);
+            return;
+        }
+    }
+
     var consumed: usize = 0;
     switch (regex[0]) {
         '\\' => {
@@ -1099,7 +1156,7 @@ const LexerGenerator = struct {
 
         var max_pat_len: usize = 0;
         for (self.spec.rules.items) |rule| {
-            const regex = patternToRegex(self.allocator, rule.pattern) catch "";
+            const regex = try patternToRegex(self.allocator, rule.pattern);
             // Calculate escaped display length (each \ and " adds 1)
             var display_len: usize = 2; // quotes
             for (regex) |ch| {
@@ -1148,9 +1205,10 @@ const LexerGenerator = struct {
                 try self.write(", .acts = &.{");
                 for (rule.actions, 0..) |action, ai| {
                     if (ai > 0) try self.write(", ");
+                    const var_name = action.variable orelse return error.ExpectedIdentifier;
                     const var_idx: u8 = for (self.spec.states.items, 0..) |state, si| {
-                        if (std.mem.eql(u8, state.name, action.variable orelse "")) break @as(u8, @intCast(si));
-                    } else 0;
+                        if (std.mem.eql(u8, state.name, var_name)) break @as(u8, @intCast(si));
+                    } else return error.UnknownStateVariable;
                     switch (action.kind) {
                         .set => try self.print(".{{ .v = {d}, .k = .set, .n = {d} }}", .{ var_idx, action.value orelse 0 }),
                         .inc => try self.print(".{{ .v = {d}, .k = .inc, .n = 0 }}", .{var_idx}),
@@ -1898,11 +1956,68 @@ const ParserDSLParser = struct {
         }
         self.advance();
 
-        // Find matching closing brace, counting nested braces
+        // Find matching closing brace, counting nested braces while ignoring
+        // braces inside strings and comments.
         const start = self.lexer.pos;
         var depth: usize = 1;
+        var in_string: u8 = 0;
+        var escaped = false;
+        var in_line_comment = false;
+        var in_block_comment = false;
         while (depth > 0 and self.lexer.pos < self.lexer.source.len) {
             const c = self.lexer.source[self.lexer.pos];
+            const next = if (self.lexer.pos + 1 < self.lexer.source.len) self.lexer.source[self.lexer.pos + 1] else 0;
+
+            if (in_line_comment) {
+                if (c == '\n') in_line_comment = false;
+                self.lexer.pos += 1;
+                continue;
+            }
+            if (in_block_comment) {
+                if (c == '*' and next == '/') {
+                    in_block_comment = false;
+                    self.lexer.pos += 2;
+                    continue;
+                }
+                self.lexer.pos += 1;
+                continue;
+            }
+            if (in_string != 0) {
+                if (escaped) {
+                    escaped = false;
+                    self.lexer.pos += 1;
+                    continue;
+                }
+                if (c == '\\') {
+                    escaped = true;
+                    self.lexer.pos += 1;
+                    continue;
+                }
+                if (c == in_string) {
+                    in_string = 0;
+                    self.lexer.pos += 1;
+                    continue;
+                }
+                self.lexer.pos += 1;
+                continue;
+            }
+
+            if (c == '/' and next == '/') {
+                in_line_comment = true;
+                self.lexer.pos += 2;
+                continue;
+            }
+            if (c == '/' and next == '*') {
+                in_block_comment = true;
+                self.lexer.pos += 2;
+                continue;
+            }
+            if (c == '"' or c == '\'') {
+                in_string = c;
+                self.lexer.pos += 1;
+                continue;
+            }
+
             if (c == '{') {
                 depth += 1;
             } else if (c == '}') {
@@ -2764,7 +2879,7 @@ const ParserGenerator = struct {
                     const marker_name = try std.fmt.allocPrint(self.allocator, "{s}!", .{start_name});
                     const marker_id = try self.addSymbol(marker_name, .terminal);
 
-                    // Prepend marker to start rule
+                    // Prepend marker to every start-rule alternative.
                     for (self.rules.items) |*rule| {
                         if (rule.lhs == start_id) {
                             var new_rhs: std.ArrayListUnmanaged(u16) = .{};
@@ -2772,9 +2887,9 @@ const ParserGenerator = struct {
                             for (rule.rhs) |sym| {
                                 try new_rhs.append(self.allocator, sym);
                             }
+                            self.allocator.free(rule.rhs);
                             rule.rhs = try new_rhs.toOwnedSlice(self.allocator);
                             rule.action_offset = 1;
-                            break;
                         }
                     }
 
@@ -4621,13 +4736,16 @@ const ParserGenerator = struct {
         for (elements.items[1..]) |elem| {
             const work = self.stripKeyAndSuffix(elem);
             if (work.len == 0) continue;
-            if (work[0] == '.' and work.len >= 4 and work[1] == '.' and work[2] == '.') {
+            if (std.mem.startsWith(u8, work, "...")) {
+                const idx = std.fmt.parseInt(usize, work[3..], 10) catch continue;
+                if (idx == 0) continue;
                 spread_count += 1;
-                spread_pos = work[3] - '1' + offset;
+                spread_pos = @intCast(idx - 1 + offset);
             } else if (work[0] == '~') {
                 has_tilde = true;
             } else if (work[0] >= '1' and work[0] <= '9') {
-                if (pos_count == 0) first_pos = work[0] - '1' + offset;
+                const idx = std.fmt.parseInt(usize, work, 10) catch continue;
+                if (pos_count == 0) first_pos = @intCast(idx - 1 + offset);
                 pos_count += 1;
             } else if (std.mem.eql(u8, work, "nil") or std.mem.eql(u8, work, "_")) {
                 has_nil = true; // track nil separately for pattern matching
@@ -4955,4 +5073,24 @@ test "lexer parser accepts fat-arrow rules" {
 
     try parser.parseLexerSection();
     try std.testing.expectEqual(@as(usize, 1), parser.spec.rules.items.len);
+}
+
+test "firstCharsOfRegex handles top-level alternation branches" {
+    var flags: [256]bool = [_]bool{false} ** 256;
+    firstCharsOfRegex("ab|cd", &flags);
+    try std.testing.expect(flags['a']);
+    try std.testing.expect(flags['c']);
+}
+
+test "parseIdentifier rejects leading digits" {
+    var parser = LexerParser.init(std.testing.allocator, "1abc");
+    defer parser.deinit();
+    try std.testing.expect(parser.parseIdentifier() == null);
+}
+
+test "parseTokensBlock fails fast on malformed entry" {
+    const source = "tokens {\n@\n}\n";
+    var parser = LexerParser.init(std.testing.allocator, source);
+    defer parser.deinit();
+    try std.testing.expectError(error.ExpectedIdentifier, parser.parseLexerSection());
 }
