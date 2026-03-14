@@ -1011,10 +1011,7 @@ fn clearOverlay() void {
 fn writeAll(data: []const u8) void {
     var written: usize = 0;
     while (written < data.len) {
-        const n = posix.write(STDOUT, data[written..]) catch |err| switch (err) {
-            error.Interrupted => continue,
-            else => return,
-        };
+        const n = posix.write(STDOUT, data[written..]) catch return;
         if (n == 0) return;
         written += n;
     }

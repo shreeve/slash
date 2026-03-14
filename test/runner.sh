@@ -515,6 +515,11 @@ check_script "exec herestring" \
     "$(printf 'cat <<< \"hello\"\n')" \
     "hello"
 
+export SLASH_HS_BIG="$(python3 -c 'print("a" * 200000, end="")')"
+check_script "exec herestring large payload" \
+    "$(printf "python3 -c 'import sys; print(len(sys.stdin.read()))' <<< \$SLASH_HS_BIG\n")" \
+    "200001"
+
 check_script "exec test -f true" \
     "$(printf 'if test -f build.zig { echo found }\n')" \
     "found"

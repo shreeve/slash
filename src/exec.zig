@@ -847,14 +847,14 @@ pub const Shell = struct {
             fds.append(self.allocator, .{ .pipe_fd = pipe_fds[0], .child_pid = pid }) catch {
                 posix.close(pipe_fds[0]);
                 posix.kill(pid, posix.SIG.TERM) catch {};
-                _ = posix.waitpid(pid, 0) catch {};
+                _ = posix.waitpid(pid, 0);
                 return null;
             };
             const path = std.fmt.allocPrint(self.allocator, "/dev/fd/{d}", .{pipe_fds[0]}) catch {
                 _ = fds.pop();
                 posix.close(pipe_fds[0]);
                 posix.kill(pid, posix.SIG.TERM) catch {};
-                _ = posix.waitpid(pid, 0) catch {};
+                _ = posix.waitpid(pid, 0);
                 return null;
             };
             return path;
@@ -871,14 +871,14 @@ pub const Shell = struct {
             fds.append(self.allocator, .{ .pipe_fd = pipe_fds[1], .child_pid = pid }) catch {
                 posix.close(pipe_fds[1]);
                 posix.kill(pid, posix.SIG.TERM) catch {};
-                _ = posix.waitpid(pid, 0) catch {};
+                _ = posix.waitpid(pid, 0);
                 return null;
             };
             const path = std.fmt.allocPrint(self.allocator, "/dev/fd/{d}", .{pipe_fds[1]}) catch {
                 _ = fds.pop();
                 posix.close(pipe_fds[1]);
                 posix.kill(pid, posix.SIG.TERM) catch {};
-                _ = posix.waitpid(pid, 0) catch {};
+                _ = posix.waitpid(pid, 0);
                 return null;
             };
             return path;
@@ -949,12 +949,12 @@ pub const Shell = struct {
                 .redir_fd_out => openAndDup(alloc, r.target, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644, r.src_fd),
                 .redir_fd_in => openAndDup(alloc, r.target, .{ .ACCMODE = .RDONLY }, 0, r.src_fd),
                 .herestring => blk: {
-                    const hs_pipe = posix.pipe() catch break :blk false;
-                    _ = posix.write(hs_pipe[1], r.target) catch 0;
-                    _ = posix.write(hs_pipe[1], "\n") catch 0;
-                    posix.close(hs_pipe[1]);
-                    posix.dup2(hs_pipe[0], posix.STDIN_FILENO) catch { posix.close(hs_pipe[0]); break :blk false; };
-                    posix.close(hs_pipe[0]);
+                    const fd = openHereStringFd(alloc, r.target) orelse break :blk false;
+                    posix.dup2(fd, posix.STDIN_FILENO) catch {
+                        posix.close(fd);
+                        break :blk false;
+                    };
+                    if (fd != posix.STDIN_FILENO) posix.close(fd);
                     break :blk true;
                 },
                 else => true,
@@ -981,6 +981,51 @@ pub const Shell = struct {
         };
         if (fd != dup_to) posix.close(fd);
         return true;
+    }
+
+    fn writeAllFd(fd: posix.fd_t, data: []const u8) bool {
+        var written: usize = 0;
+        while (written < data.len) {
+            const n = posix.write(fd, data[written..]) catch return false;
+            if (n == 0) return false;
+            written += n;
+        }
+        return true;
+    }
+
+    fn openHereStringFd(alloc: Allocator, payload: []const u8) ?posix.fd_t {
+        var path_buf: [128]u8 = undefined;
+        const pid = libc.getpid();
+        var attempt: u32 = 0;
+        while (attempt < 64) : (attempt += 1) {
+            const path = std.fmt.bufPrint(&path_buf, "/tmp/slash-hs-{d}-{d}", .{ pid, attempt }) catch return null;
+            const path_z = alloc.dupeZ(u8, path) catch return null;
+            defer alloc.free(path_z);
+            const fd = posix.openatZ(posix.AT.FDCWD, path_z, .{
+                .ACCMODE = .RDWR,
+                .CREAT = true,
+                .EXCL = true,
+            }, 0o600) catch |err| switch (err) {
+                error.PathAlreadyExists => continue,
+                else => return null,
+            };
+            posix.unlinkZ(path_z) catch {};
+            if (!writeAllFd(fd, payload)) {
+                posix.close(fd);
+                return null;
+            }
+            if (!writeAllFd(fd, "\n")) {
+                posix.close(fd);
+                return null;
+            }
+            var file = std.fs.File{ .handle = fd };
+            file.seekTo(0) catch {
+                posix.close(fd);
+                return null;
+            };
+            return fd;
+        }
+        return null;
     }
 
     fn forkExecWithRedirects(self: *Shell, argv: []const []const u8, redirs: []const Redirect) void {
