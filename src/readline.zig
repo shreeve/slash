@@ -11,6 +11,7 @@ const Shell = @import("exec.zig").Shell;
 const c = @cImport({
     @cInclude("errno.h");
     @cInclude("unistd.h");
+    @cInclude("wchar.h");
 });
 
 const STDIN = posix.STDIN_FILENO;
@@ -1039,19 +1040,26 @@ fn utf8ColumnWidth(text: []const u8) usize {
             continue;
         };
         if (seq_len > 1 and i + seq_len <= text.len) {
-            _ = std.unicode.utf8Decode(text[i .. i + seq_len]) catch {
+            const cp = std.unicode.utf8Decode(text[i .. i + seq_len]) catch {
                 i += 1;
                 width += 1;
                 continue;
             };
             i += seq_len;
-            width += 1;
+            width += codepointColumnWidth(cp);
             continue;
         }
         i += 1;
         width += 1;
     }
     return width;
+}
+
+fn codepointColumnWidth(cp: u21) usize {
+    const w = c.wcwidth(@as(c.wchar_t, @intCast(cp)));
+    if (w > 0) return @intCast(w);
+    if (w == 0) return 0;
+    return 1;
 }
 
 fn clearOverlay() void {

@@ -9,6 +9,7 @@ const std = @import("std");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 const libc = @cImport({
+    @cInclude("errno.h");
     @cInclude("unistd.h");
     @cInclude("sys/wait.h");
 });
@@ -448,7 +449,7 @@ pub const Shell = struct {
         // Reap any finished background children (use raw C waitpid to handle ECHILD gracefully)
         while (true) {
             var status: i32 = 0;
-            const pid = libc.waitpid(-1, &status, libc.WNOHANG);
+            const pid = waitpidRaw(-1, &status, libc.WNOHANG);
             if (pid <= 0) break;
             const result_status: u32 = @bitCast(status);
             self.markReapedPid(pid, result_status);
@@ -2485,7 +2486,7 @@ pub const Shell = struct {
             var waited_any = false;
             while (true) {
                 var status: i32 = 0;
-                const pid = libc.waitpid(-1, &status, libc.WUNTRACED);
+                const pid = waitpidRaw(-1, &status, libc.WUNTRACED);
                 if (pid <= 0) break;
                 waited_any = true;
                 const ustatus: u32 = @bitCast(status);
@@ -2547,7 +2548,7 @@ pub const Shell = struct {
             }
 
             var status: i32 = 0;
-            const waited_pid = libc.waitpid(pid, &status, libc.WUNTRACED);
+            const waited_pid = waitpidRaw(pid, &status, libc.WUNTRACED);
             if (waited_pid <= 0) {
                 if (self.interactive) {
                     if (self.findJobByTrackedPid(pid)) |job| {
@@ -3385,6 +3386,15 @@ fn parseFdDupToken(token: []const u8) ?struct { src_fd: posix.fd_t, dest_fd: pos
     const src_fd = std.fmt.parseInt(posix.fd_t, token[0..sep], 10) catch return null;
     const dest_fd = std.fmt.parseInt(posix.fd_t, token[sep + 2 ..], 10) catch return null;
     return .{ .src_fd = src_fd, .dest_fd = dest_fd };
+}
+
+fn waitpidRaw(pid: posix.pid_t, status: *i32, flags: i32) i32 {
+    while (true) {
+        const rc = libc.waitpid(pid, status, flags);
+        if (rc >= 0) return rc;
+        if (std.c._errno().* == libc.EINTR) continue;
+        return rc;
+    }
 }
 
 fn rightmostLivePid(job: Job) posix.pid_t {
