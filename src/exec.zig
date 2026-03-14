@@ -2088,6 +2088,8 @@ pub const Shell = struct {
         defer argv_list.deinit(self.allocator);
         var redir_list: std.ArrayList(Redirect) = .empty;
         defer redir_list.deinit(self.allocator);
+        var procsub_fds: std.ArrayList(ProcSubFd) = .empty;
+        defer procsub_fds.deinit(self.allocator);
 
         const inner = switch (args[0]) {
             .list => |items| items,
@@ -2102,9 +2104,30 @@ pub const Shell = struct {
                     argv_list.append(self.allocator, self.expandToken(text)) catch {};
                 },
                 .list => |items| {
-                    if (items.len >= 2 and items[0] == .tag) {
-                        const tag = items[0].tag;
-                        self.collectRedirect(tag, items[1..], source, &redir_list);
+                    if (items.len == 0) continue;
+                    switch (items[0]) {
+                        .tag => |tag| {
+                            if (isRedirTag(tag)) {
+                                self.collectRedirect(tag, items[1..], source, &redir_list);
+                                continue;
+                            }
+                            if (tag == .capture) {
+                                const val = self.evalCapture(items[1..], source);
+                                if (val) |v| argv_list.append(self.allocator, v) catch {};
+                                continue;
+                            }
+                            if (isHeredocTag(tag)) {
+                                self.collectHeredocRedirect(tag, items[1..], source, &redir_list);
+                                continue;
+                            }
+                            if (tag == .procsub_in or tag == .procsub_out) {
+                                if (self.spawnProcSub(tag, items[1..], source, &procsub_fds)) |path| {
+                                    argv_list.append(self.allocator, path) catch {};
+                                }
+                                continue;
+                            }
+                        },
+                        else => {},
                     }
                 },
                 else => {},
@@ -2113,6 +2136,20 @@ pub const Shell = struct {
 
         const argv = argv_list.items;
         if (argv.len == 0) return;
+
+        var saved: [3]posix.fd_t = .{ -1, -1, -1 };
+        const has_redirs = redir_list.items.len > 0;
+        if (has_redirs) {
+            saved[0] = posix.dup(posix.STDIN_FILENO) catch -1;
+            saved[1] = posix.dup(posix.STDOUT_FILENO) catch -1;
+            saved[2] = posix.dup(posix.STDERR_FILENO) catch -1;
+        }
+        defer {
+            if (saved[0] != -1) { posix.dup2(saved[0], posix.STDIN_FILENO) catch {}; posix.close(saved[0]); }
+            if (saved[1] != -1) { posix.dup2(saved[1], posix.STDOUT_FILENO) catch {}; posix.close(saved[1]); }
+            if (saved[2] != -1) { posix.dup2(saved[2], posix.STDERR_FILENO) catch {}; posix.close(saved[2]); }
+            self.cleanupProcSubs(procsub_fds.items);
+        }
 
         if (!applyRedirects(self.allocator, redir_list.items)) {
             self.last_exit = 1;
@@ -2127,6 +2164,7 @@ pub const Shell = struct {
         const envp = buildEnvP(self.allocator, self);
         const err = posix.execvpeZ(argv_z[0].?, argv_z, envp);
         reportExecError("exec: ", argv[0], err);
+        self.last_exit = 1;
     }
 
     // =========================================================================
