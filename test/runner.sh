@@ -573,6 +573,10 @@ check_script "exec nested capture" \
     "$(printf 'echo $(echo $(echo deep))\n')" \
     "deep"
 
+check_script "exec capture with pipe close" \
+    "$(printf 'x = $(yes | head -n 1)\necho $x\n')" \
+    "y"
+
 # ==========================================================================
 # EXECUTION: FLOAT MATH
 # ==========================================================================

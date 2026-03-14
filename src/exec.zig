@@ -1296,9 +1296,14 @@ pub const Shell = struct {
         if (args.len < 1) return null;
 
         const pipe_fds = posix.pipe() catch return null;
-        const pid = posix.fork() catch return null;
+        const pid = posix.fork() catch {
+            posix.close(pipe_fds[0]);
+            posix.close(pipe_fds[1]);
+            return null;
+        };
 
         if (pid == 0) {
+            resetChildSignals();
             posix.close(pipe_fds[0]);
             posix.dup2(pipe_fds[1], posix.STDOUT_FILENO) catch posix.exit(1);
             posix.close(pipe_fds[1]);
