@@ -80,6 +80,7 @@ pub const Job = struct {
     pgid: posix.pid_t,
     state: JobState,
     exit_code: u8,
+    reported_done: bool = false,
     command: []const u8,
     pids: [MAX_JOB_PIDS]posix.pid_t = .{0} ** MAX_JOB_PIDS,
     pid_count: u8 = 0,
@@ -405,6 +406,7 @@ pub const Shell = struct {
         var best: ?*Job = null;
         for (&self.jobs) |*slot| {
             if (slot.*) |*job| {
+                if (job.state == .done) continue;
                 if (best == null or job.id > best.?.id) best = job;
             }
         }
@@ -436,13 +438,12 @@ pub const Shell = struct {
             const result_status: u32 = @bitCast(status);
             self.markReapedPid(pid, result_status);
         }
-        // Report and remove done jobs
+        // Report done jobs once; keep them so `wait` can still consume status.
         for (&self.jobs) |*slot| {
             if (slot.*) |*job| {
-                if (job.state == .done) {
+                if (job.state == .done and !job.reported_done) {
                     std.debug.print("[{d}]  Done\t\t{s}\n", .{ job.id, job.command });
-                    self.allocator.free(job.command);
-                    slot.* = null;
+                    job.reported_done = true;
                 }
             }
         }
@@ -456,7 +457,10 @@ pub const Shell = struct {
                         job.pids[i] = 0;
                         if (job.running_count > 0) job.running_count -= 1;
                         job.exit_code = statusToExit(status);
-                        if (job.running_count == 0) job.state = .done;
+                        if (job.running_count == 0) {
+                            job.state = .done;
+                            job.reported_done = false;
+                        }
                         return;
                     }
                 }
@@ -465,6 +469,13 @@ pub const Shell = struct {
     }
 
     fn waitForForegroundJob(self: *Shell, pgid: posix.pid_t, pid_count: u8) void {
+        if (self.findJobByPgid(pgid)) |job| {
+            if (job.state == .done) {
+                self.last_exit = job.exit_code;
+                self.reclaimTerminal();
+                return;
+            }
+        }
         var remaining = pid_count;
         const rightmost_pid = if (self.findJobByPgid(pgid)) |job|
             job.pids[job.pid_count - 1]
@@ -2314,8 +2325,14 @@ pub const Shell = struct {
                 var waited_any = false;
                 while (true) {
                     var next_id: ?u16 = null;
+                    var consume_done = false;
                     for (&self.jobs) |*slot| {
                         if (slot.*) |*job| {
+                            if (job.state == .done) {
+                                next_id = job.id;
+                                consume_done = true;
+                                break;
+                            }
                             if (job.state == .running) {
                                 next_id = job.id;
                                 break;
@@ -2325,6 +2342,11 @@ pub const Shell = struct {
                     if (next_id == null) break;
                     waited_any = true;
                     if (self.findJobById(next_id.?)) |job| {
+                        if (consume_done) {
+                            self.last_exit = job.exit_code;
+                            self.removeJob(job.id);
+                            continue;
+                        }
                         self.waitForForegroundJob(job.pgid, job.pid_count);
                         if (job.state != .stopped) self.removeJob(job.id);
                     }
@@ -2362,6 +2384,12 @@ pub const Shell = struct {
                         std.debug.print("wait: {s}: job is stopped (use fg/bg)\n", .{tok});
                         self.last_exit = 1;
                         return;
+                    }
+                    if (job.state == .done) {
+                        self.last_exit = job.exit_code;
+                        self.removeJob(job.id);
+                        handled = true;
+                        continue;
                     }
                     self.waitForForegroundJob(job.pgid, job.pid_count);
                     if (job.state != .stopped) self.removeJob(job.id);
@@ -3401,4 +3429,26 @@ test "parseRegexSpec rejects unsupported flags" {
     try std.testing.expect(Shell.parseRegexSpec("/abc/i") != null);
     try std.testing.expect(Shell.parseRegexSpec("/abc/m") == null);
     try std.testing.expect(Shell.parseRegexSpec("~|abc|x") == null);
+}
+
+test "wait consumes done job status after reap reporting" {
+    var sh = Shell.init(std.testing.allocator);
+    defer sh.deinit();
+    sh.interactive = true;
+
+    const pids = [_]posix.pid_t{7777};
+    const job_id = sh.addJob(7777, .done, "done-job", &pids);
+    const job = sh.findJobById(job_id).?;
+    job.exit_code = 7;
+
+    sh.reapAndReport();
+    try std.testing.expect(sh.findJobById(job_id) != null);
+    try std.testing.expect(job.reported_done);
+
+    var id_buf: [16]u8 = undefined;
+    const id_text = try std.fmt.bufPrint(&id_buf, "{d}", .{job_id});
+    const argv = [_][]const u8{ "wait", id_text };
+    sh.builtinWait(&argv);
+    try std.testing.expectEqual(@as(u8, 7), sh.last_exit);
+    try std.testing.expect(sh.findJobById(job_id) == null);
 }
