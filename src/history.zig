@@ -58,10 +58,11 @@ pub const Db = struct {
             .lock_path = lock_path,
         };
 
+        // Open lock file before load/prune so startup rewrite can acquire lock.
+        self.lock_file = openLockFile(lock_path);
         self.load();
         self.prune();
 
-        self.lock_file = openLockFile(lock_path);
         self.file = openHistoryAppendFile(path);
         if (self.file) |f| {
             posix.fchmod(f.handle, 0o600) catch {};
