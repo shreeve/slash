@@ -253,10 +253,18 @@ const LexerParser = struct {
         return false;
     }
 
-    /// Check for arrow: -> or → (UTF-8: 0xE2 0x86 0x92)
+    /// Check for arrow: =>, ->, or → (UTF-8: 0xE2 0x86 0x92)
     fn expectArrow(self: *LexerParser) bool {
         self.skipWhitespace();
         if (self.pos >= self.source.len) return false;
+
+        // Check for => (fat arrow)
+        if (self.pos + 1 < self.source.len and
+            self.source[self.pos] == '=' and self.source[self.pos + 1] == '>')
+        {
+            self.pos += 2;
+            return true;
+        }
 
         // Check for -> (ASCII arrow)
         if (self.pos + 1 < self.source.len and
@@ -535,6 +543,8 @@ const LexerParser = struct {
             // Only check for @ and arrows when not inside quotes/brackets/parens
             if (!in_single_quote and !in_double_quote and !in_bracket and paren_depth == 0) {
                 if (c == '@') break;
+                // Check for => (fat arrow)
+                if (c == '=' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>') break;
                 // Check for -> (ASCII arrow)
                 if (c == '-' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>') break;
                 // Check for → (UTF-8: 0xE2 0x86 0x92)
@@ -4936,4 +4946,13 @@ pub fn main() !void {
     try file.writeAll(final_code);
 
     std.debug.print("✅ Generated: {s}\n", .{output_file});
+}
+
+test "lexer parser accepts fat-arrow rules" {
+    const source = "'a' => ident\n";
+    var parser = LexerParser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    try parser.parseLexerSection();
+    try std.testing.expectEqual(@as(usize, 1), parser.spec.rules.items.len);
 }
