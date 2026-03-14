@@ -79,6 +79,7 @@ fn readStdin(buf: []u8) ?usize {
     while (true) {
         return posix.read(STDIN, buf) catch |err| switch (err) {
             error.WouldBlock => continue,
+            error.Interrupted => continue,
             else => null,
         };
     }
