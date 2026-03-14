@@ -2966,13 +2966,25 @@ pub const Shell = struct {
             .list => self.commandTextForJob(args[1], source),
             else => self.sexpToExpandedStr(args[1], source),
         };
-        const command = self.allocator.dupe(u8, command_text) catch return;
+        const command = self.allocator.dupe(u8, command_text) catch {
+            self.last_exit = 1;
+            return;
+        };
         if (self.key_bindings.getPtr(combo_raw)) |slot| {
             self.allocator.free(slot.*);
             slot.* = command;
         } else {
-            const combo = self.allocator.dupe(u8, combo_raw) catch return;
-            self.key_bindings.put(combo, command) catch {};
+            const combo = self.allocator.dupe(u8, combo_raw) catch {
+                self.allocator.free(command);
+                self.last_exit = 1;
+                return;
+            };
+            self.key_bindings.put(combo, command) catch {
+                self.allocator.free(combo);
+                self.allocator.free(command);
+                self.last_exit = 1;
+                return;
+            };
         }
         self.last_exit = 0;
     }
@@ -3052,13 +3064,25 @@ pub const Shell = struct {
     fn evalSet(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 2) return;
         const name_raw = self.sexpToStr(args[0], source) orelse return;
-        const value = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch return;
+        const value = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch {
+            self.last_exit = 1;
+            return;
+        };
         if (self.options.getPtr(name_raw)) |slot| {
             self.allocator.free(slot.*);
             slot.* = value;
         } else {
-            const name = self.allocator.dupe(u8, name_raw) catch return;
-            self.options.put(name, value) catch return;
+            const name = self.allocator.dupe(u8, name_raw) catch {
+                self.allocator.free(value);
+                self.last_exit = 1;
+                return;
+            };
+            self.options.put(name, value) catch {
+                self.allocator.free(name);
+                self.allocator.free(value);
+                self.last_exit = 1;
+                return;
+            };
         }
         self.last_exit = 0;
     }
