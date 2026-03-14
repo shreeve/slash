@@ -102,17 +102,26 @@ pub const Lexer = struct {
             (self.base.source[self.base.pos + ws_skip] == ' ' or self.base.source[self.base.pos + ws_skip] == '\t'))
             ws_skip += 1;
         const rx_pos = self.base.pos + ws_skip;
-        if ((self.last_cat == .match or self.last_cat == .nomatch) and rx_pos < self.base.source.len) {
+        if (rx_pos < self.base.source.len) {
             const ch = self.base.source[rx_pos];
-            if (ch == '~' and rx_pos + 1 < self.base.source.len) {
-                const d = self.base.source[rx_pos + 1];
-                if (!std.ascii.isAlphanumeric(d) and d != ' ' and d != '\t' and d != '\n') {
+            const match_ctx = self.last_cat == .match or self.last_cat == .nomatch;
+            const try_arm_ctx = self.last_cat == .lbrace or self.last_cat == .newline or self.last_cat == .indent;
+            if (match_ctx) {
+                if (ch == '~' and rx_pos + 1 < self.base.source.len) {
+                    const d = self.base.source[rx_pos + 1];
+                    if (!std.ascii.isAlphanumeric(d) and d != ' ' and d != '\t' and d != '\n') {
+                        self.base.pos = rx_pos;
+                        const result = self.collectRegex();
+                        self.last_cat = result.cat;
+                        return result;
+                    }
+                } else if (ch == '/') {
                     self.base.pos = rx_pos;
-                    const result = self.collectRegex();
+                    const result = self.collectRegexBare();
                     self.last_cat = result.cat;
                     return result;
                 }
-            } else if (ch == '/') {
+            } else if (try_arm_ctx and ch == '/' and self.looksLikeTryArmBareRegex(rx_pos)) {
                 self.base.pos = rx_pos;
                 const result = self.collectRegexBare();
                 self.last_cat = result.cat;
@@ -428,6 +437,38 @@ pub const Lexer = struct {
             self.base.pos += 1;
         }
         return Token{ .cat = .err, .pre = 0, .pos = @intCast(start), .len = 1 };
+    }
+
+    fn looksLikeTryArmBareRegex(self: *const Lexer, start: u32) bool {
+        if (start >= self.base.source.len or self.base.source[start] != '/') return false;
+        var p = start + 1;
+        var in_class = false;
+        while (p < self.base.source.len) {
+            const ch = self.base.source[p];
+            if (ch == '\\' and p + 1 < self.base.source.len) {
+                p += 2;
+                continue;
+            }
+            if (ch == '[' and !in_class) {
+                in_class = true;
+                p += 1;
+                continue;
+            }
+            if (ch == ']' and in_class) {
+                in_class = false;
+                p += 1;
+                continue;
+            }
+            if (ch == '/' and !in_class) {
+                p += 1;
+                while (p < self.base.source.len and self.base.source[p] == 'i') p += 1;
+                while (p < self.base.source.len and (self.base.source[p] == ' ' or self.base.source[p] == '\t')) p += 1;
+                return p < self.base.source.len and self.base.source[p] == '{';
+            }
+            if (ch == '\n' or ch == '\r') return false;
+            p += 1;
+        }
+        return false;
     }
 };
 
