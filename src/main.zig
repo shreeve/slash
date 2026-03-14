@@ -237,7 +237,7 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
     defer hist.deinit();
     var last_duration_ms: u64 = 0;
 
-    while (true) {
+    repl: while (true) {
         ev.reapAndReport();
         const fmt = if (ev.lookupScopedValue("PROMPT")) |val|
             switch (val) {
@@ -282,17 +282,34 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
         // Multi-line continuation: if line needs a block, collect more lines until blank
         var multi_buf: std.ArrayList(u8) = .empty;
         defer multi_buf.deinit(alloc);
-        multi_buf.appendSlice(alloc, trimmed) catch {};
+        multi_buf.appendSlice(alloc, trimmed) catch {
+            std.debug.print("slash: allocation failed while buffering input\n", .{});
+            ev.last_exit = 1;
+            continue;
+        };
 
         if (needsContinuation(trimmed)) {
             while (true) {
                 const cont = readline.readLine("... ", &hist) orelse break;
-                const ct = std.mem.trim(u8, cont, " \t\r");
-                if (ct.len == 0) break;
-                multi_buf.append(alloc, '\n') catch {};
-                multi_buf.appendSlice(alloc, cont) catch {};
+                multi_buf.append(alloc, '\n') catch {
+                    std.debug.print("slash: allocation failed while buffering input\n", .{});
+                    ev.last_exit = 1;
+                    continue :repl;
+                };
+                multi_buf.appendSlice(alloc, cont) catch {
+                    std.debug.print("slash: allocation failed while buffering input\n", .{});
+                    ev.last_exit = 1;
+                    continue :repl;
+                };
+                if (!needsContinuation(multi_buf.items)) break;
             }
-            multi_buf.append(alloc, '\n') catch {};
+            if (multi_buf.items.len == 0 or multi_buf.items[multi_buf.items.len - 1] != '\n') {
+                multi_buf.append(alloc, '\n') catch {
+                    std.debug.print("slash: allocation failed while buffering input\n", .{});
+                    ev.last_exit = 1;
+                    continue;
+                };
+            }
         }
 
         const full_line = multi_buf.items;
