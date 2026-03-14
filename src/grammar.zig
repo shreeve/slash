@@ -4670,11 +4670,13 @@ const ParserGenerator = struct {
             return;
         }
 
-        // Handle simple passthrough: 1, 2, etc.
-        if (template.len == 1 and template[0] >= '1' and template[0] <= '9') {
-            const pos = template[0] - '1' + offset;
-            try writer.print("pass[{d}]", .{pos});
-            return;
+        // Handle simple passthrough: 1, 2, 10, etc.
+        if (parsePosToken(template, 0, offset)) |ref| {
+            if (ref.end == template.len) {
+                const pos = ref.pos;
+                try writer.print("pass[{d}]", .{pos});
+                return;
+            }
         }
 
         // Handle paren-style S-expressions: (tag 1 2 3)
@@ -4685,6 +4687,16 @@ const ParserGenerator = struct {
 
         // Fallback
         try writer.writeAll("self.list(pass)");
+    }
+
+    fn parsePosToken(token: []const u8, start: usize, offset: u8) ?struct { pos: usize, end: usize } {
+        if (start >= token.len) return null;
+        if (!(token[start] >= '1' and token[start] <= '9')) return null;
+        var end = start + 1;
+        while (end < token.len and token[end] >= '0' and token[end] <= '9') : (end += 1) {}
+        const one_based = std.fmt.parseInt(usize, token[start..end], 10) catch return null;
+        if (one_based == 0) return null;
+        return .{ .pos = one_based - 1 + offset, .end = end };
     }
 
     fn generateParenAction(self: *ParserGenerator, writer: anytype, template: []const u8, offset: u8) !void {
@@ -4787,8 +4799,8 @@ const ParserGenerator = struct {
 
             // Add tag's value if it had key:value format
             if (tag_has_value and tag_value.len > 0) {
-                if (tag_value[0] >= '1' and tag_value[0] <= '9') {
-                    try writer.print("pass[{d}]", .{tag_value[0] - '1' + offset});
+                if (parsePosToken(tag_value, 0, offset)) |ref| {
+                    try writer.print("pass[{d}]", .{ref.pos});
                     first = false;
                 }
             }
@@ -4798,8 +4810,8 @@ const ParserGenerator = struct {
                 if (work.len == 0) continue;
                 if (!first) try writer.writeAll(", ");
                 first = false;
-                if (work[0] >= '1' and work[0] <= '9') {
-                    try writer.print("pass[{d}]", .{work[0] - '1' + offset});
+                if (parsePosToken(work, 0, offset)) |ref| {
+                    try writer.print("pass[{d}]", .{ref.pos});
                 } else if (std.mem.eql(u8, work, "nil") or std.mem.eql(u8, work, "_")) {
                     try writer.writeAll(".nil");
                 } else {
@@ -4817,14 +4829,15 @@ const ParserGenerator = struct {
             const work = self.stripKeyAndSuffix(elem);
             if (work.len == 0) continue;
 
-            if (work[0] >= '1' and work[0] <= '9') {
-                const pos = work[0] - '1' + offset;
-                try writer.print("out.append(self.allocator(), pass[{d}]) catch break :blk .nil; ", .{pos});
-            } else if (work[0] == '~' and work.len > 1 and work[1] >= '1' and work[1] <= '9') {
-                const pos = work[1] - '1' + offset;
+            if (parsePosToken(work, 0, offset)) |ref| {
+                try writer.print("out.append(self.allocator(), pass[{d}]) catch break :blk .nil; ", .{ref.pos});
+            } else if (work[0] == '~') {
+                const ref = parsePosToken(work, 1, offset) orelse continue;
+                const pos = ref.pos;
                 try writer.print("out.append(self.allocator(), if (pass[{d}] == .src) pass[{d}] else .{{ .src = .{{ .pos = 0, .len = 0, .id = 0 }} }}) catch break :blk .nil; ", .{ pos, pos });
             } else if (work[0] == '.' and work.len >= 4 and work[1] == '.' and work[2] == '.') {
-                const pos = work[3] - '1' + offset;
+                const ref = parsePosToken(work, 3, offset) orelse continue;
+                const pos = ref.pos;
                 try writer.print("if (pass[{d}] == .list) for (pass[{d}].list) |item| out.append(self.allocator(), item) catch break :blk .nil; ", .{ pos, pos });
             } else if (std.mem.eql(u8, work, "nil") or std.mem.eql(u8, work, "_")) {
                 try writer.writeAll("out.append(self.allocator(), .nil) catch break :blk .nil; ");
