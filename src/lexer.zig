@@ -463,7 +463,9 @@ pub const Lexer = struct {
                 p += 1;
                 while (p < self.base.source.len and self.base.source[p] == 'i') p += 1;
                 while (p < self.base.source.len and (self.base.source[p] == ' ' or self.base.source[p] == '\t')) p += 1;
-                return p < self.base.source.len and self.base.source[p] == '{';
+                if (p >= self.base.source.len) return false;
+                const next_ch = self.base.source[p];
+                return next_ch == '{' or next_ch == '\n' or next_ch == '\r' or next_ch == '#';
             }
             if (ch == '\n' or ch == '\r') return false;
             p += 1;
