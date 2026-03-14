@@ -172,6 +172,13 @@ fn needsContinuation(line: []const u8) bool {
     return @import("lexer.zig").lineNeedsContinuation(line);
 }
 
+fn hasActiveJobs(ev: *const exec.Shell) bool {
+    for (&ev.jobs) |slot| {
+        if (slot != null) return true;
+    }
+    return false;
+}
+
 var user_cmd_names_buf: [512][]const u8 = undefined;
 
 fn getUserCmdNames() []const []const u8 {
@@ -241,7 +248,14 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
             prompt.default_fmt;
         const ctx = prompt.Context{ .last_exit = ev.last_exit, .duration_ms = last_duration_ms };
         const ps = prompt.render(fmt, ctx);
-        const line = readline.readLineEx(ps.str, ps.visible_len, &hist) orelse return;
+        const line = readline.readLineEx(ps.str, ps.visible_len, &hist) orelse {
+            if (hasActiveJobs(ev)) {
+                std.debug.print("slash: there are running or stopped jobs\n", .{});
+                ev.reapAndReport();
+                continue;
+            }
+            return;
+        };
 
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
@@ -257,11 +271,7 @@ fn runRepl(alloc: std.mem.Allocator, ev: *exec.Shell) !void {
         }
 
         if (std.mem.eql(u8, trimmed, "exit")) {
-            var has_jobs = false;
-            for (&ev.jobs) |slot| {
-                if (slot != null) { has_jobs = true; break; }
-            }
-            if (has_jobs) {
+            if (hasActiveJobs(ev)) {
                 std.debug.print("slash: there are running or stopped jobs\n", .{});
                 ev.reapAndReport();
                 continue;
@@ -390,4 +400,19 @@ fn showHelp() void {
         \\
     ;
     std.debug.print("{s}", .{help});
+}
+
+test "hasActiveJobs reflects job table occupancy" {
+    var ev = exec.Shell.init(std.testing.allocator);
+    defer ev.deinit();
+
+    try std.testing.expect(!hasActiveJobs(&ev));
+    ev.jobs[0] = exec.Job{
+        .id = 1,
+        .pgid = 1,
+        .state = .running,
+        .exit_code = 0,
+        .command = "job",
+    };
+    try std.testing.expect(hasActiveJobs(&ev));
 }
