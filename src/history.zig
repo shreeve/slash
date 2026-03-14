@@ -90,25 +90,17 @@ pub const Db = struct {
         defer self.alloc.free(escaped_command);
         var persisted = true;
         if (self.file) |f| {
-            var prefix_buf: [96]u8 = undefined;
-            const prefix = std.fmt.bufPrint(&prefix_buf, "{d}\t{d}\t{d}\t", .{
-                now, exit_code, duration_ms,
+            const line = std.fmt.allocPrint(self.alloc, "{d}\t{d}\t{d}\t{s}\t{s}\n", .{
+                now, exit_code, duration_ms, escaped_cwd, escaped_command,
             }) catch return;
-            f.writeAll(prefix) catch {
-                persisted = false;
+            defer self.alloc.free(line);
+            const written: usize = blk: {
+                break :blk posix.write(f.handle, line) catch {
+                    persisted = false;
+                    break :blk 0;
+                };
             };
-            f.writeAll(escaped_cwd) catch {
-                persisted = false;
-            };
-            f.writeAll("\t") catch {
-                persisted = false;
-            };
-            f.writeAll(escaped_command) catch {
-                persisted = false;
-            };
-            f.writeAll("\n") catch {
-                persisted = false;
-            };
+            if (written != line.len) persisted = false;
             if (persisted) {
                 posix.fsync(f.handle) catch {
                     persisted = false;
