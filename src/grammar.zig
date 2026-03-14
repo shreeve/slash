@@ -4226,19 +4226,18 @@ const ParserGenerator = struct {
             if (sym.kind == .terminal and sym.name.len >= 2 and sym.name[0] == '"') {
                 const raw_literal = sym.name[1 .. sym.name.len - 1];
                 // Unescape the literal (handle \\ -> \)
-                var literal_buf: [256]u8 = undefined;
-                var literal_len: usize = 0;
+                var literal_buf: std.ArrayListUnmanaged(u8) = .{};
+                defer literal_buf.deinit(self.allocator);
                 var i: usize = 0;
                 while (i < raw_literal.len) : (i += 1) {
                     if (raw_literal[i] == '\\' and i + 1 < raw_literal.len) {
                         i += 1;
-                        literal_buf[literal_len] = raw_literal[i];
+                        try literal_buf.append(self.allocator, raw_literal[i]);
                     } else {
-                        literal_buf[literal_len] = raw_literal[i];
+                        try literal_buf.append(self.allocator, raw_literal[i]);
                     }
-                    literal_len += 1;
                 }
-                const literal = literal_buf[0..literal_len];
+                const literal = literal_buf.items;
                 // Look up in @op mappings
                 for (self.op_mappings.items) |m| {
                     if (std.mem.eql(u8, literal, m.lit) and !emitted_cats.contains(m.tok)) {
