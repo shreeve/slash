@@ -411,6 +411,9 @@ check_script_error() {
     esac
 }
 
+check_script_all "fg no current job" "fg" "fg: no current job"
+check_script_all "bg no current job" "bg" "bg: no current job"
+
 check_script "heredoc literal" \
     "$(printf "cat '''\n    hello world\n    '''\n")" \
     "hello world"
