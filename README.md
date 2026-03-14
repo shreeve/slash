@@ -80,8 +80,8 @@ exported to child processes; lowercase names stay shell-local.
 ```
 x = 10 + 4    # x is 14
 y = $x * 3    # y is 42
-2 ** 10       # 1024 (also: 2^10)
-1 + 2 * 8     # prints 17
+= 2 ** 10     # 1024 (also: 2^10)
+= 1 + 2 * 8   # prints 17
 ```
 
 **Conditionals** with `if` / `unless` / `else`:
@@ -354,8 +354,9 @@ run Bash scripts — if you need Bash, call it. Slash is your interactive shell
 and your scripting language for tasks that are genuinely shell tasks.
 
 Slash is not a programming language. It has commands, not functions — no return
-values, no local scope, no closures, no recursion, no data structures. It
-composes with real languages, it does not replace them.
+values, no closures, no recursion, no data structures. `cmd` bodies get
+automatic local scope, but that is the extent of it. Slash composes with real
+languages, it does not replace them.
 
 Slash is not configurable to the point of chaos. No plugin system, no theme
 engine, no package manager for shell extensions. Good defaults and a simple

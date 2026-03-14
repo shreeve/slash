@@ -47,7 +47,6 @@ context-sensitive tokenization using state variables.
 | `string_sq` | `'hello'` | Single-quoted string (literal, no interpolation) |
 | `string_dq` | `"hello $name"` | Double-quoted string (interpolated) |
 | `regex` | `/pattern/i`, `~\|pattern\|i` | Regex literal with optional flags (any delimiter after `~`) |
-| `glob` | `*.zig` | Glob pattern |
 
 **Variable References**
 
@@ -176,7 +175,7 @@ already-tokenized body.
 **Regex literals.** Two forms: `/pattern/flags` after `=~`/`!~` operators, and
 `~<delim>pattern<delim>flags` anywhere (standalone). The `~` prefix with any
 non-alphanumeric, non-slash delimiter (e.g., `~|pattern|i`) avoids ambiguity
-with paths (`~/foo`) and division (`22/7`). Flags: `[gimsux]`.
+with paths (`~/foo`) and division (`22/7`). Flags: `i` (case-insensitive).
 
 **Variable references.** `$name` for named variables, `$0`-`$9` for positional,
 `$?`, `$$`, `$!`, `$#`, `$*` for specials. `${...}` for braced forms including
@@ -186,9 +185,10 @@ with paths (`~/foo`) and division (`22/7`). Flags: `[gimsux]`.
 to prevent partial matches. Order: `|&` before `|`, `&&` before `&`,
 `>>` before `>`, `**` before `*`, etc.
 
-**Identifiers.** Bare words matching `[a-zA-Z_][a-zA-Z0-9_-]*` or path-like
-patterns `[a-zA-Z_./~][a-zA-Z0-9_./-]*`. Keywords are recognized by the
-parser via `@as` directives, not the lexer.
+**Identifiers.** Bare words matching `[a-zA-Z_][\w./-]*`, path-like patterns
+starting with `.`, `/`, or `~`, and glob patterns containing `*`, `?`, `[`,
+or `{`. Globs are tokenized as idents and expanded at runtime by the executor.
+Keywords are recognized by the parser via `@as` directives, not the lexer.
 
 ### Indentation Handling
 

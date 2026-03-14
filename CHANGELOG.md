@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-03-14 (cont.)
+
+### `src/exec.zig`
+- Failed `exec` builtin now restores shell signal handlers in interactive mode instead of leaving SIGINT/SIGQUIT/SIGTSTP at SIG_DFL.
+- Single-quoted string `''` escape is now processed at runtime (e.g., `'it''s'` → `it's`), matching the grammar.
+- `while`/`until` loops now check flow state after condition evaluation, preventing extra body execution on exit/break in condition.
+- `exec` builtin uses atomic `saveStdFds` for redirect save/restore instead of independent per-fd dups.
+- `**` glob patterns now recursively walk subdirectories (depth-capped at 32).
+
+### `src/lexer.zig`
+- Heredoc trailing-token buffer increased from 64 to 255; limit now tracks array size instead of hardcoded constant.
+
+### `src/prompt.zig`
+- Global `esc_buf` for color escape sequences replaced with a caller-provided stack-local buffer.
+
+### Documentation
+- Fixed README inline math examples to include required `= ` prefix.
+- Fixed README "no local scope" claim that contradicted `cmd` scoping description.
+- Corrected regex flag documentation from `[gimsux]` to `i` (case-insensitive only).
+- Removed nonexistent `glob` token type from INTERNALS token table.
+- Updated INTERNALS ident pattern description to cover paths and glob forms.
+
 ## 2026-03-14
 
 ### `src/exec.zig`

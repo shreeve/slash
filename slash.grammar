@@ -218,7 +218,7 @@ defaults {
 #
 # Syntax: ~ followed immediately (no space) by a non-/ non-alphanumeric
 # character. That character is the delimiter. Scan to the matching
-# delimiter, then consume optional flags [gimsux]*.
+# delimiter, then consume optional flags (currently only `i` for case-insensitive).
 #
 # Examples:
 #   ~|^foo.*|i       pipe delimiter, case-insensitive
