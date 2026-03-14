@@ -34,8 +34,6 @@ const version = build_options.version;
 // =============================================================================
 
 pub fn main() !u8 {
-    setupSignals();
-
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
         const leak_status = gpa.deinit();
@@ -134,6 +132,7 @@ pub fn main() !u8 {
     var ev = exec.Shell.init(alloc);
     defer ev.deinit();
     ev.initInteractive();
+    setupSignals();
     try runRepl(alloc, &ev);
     return ev.last_exit;
 }
