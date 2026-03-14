@@ -1045,7 +1045,7 @@ pub const Shell = struct {
         return true;
     }
 
-    fn reportExecError(context: []const u8, cmd: []const u8, err: posix.ExecveError) noreturn {
+    fn execErrorInfo(err: posix.ExecveError) struct { code: u8, msg: []const u8 } {
         var code: u8 = 126;
         var msg: []const u8 = @errorName(err);
         switch (err) {
@@ -1060,8 +1060,19 @@ pub const Shell = struct {
             error.FileBusy => msg = "text file busy",
             else => {},
         }
-        std.debug.print("slash: {s}{s}: {s}\n", .{ context, cmd, msg });
-        posix.exit(code);
+        return .{ .code = code, .msg = msg };
+    }
+
+    fn reportExecError(context: []const u8, cmd: []const u8, err: posix.ExecveError) noreturn {
+        const info = execErrorInfo(err);
+        std.debug.print("slash: {s}{s}: {s}\n", .{ context, cmd, info.msg });
+        posix.exit(info.code);
+    }
+
+    fn reportExecErrorNoExit(context: []const u8, cmd: []const u8, err: posix.ExecveError) u8 {
+        const info = execErrorInfo(err);
+        std.debug.print("slash: {s}{s}: {s}\n", .{ context, cmd, info.msg });
+        return info.code;
     }
 
     fn writeAllFd(fd: posix.fd_t, data: []const u8) bool {
@@ -2224,8 +2235,7 @@ pub const Shell = struct {
         };
         const envp = buildEnvP(self.allocator, self);
         const err = posix.execvpeZ(argv_z[0].?, argv_z, envp);
-        reportExecError("exec: ", argv[0], err);
-        self.last_exit = 1;
+        self.last_exit = reportExecErrorNoExit("exec: ", argv[0], err);
     }
 
     // =========================================================================
