@@ -145,7 +145,11 @@ pub const Lexer = struct {
             if (mp < self.base.source.len) {
                 const mch = self.base.source[mp];
                 const ws_pre: u8 = @intCast(@min(mp - self.base.pos, 255));
-                if (mch == '/' or mch == '^') {
+                const has_math_lhs = switch (self.last_cat) {
+                    .ident, .integer, .real, .variable, .var_braced, .rparen, .rbracket, .string_sq, .string_dq => true,
+                    else => false,
+                };
+                if (has_math_lhs and (mch == '/' or mch == '^')) {
                     self.base.pos = mp + 1;
                     self.last_cat = if (mch == '/') .slash else .power;
                     return Token{ .cat = self.last_cat, .pre = ws_pre, .pos = @intCast(mp), .len = 1 };

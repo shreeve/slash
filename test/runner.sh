@@ -92,6 +92,7 @@ check "assign addition"         "x = 10 + 4"                "(assign x (add 10 4
 check "assign subtraction"      "x = 10 - 3"                "(assign x (sub 10 3))"
 check "assign multiply"         "x = 3 * 7"                 "(assign x (mul 3 7))"
 check "assign division"         "x = 10 / 2"                "(assign x (div 10 2))"
+check "assign nospace division" "x = 10/2"                  "(assign x (div 10 2))"
 check "assign modulo"           "x = 10 % 3"                "(assign x (mod 10 3))"
 check "assign power"            "x = 2 ** 8"                "(assign x (pow 2 8))"
 check "assign negative"         "x = -5"                    "(assign x (neg 5))"
@@ -106,6 +107,7 @@ check "unset variable"          "name = -"                  "(unset name)"
 check "assign list literal"     'args = [find .]'           "(assign_argv args (list find .))"
 check "append list literal"     'args += [-iname "*foo*"]'  '(append_argv args (list -iname "*foo*"))'
 check "assign empty list"       'args = []'                 "(assign_argv args (list))"
+check "assign absolute path"    'tool = /usr/bin'           "(assign tool (shift_value /usr/bin))"
 
 # ==========================================================================
 # PIPELINES
@@ -443,6 +445,10 @@ check_script "exec assign + echo" \
 check_script "exec assign + math" \
     "$(printf 'x = 2 ** 8\necho $x\n')" \
     "256"
+
+check_script "exec assign absolute path" \
+    "$(printf 'tool = /usr/bin\necho $tool\n')" \
+    "/usr/bin"
 
 check_script "exec clear variable" \
     "$(printf '__slash_test_clear_var__ = hello\n__slash_test_clear_var__ = -\necho $__slash_test_clear_var__\n')" \
