@@ -26,8 +26,11 @@ pub const Db = struct {
     path: []const u8,
 
     pub fn open() !*Db {
+        return openWith(std.heap.page_allocator);
+    }
+
+    pub fn openWith(alloc: std.mem.Allocator) !*Db {
         const home = posix.getenv("HOME") orelse return error.NoHome;
-        const alloc = std.heap.page_allocator;
 
         var dir_buf: [4096]u8 = undefined;
         const dir_path = std.fmt.bufPrint(&dir_buf, "{s}/.slash", .{home}) catch return error.PathTooLong;
@@ -116,7 +119,7 @@ pub const Db = struct {
             seen.put(dupe, {}) catch {};
             if (results.items.len >= limit) break;
         }
-        return results.items;
+        return results.toOwnedSlice(alloc) catch &.{};
     }
 
     pub fn suggest(self: *const Db, _: std.mem.Allocator, prefix: []const u8) ?[]const u8 {

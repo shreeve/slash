@@ -233,8 +233,9 @@ check "cmd ??? delete"         "cmd ??? -"                  "(cmd_missing_del)"
 # KEY BINDINGS
 # ==========================================================================
 check "key define string"      'key esc-l "ls -la"'         '(key esc-l "ls -la")'
-check "key define action"      "key esc-l dirs"             "(key esc-l dirs)"
-check "key define esc-equals"  "key esc-= j"                "(key (key_combo_eq esc-) j)"
+check "key define action"      "key esc-l dirs"             "(key esc-l (cmd dirs))"
+check "key define esc-equals"  "key esc-= j"                "(key (key_combo_eq esc-) (cmd j))"
+check "key define full command" "key esc-= ls -la"          "(key (key_combo_eq esc-) (cmd ls -la))"
 check "key delete"             "key esc-l -"                "(key_del esc-l)"
 
 # ==========================================================================
@@ -887,6 +888,10 @@ check_script_args "exec try shift value" \
     "$(printf 'try shift\n    "--foo" { echo foo }\n    else { echo other }\n')" \
     "foo" \
     --foo
+
+check_script_all "exec key bind full command unquoted" \
+    "$(printf 'key esc-= ls -la\nkey\n')" \
+    "key esc-= ls -la"
 
 check_script "exec test -e" \
     "$(printf 'if test -e build.zig { echo exists }\n')" \

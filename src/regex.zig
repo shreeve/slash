@@ -43,8 +43,8 @@ pub const Regex = struct {
         return c.regexec(&self.inner, @ptrCast(z.ptr), 0, null, 0) == 0;
     }
 
-    pub fn free(self: *const Regex) void {
-        c.regfree(@constCast(&self.inner));
+    pub fn free(self: *Regex) void {
+        c.regfree(&self.inner);
     }
 };
 

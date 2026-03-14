@@ -213,8 +213,10 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     },
                     'C' => {
                         if (cursor < len) {
-                            cursor += 1;
-                            writeAll("\x1b[C");
+                            var adv: usize = 1;
+                            while (cursor + adv < len and (line_buf[cursor + adv] & 0xC0) == 0x80) adv += 1;
+                            cursor += adv;
+                            refreshLine(line_buf[0..len], cursor);
                         } else if (ghost_text.len > 0) {
                             if (len + ghost_text.len <= line_buf.len) {
                                 @memcpy(line_buf[len..][0..ghost_text.len], ghost_text);
@@ -227,8 +229,10 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     },
                     'D' => {
                         if (cursor > 0) {
-                            cursor -= 1;
-                            writeAll("\x1b[D");
+                            var back: usize = 1;
+                            while (back < cursor and (line_buf[cursor - back] & 0xC0) == 0x80) back += 1;
+                            cursor -= back;
+                            refreshLine(line_buf[0..len], cursor);
                         }
                     },
                     'H' => {
@@ -243,8 +247,10 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                         var extra: [1]u8 = undefined;
                         _ = posix.read(STDIN, &extra) catch {};
                         if (extra[0] == '~' and cursor < len) {
-                            std.mem.copyForwards(u8, line_buf[cursor..], line_buf[cursor + 1 .. len]);
-                            len -= 1;
+                            var del: usize = 1;
+                            while (cursor + del < len and (line_buf[cursor + del] & 0xC0) == 0x80) del += 1;
+                            std.mem.copyForwards(u8, line_buf[cursor..], line_buf[cursor + del .. len]);
+                            len -= del;
                             refreshLine(line_buf[0..len], cursor);
                         }
                     },
@@ -581,54 +587,39 @@ fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == .lt;
 }
 
+fn addCmdMatch(name: []const u8, common_len: *usize) void {
+    if (cmd_match_count >= 32 or name.len >= 128) return;
+    @memcpy(cmd_match_buf[cmd_match_count][0..name.len], name);
+    complete_list_buf[cmd_match_count] = cmd_match_buf[cmd_match_count][0..name.len];
+    if (cmd_match_count == 0) {
+        common_len.* = name.len;
+    } else {
+        var cl: usize = 0;
+        while (cl < common_len.* and cl < name.len and cmd_match_buf[0][cl] == name[cl]) cl += 1;
+        common_len.* = cl;
+    }
+    cmd_match_count += 1;
+}
+
 fn completeCommand(prefix: []const u8, word_start: usize) TabResult {
     cmd_match_count = 0;
     var common_len: usize = 0;
 
     for (Shell.builtin_names ++ Shell.keyword_names) |b| {
-        if (std.mem.startsWith(u8, b, prefix)) {
-            if (cmd_match_count < 32 and b.len < 128) {
-                @memcpy(cmd_match_buf[cmd_match_count][0..b.len], b);
-                complete_list_buf[cmd_match_count] = cmd_match_buf[cmd_match_count][0..b.len];
-                if (cmd_match_count == 0) common_len = b.len else {
-                    var cl: usize = 0;
-                    while (cl < common_len and cl < b.len and cmd_match_buf[0][cl] == b[cl]) cl += 1;
-                    common_len = cl;
-                }
-                cmd_match_count += 1;
-            }
-        }
+        if (std.mem.startsWith(u8, b, prefix)) addCmdMatch(b, &common_len);
     }
 
     path_cache.refresh();
     for (path_cache.names) |name| {
         if (cmd_match_count >= 32) break;
-        if (std.mem.startsWith(u8, name, prefix) and name.len < 128) {
-            @memcpy(cmd_match_buf[cmd_match_count][0..name.len], name);
-            complete_list_buf[cmd_match_count] = cmd_match_buf[cmd_match_count][0..name.len];
-            if (cmd_match_count == 0) common_len = name.len else {
-                var cl: usize = 0;
-                while (cl < common_len and cl < name.len and cmd_match_buf[0][cl] == name[cl]) cl += 1;
-                common_len = cl;
-            }
-            cmd_match_count += 1;
-        }
+        if (std.mem.startsWith(u8, name, prefix)) addCmdMatch(name, &common_len);
     }
 
     if (key_handler) |kh| {
         if (kh.user_cmd_names) |get_cmds| {
             for (get_cmds()) |name| {
                 if (cmd_match_count >= 32) break;
-                if (std.mem.startsWith(u8, name, prefix) and name.len < 128) {
-                    @memcpy(cmd_match_buf[cmd_match_count][0..name.len], name);
-                    complete_list_buf[cmd_match_count] = cmd_match_buf[cmd_match_count][0..name.len];
-                    if (cmd_match_count == 0) common_len = name.len else {
-                        var cl: usize = 0;
-                        while (cl < common_len and cl < name.len and cmd_match_buf[0][cl] == name[cl]) cl += 1;
-                        common_len = cl;
-                    }
-                    cmd_match_count += 1;
-                }
+                if (std.mem.startsWith(u8, name, prefix)) addCmdMatch(name, &common_len);
             }
         }
     }

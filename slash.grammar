@@ -639,7 +639,9 @@ params    = LPAREN_TIGHT L(name) ")"        → 2
 # KEY BINDINGS: key
 # ==============================================================================
 
-key_def   = KEY key_combo word              → (key 2 3)
+key_def   = KEY key_combo cmdlist           → (key 2 3)
+          | KEY key_combo STRING_SQ         → (key 2 3)
+          | KEY key_combo STRING_DQ         → (key 2 3)
           | KEY key_combo "-"               → (key_del 2)
           | KEY >                           → (key_list)
 
@@ -702,3 +704,4 @@ try_subject = shift_value
 
 list_literal = LIST_START list_item* "]"    → (list ...2)
 list_item    = IDENT | STRING_SQ | STRING_DQ | INTEGER | REAL | VARIABLE | VAR_BRACED | FLAG | REGEX | "-"
+             | subshell_capture

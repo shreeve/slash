@@ -26,6 +26,13 @@ const UserCmd = struct {
     body: Sexp,
     source: []const u8,
 
+    fn deinit(self: UserCmd, alloc: Allocator) void {
+        freeSexp(alloc, self.body);
+        alloc.free(self.source);
+        for (self.params) |p| alloc.free(p);
+        if (self.params.len > 0) alloc.free(self.params);
+    }
+
     fn freeSexp(alloc: Allocator, sexp: Sexp) void {
         switch (sexp) {
             .list => |items| {
@@ -153,13 +160,7 @@ pub const Shell = struct {
             var it = self.user_cmds.iterator();
             while (it.next()) |entry| {
                 self.allocator.free(entry.key_ptr.*);
-                const cmd = entry.value_ptr.*;
-                UserCmd.freeSexp(self.allocator, cmd.body);
-                self.allocator.free(cmd.source);
-                if (cmd.params.len > 0) {
-                    for (cmd.params) |p| self.allocator.free(p);
-                    self.allocator.free(cmd.params);
-                }
+                entry.value_ptr.*.deinit(self.allocator);
             }
         }
         self.user_cmds.deinit();
@@ -780,7 +781,7 @@ pub const Shell = struct {
                 }
             }
             if (is_builtin) {
-                _ = self.tryBuiltin(argv, source);
+                _ = self.tryBuiltin(argv);
             } else if (self.user_cmds.get(argv[0])) |cmd| {
                 self.invokeUserCmd(cmd, argv);
             }
@@ -1022,7 +1023,9 @@ pub const Shell = struct {
             if (std.mem.indexOfScalar(u8, inner, '$') != null or std.mem.indexOfScalar(u8, inner, '\\') != null) {
                 var buf: std.ArrayListUnmanaged(u8) = .{};
                 self.expandInto(&buf, inner);
-                return buf.toOwnedSlice(self.allocator) catch inner;
+                const result = buf.toOwnedSlice(self.allocator) catch return inner;
+                self.cmd_expansions.append(self.allocator, result) catch {};
+                return result;
             }
             return inner;
         }
@@ -1109,7 +1112,6 @@ pub const Shell = struct {
 
     var arg_join_buf: [4096]u8 = undefined;
 
-
     fn argJoinStr(self: *Shell) []const u8 {
         if (self.args.len == 0) return "";
         var pos: usize = 0;
@@ -1173,7 +1175,7 @@ pub const Shell = struct {
         return val;
     }
 
-    var exit_str_buf: [3]u8 = undefined;
+    var exit_str_buf: [4]u8 = undefined;
 
     fn exitCodeStr(self: *Shell) []const u8 {
         return std.fmt.bufPrint(&exit_str_buf, "{d}", .{self.last_exit}) catch "0";
@@ -1239,7 +1241,7 @@ pub const Shell = struct {
         const sexp = p.parseOneline() catch return null;
         return switch (sexp) {
             .list => |items| if (items.len >= 2 and items[0] == .tag and items[0].tag == .display)
-                formatFloat(self.allocator, self.evalMath(items[1], source))
+                formatFloat(self.evalMath(items[1], source))
             else
                 null,
             else => null,
@@ -1249,7 +1251,7 @@ pub const Shell = struct {
     fn evalDisplay(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
         const val = self.evalMath(args[0], source);
-        const str = formatFloat(self.allocator, val);
+        const str = formatFloat(val);
         const stdout = std.fs.File.stdout();
         stdout.writeAll(str) catch {};
         stdout.writeAll("\n") catch {};
@@ -1261,7 +1263,7 @@ pub const Shell = struct {
     // =========================================================================
 
     fn evalMathToStr(self: *Shell, sexp: Sexp, source: []const u8) []const u8 {
-        return formatFloat(self.allocator, self.evalMath(sexp, source));
+        return formatFloat(self.evalMath(sexp, source));
     }
 
     fn evalMath(self: *Shell, sexp: Sexp, source: []const u8) f64 {
@@ -1441,9 +1443,6 @@ pub const Shell = struct {
         if (args.len >= 1) self.eval(args[0], source);
         self.last_exit = if (self.last_exit == 0) 1 else 0;
     }
-
-
-
 
 
     fn evalSequence(self: *Shell, args: []const Sexp, source: []const u8) void {
@@ -2021,7 +2020,7 @@ pub const Shell = struct {
     // BUILTINS
     // =========================================================================
 
-    fn tryBuiltin(self: *Shell, argv: []const []const u8, _: []const u8) bool {
+    fn tryBuiltin(self: *Shell, argv: []const []const u8) bool {
         const name = argv[0];
 
         if (std.mem.eql(u8, name, "cd")) { self.builtinCd(argv); return true; }
@@ -2118,7 +2117,7 @@ pub const Shell = struct {
                 .stopped => "Stopped",
                 .done => "Done",
             };
-            std.debug.print("[{d}]  {s}\t\t{s}\n", .{ job.id, state_str, job.command });
+            printOut("[{d}]  {s}\t\t{s}\n", .{ job.id, state_str, job.command });
         }
         self.last_exit = 0;
     }
@@ -2319,7 +2318,7 @@ pub const Shell = struct {
             for (results) |cmd| self.allocator.free(cmd);
             if (results.len > 0) self.allocator.free(results);
         }
-        for (results) |cmd| std.debug.print("{s}\n", .{cmd});
+        for (results) |cmd| printOut("{s}\n", .{cmd});
         self.last_exit = 0;
     }
 
@@ -2347,7 +2346,7 @@ pub const Shell = struct {
         // j [query] — list and store for digit jump
         self.clearJList();
         for (filtered[0..count], 0..) |path, i| {
-            std.debug.print("{d} {s}\n", .{ i + 1, path });
+            printOut("{d} {s}\n", .{ i + 1, path });
             self.j_list[i] = self.allocator.dupe(u8, path) catch {
                 std.debug.print("j: out of memory\n", .{});
                 self.clearJList();
@@ -2372,11 +2371,11 @@ pub const Shell = struct {
     fn builtinType(self: *Shell, argv: []const []const u8) void {
         for (argv[1..]) |name| {
             if (self.user_cmds.contains(name)) {
-                std.debug.print("{s} is a user command\n", .{name});
+                printOut("{s} is a user command\n", .{name});
             } else if (isBuiltin(name)) {
-                std.debug.print("{s} is a shell builtin\n", .{name});
+                printOut("{s} is a shell builtin\n", .{name});
             } else {
-                std.debug.print("{s}: not found\n", .{name});
+                printOut("{s}: not found\n", .{name});
             }
         }
         self.last_exit = 0;
@@ -2405,7 +2404,7 @@ pub const Shell = struct {
 
     fn isBuiltin(name: []const u8) bool {
         if (name.len >= 2 and name[0] == '.' and std.mem.allEqual(u8, name, '.')) return true;
-        for (builtin_names) |b| {
+        inline for (builtin_names) |b| {
             if (std.mem.eql(u8, name, b)) return true;
         }
         return false;
@@ -2460,12 +2459,7 @@ pub const Shell = struct {
         };
 
         if (self.user_cmds.getPtr(name_raw)) |slot| {
-            UserCmd.freeSexp(self.allocator, slot.body);
-            self.allocator.free(slot.source);
-            if (slot.params.len > 0) {
-                for (slot.params) |p| self.allocator.free(p);
-                self.allocator.free(slot.params);
-            }
+            slot.deinit(self.allocator);
             slot.* = new_cmd;
         } else {
             const name = self.allocator.dupe(u8, name_raw) catch return;
@@ -2479,12 +2473,7 @@ pub const Shell = struct {
         const name = self.sexpToStr(args[0], source) orelse return;
         if (self.user_cmds.fetchRemove(name)) |kv| {
             self.allocator.free(kv.key);
-            UserCmd.freeSexp(self.allocator, kv.value.body);
-            self.allocator.free(kv.value.source);
-            if (kv.value.params.len > 0) {
-                for (kv.value.params) |p| self.allocator.free(p);
-                self.allocator.free(kv.value.params);
-            }
+            kv.value.deinit(self.allocator);
         }
         self.last_exit = 0;
     }
@@ -2511,12 +2500,7 @@ pub const Shell = struct {
         };
 
         if (self.user_cmds.getPtr("???")) |slot| {
-            UserCmd.freeSexp(self.allocator, slot.body);
-            self.allocator.free(slot.source);
-            if (slot.params.len > 0) {
-                for (slot.params) |p| self.allocator.free(p);
-                self.allocator.free(slot.params);
-            }
+            slot.deinit(self.allocator);
             slot.* = new_cmd;
         } else {
             const name = self.allocator.dupe(u8, "???") catch return;
@@ -2528,12 +2512,7 @@ pub const Shell = struct {
     fn evalCmdMissingDel(self: *Shell) void {
         if (self.user_cmds.fetchRemove("???")) |kv| {
             self.allocator.free(kv.key);
-            UserCmd.freeSexp(self.allocator, kv.value.body);
-            self.allocator.free(kv.value.source);
-            if (kv.value.params.len > 0) {
-                for (kv.value.params) |p| self.allocator.free(p);
-                self.allocator.free(kv.value.params);
-            }
+            kv.value.deinit(self.allocator);
         }
         self.last_exit = 0;
     }
@@ -2568,24 +2547,25 @@ pub const Shell = struct {
     }
 
     fn printCmdDefinition(name: []const u8, cmd: UserCmd) void {
-        std.debug.print("cmd {s}", .{name});
+        const stdout = std.fs.File.stdout();
+        printOut("cmd {s}", .{name});
         if (cmd.params.len > 0) {
-            std.debug.print("(", .{});
+            stdout.writeAll("(") catch {};
             for (cmd.params, 0..) |p, i| {
-                if (i > 0) std.debug.print(", ", .{});
-                std.debug.print("{s}", .{p});
+                if (i > 0) stdout.writeAll(", ") catch {};
+                stdout.writeAll(p) catch {};
             }
-            std.debug.print(")", .{});
+            stdout.writeAll(")") catch {};
         }
         const span = sexpSourceSpan(cmd.body, cmd.source);
         if (span.len > 0) {
             if (std.mem.indexOfScalar(u8, span, '\n') != null) {
-                std.debug.print("\n    {s}\n", .{span});
+                printOut("\n    {s}\n", .{span});
             } else {
-                std.debug.print(" {s}\n", .{span});
+                printOut(" {s}\n", .{span});
             }
         } else {
-            std.debug.print("\n", .{});
+            stdout.writeAll("\n") catch {};
         }
     }
 
@@ -2636,7 +2616,11 @@ pub const Shell = struct {
         var owned_combo: ?[]const u8 = null;
         defer if (owned_combo) |s| self.allocator.free(s);
         const combo_raw = self.keyComboText(args[0], source, &owned_combo) orelse return;
-        const command = self.allocator.dupe(u8, self.sexpToExpandedStr(args[1], source)) catch return;
+        const command_text = switch (args[1]) {
+            .list => self.commandTextForJob(args[1], source),
+            else => self.sexpToExpandedStr(args[1], source),
+        };
+        const command = self.allocator.dupe(u8, command_text) catch return;
         if (self.key_bindings.getPtr(combo_raw)) |slot| {
             self.allocator.free(slot.*);
             slot.* = command;
@@ -2661,7 +2645,7 @@ pub const Shell = struct {
 
     fn evalKeyList(self: *Shell) void {
         var it = self.key_bindings.iterator();
-        while (it.next()) |entry| std.debug.print("key {s} {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+        while (it.next()) |entry| printOut("key {s} {s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         self.last_exit = 0;
     }
 
@@ -2747,16 +2731,16 @@ pub const Shell = struct {
         if (args.len < 1) return;
         const name = self.sexpToStr(args[0], source) orelse return;
         if (self.options.get(name)) |val| {
-            std.debug.print("{s}={s}\n", .{ name, val });
+            printOut("{s}={s}\n", .{ name, val });
         } else {
-            std.debug.print("{s}: not set\n", .{name});
+            printOut("{s}: not set\n", .{name});
         }
         self.last_exit = 0;
     }
 
     fn evalSetList(self: *Shell) void {
         var it = self.options.iterator();
-        while (it.next()) |entry| std.debug.print("{s}={s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+        while (it.next()) |entry| printOut("{s}={s}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         self.last_exit = 0;
     }
 
@@ -2867,6 +2851,20 @@ pub const Shell = struct {
 };
 
 // =============================================================================
+// STDOUT HELPER
+// =============================================================================
+
+fn printOut(comptime fmt: []const u8, args: anytype) void {
+    const stdout = std.fs.File.stdout();
+    var buf: [4096]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, fmt, args) catch {
+        stdout.writeAll(fmt) catch {};
+        return;
+    };
+    stdout.writeAll(text) catch {};
+}
+
+// =============================================================================
 // EXEC HELPERS
 // =============================================================================
 
@@ -2877,10 +2875,12 @@ fn toExecArgs(alloc: Allocator, argv: []const []const u8) ![*:null]const ?[*:0]c
     return @ptrCast(buf.ptr);
 }
 
+// Called in the child process after fork(), so allocations are intentionally
+// not freed — exec() replaces the process image, or _exit() terminates it.
 fn buildEnvP(alloc: Allocator, shell: *const Shell) [*:null]const ?[*:0]const u8 {
     var envp: std.ArrayList(?[*:0]const u8) = .empty;
-    var seen_exports: std.ArrayList([]const u8) = .empty;
-    defer seen_exports.deinit(alloc);
+    var seen_exports = std.StringHashMap(void).init(alloc);
+    defer seen_exports.deinit();
     const env = std.c.environ;
     var i: usize = 0;
     while (env[i]) |entry| : (i += 1) {
@@ -2900,8 +2900,8 @@ fn buildEnvP(alloc: Allocator, shell: *const Shell) [*:null]const ?[*:0]const u8
         var it = shell.local_scopes.items[scope_index].vars.iterator();
         while (it.next()) |entry| {
             const name = entry.key_ptr.*;
-            if (!shouldExportVar(name) or sliceSeen(seen_exports.items, name)) continue;
-            seen_exports.append(alloc, name) catch continue;
+            if (!shouldExportVar(name) or seen_exports.contains(name)) continue;
+            seen_exports.put(name, {}) catch continue;
             const name_len = name.len;
             const val = entry.value_ptr.*;
             const total = name_len + 1 + varValueLen(val);
@@ -2916,8 +2916,8 @@ fn buildEnvP(alloc: Allocator, shell: *const Shell) [*:null]const ?[*:0]const u8
     var it = shell.vars.iterator();
     while (it.next()) |entry| {
         const name = entry.key_ptr.*;
-        if (!shouldExportVar(name) or sliceSeen(seen_exports.items, name)) continue;
-        seen_exports.append(alloc, name) catch continue;
+        if (!shouldExportVar(name) or seen_exports.contains(name)) continue;
+        seen_exports.put(name, {}) catch continue;
         const name_len = name.len;
         const val = entry.value_ptr.*;
         const total = name_len + 1 + varValueLen(val);
@@ -2934,13 +2934,6 @@ fn buildEnvP(alloc: Allocator, shell: *const Shell) [*:null]const ?[*:0]const u8
 
 fn shouldExportVar(name: []const u8) bool {
     return name.len > 0 and std.ascii.isUpper(name[0]);
-}
-
-fn sliceSeen(items: []const []const u8, needle: []const u8) bool {
-    for (items) |item| {
-        if (std.mem.eql(u8, item, needle)) return true;
-    }
-    return false;
 }
 
 fn varValueLen(value: VarValue) usize {
@@ -3008,7 +3001,7 @@ fn statusToExit(status: u32) u8 {
 
 var float_buf: [64]u8 = undefined;
 
-fn formatFloat(_: Allocator, val: f64) []const u8 {
+fn formatFloat(val: f64) []const u8 {
     if (val == @trunc(val) and @abs(val) < 1e15) {
         return std.fmt.bufPrint(&float_buf, "{d}", .{@as(i64, @intFromFloat(val))}) catch "0";
     }
