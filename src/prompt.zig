@@ -108,6 +108,13 @@ pub fn render(fmt: []const u8, ctx: Context) struct { str: []const u8, visible_l
                 else => {},
             }
         }
+        const seq_len = std.unicode.utf8ByteSequenceLength(fmt[i]) catch 1;
+        if (seq_len > 1 and i + seq_len <= fmt.len) {
+            emit(&out, fmt[i .. i + seq_len]);
+            vis += 1;
+            i += seq_len;
+            continue;
+        }
         emitByte(&out, &vis, fmt[i]);
         i += 1;
     }
@@ -159,7 +166,7 @@ fn emit(out: *usize, s: []const u8) void {
 
 fn emitStr(out: *usize, vis: *usize, s: []const u8) void {
     emit(out, s);
-    vis.* += s.len;
+    vis.* += displayWidth(s);
 }
 
 fn emitByte(out: *usize, vis: *usize, byte: u8) void {
@@ -168,6 +175,31 @@ fn emitByte(out: *usize, vis: *usize, byte: u8) void {
         out.* += 1;
         vis.* += 1;
     }
+}
+
+fn displayWidth(s: []const u8) usize {
+    var i: usize = 0;
+    var width: usize = 0;
+    while (i < s.len) {
+        const seq_len = std.unicode.utf8ByteSequenceLength(s[i]) catch {
+            i += 1;
+            width += 1;
+            continue;
+        };
+        if (seq_len > 1 and i + seq_len <= s.len) {
+            _ = std.unicode.utf8Decode(s[i .. i + seq_len]) catch {
+                i += 1;
+                width += 1;
+                continue;
+            };
+            i += seq_len;
+            width += 1;
+            continue;
+        }
+        i += 1;
+        width += 1;
+    }
+    return width;
 }
 
 // --- %fg(#hex) / %bg(#hex) parser ---
@@ -468,4 +500,13 @@ test "resolveGitHeadPath handles relative gitdir file" {
     var read_buf: [64]u8 = undefined;
     const n = head.read(&read_buf) catch return error.SkipZigTest;
     try std.testing.expect(std.mem.startsWith(u8, read_buf[0..n], "ref: refs/heads/main"));
+}
+
+test "displayWidth counts UTF-8 codepoints once" {
+    try std.testing.expectEqual(@as(usize, 5), displayWidth("naïve"));
+}
+
+test "render tracks UTF-8 literal width" {
+    const out = render("λ>", .{});
+    try std.testing.expectEqual(@as(usize, 2), out.visible_len);
 }
