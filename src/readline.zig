@@ -264,8 +264,8 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     },
                     '3' => {
                         var extra: [1]u8 = undefined;
-                        _ = readStdin(&extra);
-                        if (extra[0] == '~' and cursor < len) {
+                        const extra_n = readStdin(&extra) orelse 0;
+                        if (extra_n == 1 and extra[0] == '~' and cursor < len) {
                             var del: usize = 1;
                             while (cursor + del < len and (line_buf[cursor + del] & 0xC0) == 0x80) del += 1;
                             std.mem.copyForwards(u8, line_buf[cursor..], line_buf[cursor + del .. len]);
