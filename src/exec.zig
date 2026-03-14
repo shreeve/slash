@@ -1509,8 +1509,9 @@ pub const Shell = struct {
 
         if (tag == .match or tag == .nomatch) {
             const rhs_raw = self.sexpToStr(args[1], source) orelse "";
-            const spec = parseRegexSpec(rhs_raw) orelse {
-                std.debug.print("slash: invalid regex: {s}\n", .{rhs_raw});
+            const rhs_eval = self.sexpToExpandedStr(args[1], source);
+            const spec = parseRegexSpec(rhs_raw) orelse parseRegexSpec(rhs_eval) orelse {
+                std.debug.print("slash: invalid regex: {s}\n", .{rhs_eval});
                 self.last_exit = 2;
                 return;
             };
