@@ -446,15 +446,17 @@ stmt      = "=" expr                        → (display 2)
 # A pipeline is one or more simple commands connected by pipes.
 # Command lists chain pipelines with &&, ||, ;, or &.
 
-cmdlist   = pipeline "&&"  cmdlist          → (and 1 3)
-          | pipeline AND   cmdlist          → (and 1 3)
-          | pipeline "||"  cmdlist          → (or 1 3)
-          | pipeline OR    cmdlist          → (or 1 3)
-          | pipeline XOR   cmdlist          → (xor 1 3)
-          | pipeline ";"   cmdlist          → (seq 1 3)
-          | pipeline "&"   cmdlist          → (bg 1 3)
-          | pipeline "&"                    → (bg 1)
-          | pipeline >                      → 1
+cmdlist   = and_or ";" cmdlist              → (seq 1 3)
+          | and_or "&" cmdlist              → (bg 1 3)
+          | and_or "&"                      → (bg 1)
+          | and_or >                        → 1
+
+and_or    = and_or "&&" pipeline            → (and 1 3)
+          | and_or AND  pipeline            → (and 1 3)
+          | and_or "||" pipeline            → (or 1 3)
+          | and_or OR   pipeline            → (or 1 3)
+          | and_or XOR  pipeline            → (xor 1 3)
+          | pipeline
 
 pipeline  = command "|&" pipeline           → (pipe_err 1 3)
           | command "|"  pipeline           → (pipe 1 3)

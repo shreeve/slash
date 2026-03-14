@@ -295,9 +295,9 @@ check "cmd with block"         "cmd foo { echo hi }"            "(cmd_def foo _ 
 check "cmd with args body"     'cmd g git status'               "(cmd_def g _ (cmd git status))"
 
 # --- chained boolean ---
-check "chain &&"               "a && b && c"                    "(and (cmd a) (and (cmd b) (cmd c)))"
-check "chain ||"               "a || b || c"                    "(or (cmd a) (or (cmd b) (cmd c)))"
-check "mixed && ||"            "a && b || c"                    "(and (cmd a) (or (cmd b) (cmd c)))"
+check "chain &&"               "a && b && c"                    "(and (and (cmd a) (cmd b)) (cmd c))"
+check "chain ||"               "a || b || c"                    "(or (or (cmd a) (cmd b)) (cmd c))"
+check "mixed && ||"            "a && b || c"                    "(or (and (cmd a) (cmd b)) (cmd c))"
 check "mixed ; &&"             "a ; b && c"                     "(seq (cmd a) (and (cmd b) (cmd c)))"
 
 # --- display edge cases ---
