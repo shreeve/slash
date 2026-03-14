@@ -8,6 +8,10 @@ const posix = std.posix;
 const parser = @import("parser.zig");
 const TokenCat = parser.TokenCat;
 const Shell = @import("exec.zig").Shell;
+const c = @cImport({
+    @cInclude("errno.h");
+    @cInclude("unistd.h");
+});
 
 const STDIN = posix.STDIN_FILENO;
 const STDOUT = posix.STDOUT_FILENO;
@@ -77,11 +81,11 @@ pub fn setKeyHandler(handler: KeyHandler) void {
 
 fn readStdin(buf: []u8) ?usize {
     while (true) {
-        return posix.read(STDIN, buf) catch |err| switch (err) {
-            error.WouldBlock => continue,
-            error.Interrupted => continue,
-            else => null,
-        };
+        const n = c.read(STDIN, buf.ptr, buf.len);
+        if (n >= 0) return @intCast(n);
+        const err = std.c._errno().*;
+        if (err == c.EINTR or err == c.EAGAIN) continue;
+        return null;
     }
 }
 
@@ -118,11 +122,11 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
     writeAll(prompt);
 
     while (true) {
-        var c: [1]u8 = undefined;
-        const n = readStdin(&c) orelse return null;
+        var ch_buf: [1]u8 = undefined;
+        const n = readStdin(&ch_buf) orelse return null;
         if (n == 0) return null;
 
-        switch (c[0]) {
+        switch (ch_buf[0]) {
             '\r', '\n' => {
                 if (ghost_text.len > 0) {
                     ghost_text = "";

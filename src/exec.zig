@@ -1549,8 +1549,10 @@ pub const Shell = struct {
 
         if (tag == .match or tag == .nomatch) {
             const rhs_raw = self.sexpToStr(args[1], source) orelse "";
-            const rhs_eval = self.sexpToExpandedStr(args[1], source);
-            const spec = parseRegexSpec(rhs_raw) orelse parseRegexSpec(rhs_eval) orelse {
+            const rhs_eval_full = self.sexpToExpandedStr(args[1], source);
+            const rhs_eval = std.mem.trim(u8, rhs_eval_full, " \t\r\n");
+            const rhs_raw_trim = std.mem.trim(u8, rhs_raw, " \t\r\n");
+            const spec = parseRegexSpec(rhs_raw_trim) orelse parseRegexSpec(rhs_eval) orelse {
                 std.debug.print("slash: invalid regex: {s}\n", .{rhs_eval});
                 self.last_exit = 2;
                 return;
@@ -2294,12 +2296,15 @@ pub const Shell = struct {
             return;
         }
         resetChildSignals();
-        const argv_z = toExecArgs(self.allocator, argv) catch {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const temp_alloc = arena.allocator();
+        const argv_z = toExecArgs(temp_alloc, argv) catch {
             std.debug.print("slash: exec: allocation failed\n", .{});
             self.last_exit = 1;
             return;
         };
-        const envp = buildEnvP(self.allocator, self);
+        const envp = buildEnvP(temp_alloc, self);
         const err = posix.execvpeZ(argv_z[0].?, argv_z, envp);
         self.last_exit = reportExecErrorNoExit("exec: ", argv[0], err);
     }
@@ -3696,6 +3701,8 @@ test "reaped stopped job transitions to done" {
 
 test "parseRegexSpec rejects unsupported flags" {
     try std.testing.expect(Shell.parseRegexSpec("/abc/i") != null);
+    try std.testing.expect(Shell.parseRegexSpec("/[a/b]/") != null);
+    try std.testing.expect(Shell.parseRegexSpec("  /[a/b]/  ") == null);
     try std.testing.expect(Shell.parseRegexSpec("/abc/m") == null);
     try std.testing.expect(Shell.parseRegexSpec("~|abc|x") == null);
 }
