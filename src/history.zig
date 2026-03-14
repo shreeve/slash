@@ -52,11 +52,17 @@ pub const Db = struct {
         self.load();
         self.prune();
 
-        self.file = std.fs.cwd().openFile(path, .{ .mode = .write_only }) catch
-            std.fs.cwd().createFile(path, .{ .mode = 0o600 }) catch null;
+        self.file = blk: {
+            const path_z = std.posix.toPosixPath(path) catch break :blk null;
+            const fd = posix.openatZ(posix.AT.FDCWD, &path_z, .{
+                .ACCMODE = .WRONLY,
+                .CREAT = true,
+                .APPEND = true,
+            }, 0o600) catch break :blk null;
+            break :blk std.fs.File{ .handle = fd };
+        };
         if (self.file) |f| {
             posix.fchmod(f.handle, 0o600) catch {};
-            f.seekFromEnd(0) catch {};
         }
 
         return self;
