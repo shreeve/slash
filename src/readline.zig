@@ -75,6 +75,25 @@ pub fn setKeyHandler(handler: KeyHandler) void {
     key_handler = handler;
 }
 
+fn readStdin(buf: []u8) ?usize {
+    while (true) {
+        return posix.read(STDIN, buf) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => null,
+        };
+    }
+}
+
+fn readStdinExact(buf: []u8) usize {
+    var off: usize = 0;
+    while (off < buf.len) {
+        const n = readStdin(buf[off..]) orelse break;
+        if (n == 0) break;
+        off += n;
+    }
+    return off;
+}
+
 pub fn readLineEx(prompt_str: []const u8, prompt_visible_len: usize, history: *History) ?[]const u8 {
     return readLineInner(prompt_str, prompt_visible_len, history);
 }
@@ -99,7 +118,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
 
     while (true) {
         var c: [1]u8 = undefined;
-        const n = posix.read(STDIN, &c) catch return null;
+        const n = readStdin(&c) orelse return null;
         if (n == 0) return null;
 
         switch (c[0]) {
@@ -138,7 +157,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
             },
             27 => {
                 var seq: [2]u8 = undefined;
-                const n1 = posix.read(STDIN, seq[0..1]) catch return null;
+                const n1 = readStdin(seq[0..1]) orelse return null;
                 if (n1 == 0) continue;
                 if (seq[0] != '[') {
                     // ESC + char — check key bindings
@@ -160,7 +179,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     }
                     continue;
                 }
-                const n2 = posix.read(STDIN, seq[1..2]) catch return null;
+                const n2 = readStdin(seq[1..2]) orelse return null;
                 if (n2 == 0) continue;
 
                 switch (seq[1]) {
@@ -245,7 +264,7 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     },
                     '3' => {
                         var extra: [1]u8 = undefined;
-                        _ = posix.read(STDIN, &extra) catch {};
+                        _ = readStdin(&extra);
                         if (extra[0] == '~' and cursor < len) {
                             var del: usize = 1;
                             while (cursor + del < len and (line_buf[cursor + del] & 0xC0) == 0x80) del += 1;
@@ -398,18 +417,21 @@ fn readLineInner(prompt: []const u8, prompt_len: usize, history: *History) ?[]co
                     } else {
                         completed_dir_slash = false;
                         const byte_count: usize = if (ch < 0x80) 1 else if (ch < 0xE0) 2 else if (ch < 0xF0) 3 else 4;
-                        if (len + byte_count <= line_buf.len - 1) {
+                        var extra: [3]u8 = .{ 0, 0, 0 };
+                        var valid_extra: usize = 0;
+                        if (byte_count > 1) {
+                            const got = readStdinExact(extra[0 .. byte_count - 1]);
+                            while (valid_extra < got and (extra[valid_extra] & 0xC0) == 0x80) : (valid_extra += 1) {}
+                        }
+                        const add_count = 1 + valid_extra;
+                        if (len + add_count <= line_buf.len - 1) {
                             if (cursor < len) {
-                                std.mem.copyBackwards(u8, line_buf[cursor + byte_count .. len + byte_count], line_buf[cursor..len]);
+                                std.mem.copyBackwards(u8, line_buf[cursor + add_count .. len + add_count], line_buf[cursor..len]);
                             }
                             line_buf[cursor] = ch;
-                            if (byte_count > 1) {
-                                var extra: [3]u8 = undefined;
-                                const got = posix.read(STDIN, extra[0 .. byte_count - 1]) catch 0;
-                                for (0..got) |j| line_buf[cursor + 1 + j] = extra[j];
-                            }
-                            len += byte_count;
-                            cursor += byte_count;
+                            if (valid_extra > 0) @memcpy(line_buf[cursor + 1 ..][0..valid_extra], extra[0..valid_extra]);
+                            len += add_count;
+                            cursor += add_count;
                             updateGhost(line_buf[0..len]);
                             refreshLine(line_buf[0..len], cursor);
                         }
@@ -906,7 +928,7 @@ fn overlaySearch(
         writeAll(col);
 
         var ch: [1]u8 = undefined;
-        const n = posix.read(STDIN, &ch) catch break;
+        const n = readStdin(&ch) orelse break;
         if (n == 0) break;
 
         switch (ch[0]) {
@@ -923,9 +945,9 @@ fn overlaySearch(
             },
             27 => {
                 var seq: [2]u8 = undefined;
-                const n1 = posix.read(STDIN, seq[0..1]) catch break;
+                const n1 = readStdin(seq[0..1]) orelse break;
                 if (n1 > 0 and seq[0] == '[') {
-                    const n2 = posix.read(STDIN, seq[1..2]) catch break;
+                    const n2 = readStdin(seq[1..2]) orelse break;
                     if (n2 > 0) {
                         if (seq[1] == 'A' and selected > 0) selected -= 1;
                         if (seq[1] == 'B' and selected + 1 < results.len) selected += 1;
