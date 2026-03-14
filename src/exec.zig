@@ -393,6 +393,18 @@ pub const Shell = struct {
         return null;
     }
 
+    fn findJobByTrackedPid(self: *Shell, pid: posix.pid_t) ?*Job {
+        for (&self.jobs) |*slot| {
+            if (slot.*) |*job| {
+                if (job.pgid == pid) return job;
+                for (job.pids[0..job.pid_count]) |jp| {
+                    if (jp == pid) return job;
+                }
+            }
+        }
+        return null;
+    }
+
     fn findJobById(self: *Shell, id: u16) ?*Job {
         for (&self.jobs) |*slot| {
             if (slot.*) |*job| {
@@ -2465,9 +2477,28 @@ pub const Shell = struct {
                 return;
             }
 
+            if (self.interactive) {
+                if (self.findJobByTrackedPid(pid)) |job| {
+                    if (job.state == .done) {
+                        self.last_exit = job.exit_code;
+                        self.removeJob(job.id);
+                        continue;
+                    }
+                }
+            }
+
             var status: i32 = 0;
             const waited_pid = libc.waitpid(pid, &status, libc.WUNTRACED);
             if (waited_pid <= 0) {
+                if (self.interactive) {
+                    if (self.findJobByTrackedPid(pid)) |job| {
+                        if (job.state == .done) {
+                            self.last_exit = job.exit_code;
+                            self.removeJob(job.id);
+                            continue;
+                        }
+                    }
+                }
                 std.debug.print("wait: {s}: no such child\n", .{tok});
                 self.last_exit = 1;
                 return;
