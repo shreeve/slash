@@ -776,7 +776,7 @@ fn refreshLine(line: []const u8, cursor: usize) void {
         writeAll(ghost_text);
         writeAll("\x1b[0m");
     }
-    const total = active_prompt_len + cursor;
+    const total = active_prompt_len + utf8ColumnWidth(line[0..@min(cursor, line.len)]);
     var move_buf: [32]u8 = undefined;
     const move = std.fmt.bufPrint(&move_buf, "\r\x1b[{d}C", .{total}) catch return;
     writeAll(move);
@@ -1025,6 +1025,31 @@ fn visibleWidth(text: []const u8) usize {
     return width;
 }
 
+fn utf8ColumnWidth(text: []const u8) usize {
+    var i: usize = 0;
+    var width: usize = 0;
+    while (i < text.len) {
+        const seq_len = std.unicode.utf8ByteSequenceLength(text[i]) catch {
+            i += 1;
+            width += 1;
+            continue;
+        };
+        if (seq_len > 1 and i + seq_len <= text.len) {
+            _ = std.unicode.utf8Decode(text[i .. i + seq_len]) catch {
+                i += 1;
+                width += 1;
+                continue;
+            };
+            i += seq_len;
+            width += 1;
+            continue;
+        }
+        i += 1;
+        width += 1;
+    }
+    return width;
+}
+
 fn clearOverlay() void {
     writeAll("\r\x1b[J");
     writeAll("\x1b[A");
@@ -1073,4 +1098,9 @@ test "History deinit frees retained lines" {
 
     try std.testing.expect(hist.count == History.CAPACITY + 16);
     try std.testing.expect(hist.get(hist.count - 1).len > 0);
+}
+
+test "utf8ColumnWidth counts codepoints not bytes" {
+    try std.testing.expectEqual(@as(usize, 1), utf8ColumnWidth("λ"));
+    try std.testing.expectEqual(@as(usize, 5), utf8ColumnWidth("naïve"));
 }
