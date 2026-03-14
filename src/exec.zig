@@ -859,6 +859,14 @@ pub const Shell = struct {
                 _ = posix.waitpid(pid, 0);
                 return null;
             };
+            self.cmd_expansions.append(self.allocator, path) catch {
+                self.allocator.free(path);
+                _ = fds.pop();
+                posix.close(pipe_fds[0]);
+                posix.kill(pid, posix.SIG.TERM) catch {};
+                _ = posix.waitpid(pid, 0);
+                return null;
+            };
             return path;
         } else {
             if (pid == 0) {
@@ -877,6 +885,14 @@ pub const Shell = struct {
                 return null;
             };
             const path = std.fmt.allocPrint(self.allocator, "/dev/fd/{d}", .{pipe_fds[1]}) catch {
+                _ = fds.pop();
+                posix.close(pipe_fds[1]);
+                posix.kill(pid, posix.SIG.TERM) catch {};
+                _ = posix.waitpid(pid, 0);
+                return null;
+            };
+            self.cmd_expansions.append(self.allocator, path) catch {
+                self.allocator.free(path);
                 _ = fds.pop();
                 posix.close(pipe_fds[1]);
                 posix.kill(pid, posix.SIG.TERM) catch {};

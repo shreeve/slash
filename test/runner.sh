@@ -709,6 +709,10 @@ check_script "exec procsub pipeline" \
     "$(printf 'cat <(echo hello | tr h H)\n')" \
     "Hello"
 
+check_script "exec procsub repeated allocations" \
+    "$(printf 'cat <(echo one) > /dev/null\ncat <(echo two) > /dev/null\necho ok\n')" \
+    "ok"
+
 # ==========================================================================
 # EXECUTION: TEST BUILTIN (extended)
 # ==========================================================================
