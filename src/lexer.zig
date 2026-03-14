@@ -453,6 +453,7 @@ pub fn lineNeedsContinuation(line: []const u8) bool {
         .and_sym,
         .or_sym,
         .plus,
+        .minus,
         .star,
         .slash,
         .percent,
@@ -487,4 +488,9 @@ pub fn lineNeedsContinuation(line: []const u8) bool {
     if (std.mem.eql(u8, last_text, "else")) return true;
 
     return false;
+}
+
+test "lineNeedsContinuation recognizes trailing minus operator" {
+    try std.testing.expect(lineNeedsContinuation("= 1 -"));
+    try std.testing.expect(!lineNeedsContinuation("= 1 - 2"));
 }
