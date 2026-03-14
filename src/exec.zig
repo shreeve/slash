@@ -49,7 +49,10 @@ const UserCmd = struct {
             .nil => .nil,
             .tag => |t| .{ .tag = t },
             .src => |s| .{ .src = s },
-            .str => |s| .{ .str = alloc.dupe(u8, s) catch "" },
+            .str => |s| blk: {
+                const copy = alloc.dupe(u8, s) catch break :blk .nil;
+                break :blk .{ .str = copy };
+            },
             .list => |items| blk: {
                 const copy = alloc.alloc(Sexp, items.len) catch break :blk .nil;
                 for (items, 0..) |item, i| copy[i] = dupeSexp(alloc, item);
@@ -2755,9 +2758,17 @@ pub const Shell = struct {
         if (args.len >= 3) {
             if (args[1] == .list) {
                 const plist = args[1].list;
-                var param_names = self.allocator.alloc([]const u8, plist.len) catch return;
+                var param_names = self.allocator.alloc([]const u8, plist.len) catch {
+                    self.allocator.free(source_copy);
+                    return;
+                };
                 for (plist, 0..) |p, i| {
-                    param_names[i] = self.allocator.dupe(u8, self.sexpToStr(p, source) orelse "") catch "";
+                    param_names[i] = self.allocator.dupe(u8, self.sexpToStr(p, source) orelse "") catch {
+                        for (param_names[0..i]) |name| self.allocator.free(name);
+                        self.allocator.free(param_names);
+                        self.allocator.free(source_copy);
+                        return;
+                    };
                 }
                 params = param_names;
             }
@@ -2773,8 +2784,15 @@ pub const Shell = struct {
             slot.deinit(self.allocator);
             slot.* = new_cmd;
         } else {
-            const name = self.allocator.dupe(u8, name_raw) catch return;
-            self.user_cmds.put(name, new_cmd) catch {};
+            const name = self.allocator.dupe(u8, name_raw) catch {
+                new_cmd.deinit(self.allocator);
+                return;
+            };
+            self.user_cmds.put(name, new_cmd) catch {
+                self.allocator.free(name);
+                new_cmd.deinit(self.allocator);
+                return;
+            };
         }
         self.last_exit = 0;
     }
@@ -2796,9 +2814,17 @@ pub const Shell = struct {
         var params: [][]const u8 = &.{};
         const body_idx: usize = if (args.len >= 3 and args[1] == .list) blk: {
             const plist = args[1].list;
-            var param_names = self.allocator.alloc([]const u8, plist.len) catch return;
+            var param_names = self.allocator.alloc([]const u8, plist.len) catch {
+                self.allocator.free(source_copy);
+                return;
+            };
             for (plist, 0..) |p, i| {
-                param_names[i] = self.allocator.dupe(u8, self.sexpToStr(p, source) orelse "") catch "";
+                param_names[i] = self.allocator.dupe(u8, self.sexpToStr(p, source) orelse "") catch {
+                    for (param_names[0..i]) |name| self.allocator.free(name);
+                    self.allocator.free(param_names);
+                    self.allocator.free(source_copy);
+                    return;
+                };
             }
             params = param_names;
             break :blk args.len - 1;
@@ -2814,8 +2840,15 @@ pub const Shell = struct {
             slot.deinit(self.allocator);
             slot.* = new_cmd;
         } else {
-            const name = self.allocator.dupe(u8, "???") catch return;
-            self.user_cmds.put(name, new_cmd) catch {};
+            const name = self.allocator.dupe(u8, "???") catch {
+                new_cmd.deinit(self.allocator);
+                return;
+            };
+            self.user_cmds.put(name, new_cmd) catch {
+                self.allocator.free(name);
+                new_cmd.deinit(self.allocator);
+                return;
+            };
         }
         self.last_exit = 0;
     }
