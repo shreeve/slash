@@ -196,6 +196,13 @@ pub const Lexer = struct {
             tok.cat = .lparen;
         }
 
+        // `=` enables math mode in the base lexer. If the first RHS token is a
+        // bare word, this is a non-expression assignment form (shift value, key/set
+        // command RHS), so disable math interception before later command args.
+        if (self.base.math != 0 and self.last_cat == .assign and tok.cat == .ident) {
+            self.base.math = 0;
+        }
+
         self.last_cat = tok.cat;
 
         if (tok.cat == .newline) return self.handleIndent(tok);

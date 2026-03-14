@@ -238,6 +238,7 @@ check "key define string"      'key esc-l "ls -la"'         '(key esc-l "ls -la"
 check "key define action"      "key esc-l dirs"             "(key esc-l (cmd dirs))"
 check "key define esc-equals"  "key esc-= j"                "(key (key_combo_eq esc-) (cmd j))"
 check "key define full command" "key esc-= ls -la"          "(key (key_combo_eq esc-) (cmd ls -la))"
+check "key define with path arg" "key esc-= echo /tmp"      "(key (key_combo_eq esc-) (cmd echo /tmp))"
 check "key delete"             "key esc-l -"                "(key_del esc-l)"
 
 # ==========================================================================
