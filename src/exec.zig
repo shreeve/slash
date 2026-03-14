@@ -2286,9 +2286,9 @@ pub const Shell = struct {
             saved[2] = posix.dup(posix.STDERR_FILENO) catch -1;
         }
         defer {
-            if (saved[0] != -1) { posix.dup2(saved[0], posix.STDIN_FILENO) catch {}; posix.close(saved[0]); }
-            if (saved[1] != -1) { posix.dup2(saved[1], posix.STDOUT_FILENO) catch {}; posix.close(saved[1]); }
-            if (saved[2] != -1) { posix.dup2(saved[2], posix.STDERR_FILENO) catch {}; posix.close(saved[2]); }
+            if (has_redirs and !restoreStdFds(saved)) {
+                std.debug.print("slash: failed to restore stdio after exec redirections\n", .{});
+            }
             self.cleanupProcSubs(procsub_fds.items);
         }
 

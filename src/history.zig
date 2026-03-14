@@ -252,19 +252,35 @@ pub const Db = struct {
         defer if (!closed) out.close();
         var write_ok = true;
         for (self.entries.items) |e| {
-            const escaped_cwd = escapeFieldAlloc(self.alloc, e.cwd) catch { write_ok = false; continue; };
-            defer self.alloc.free(escaped_cwd);
-            const escaped_command = escapeFieldAlloc(self.alloc, e.command) catch { write_ok = false; continue; };
-            defer self.alloc.free(escaped_command);
-            var prefix_buf: [96]u8 = undefined;
-            const prefix = std.fmt.bufPrint(&prefix_buf, "{d}\t{d}\t{d}\t", .{
-                e.timestamp, e.exit_code, e.duration_ms,
-            }) catch { write_ok = false; continue; };
-            out.writeAll(prefix) catch { write_ok = false; };
-            out.writeAll(escaped_cwd) catch { write_ok = false; };
-            out.writeAll("\t") catch { write_ok = false; };
-            out.writeAll(escaped_command) catch { write_ok = false; };
-            out.writeAll("\n") catch { write_ok = false; };
+            const escaped_cwd = escapeFieldAlloc(self.alloc, e.cwd) catch {
+                write_ok = false;
+                continue;
+            };
+            const escaped_command = escapeFieldAlloc(self.alloc, e.command) catch {
+                self.alloc.free(escaped_cwd);
+                write_ok = false;
+                continue;
+            };
+            const line = std.fmt.allocPrint(self.alloc, "{d}\t{d}\t{d}\t{s}\t{s}\n", .{
+                e.timestamp, e.exit_code, e.duration_ms, escaped_cwd, escaped_command,
+            }) catch {
+                self.alloc.free(escaped_command);
+                self.alloc.free(escaped_cwd);
+                write_ok = false;
+                continue;
+            };
+
+            const written = posix.write(out.handle, line) catch {
+                write_ok = false;
+                self.alloc.free(line);
+                self.alloc.free(escaped_command);
+                self.alloc.free(escaped_cwd);
+                continue;
+            };
+            if (written != line.len) write_ok = false;
+            self.alloc.free(line);
+            self.alloc.free(escaped_command);
+            self.alloc.free(escaped_cwd);
         }
         if (write_ok) {
             posix.fsync(out.handle) catch {
