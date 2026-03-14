@@ -660,6 +660,7 @@ pub const Shell = struct {
 
     fn evalCmd(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len == 0) return;
+        var build_ok = true;
 
         const saved_expansion_count = self.cmd_expansions.items.len;
         defer {
@@ -697,28 +698,34 @@ pub const Shell = struct {
                             }
                         }
                     }
-                    argv_list.append(self.allocator, expanded) catch {};
+                    argv_list.append(self.allocator, expanded) catch {
+                        build_ok = false;
+                    };
                 },
                 .list => |items| {
                     if (items.len == 0) continue;
                     switch (items[0]) {
                         .tag => |t| {
                             if (isRedirTag(t)) {
-                                self.collectRedirect(t, items[1..], source, &redir_list);
+                                if (!self.collectRedirect(t, items[1..], source, &redir_list)) build_ok = false;
                                 continue;
                             }
                             if (t == .capture) {
                                 const val = self.evalCapture(items[1..], source);
-                                if (val) |v| argv_list.append(self.allocator, v) catch {};
+                                if (val) |v| argv_list.append(self.allocator, v) catch {
+                                    build_ok = false;
+                                };
                                 continue;
                             }
                             if (isHeredocTag(t)) {
-                                self.collectHeredocRedirect(t, items[1..], source, &redir_list);
+                                if (!self.collectHeredocRedirect(t, items[1..], source, &redir_list)) build_ok = false;
                                 continue;
                             }
                             if (t == .procsub_in or t == .procsub_out) {
                                 if (self.spawnProcSub(t, items[1..], source, &procsub_fds)) |path| {
-                                    argv_list.append(self.allocator, path) catch {};
+                                    argv_list.append(self.allocator, path) catch {
+                                        build_ok = false;
+                                    };
                                 }
                                 continue;
                             }
@@ -742,18 +749,35 @@ pub const Shell = struct {
                 if (li == idx) break true;
             } else false;
             if (is_literal) {
-                expanded_argv.append(self.allocator, arg) catch {};
+                expanded_argv.append(self.allocator, arg) catch {
+                    build_ok = false;
+                };
             } else if (isRegexGlob(arg)) {
                 const before = expanded_argv.items.len;
                 expandRegexGlob(self.allocator, arg, &expanded_argv);
-                for (expanded_argv.items[before..]) |s| owned_expansions.append(self.allocator, s) catch {};
+                for (expanded_argv.items[before..]) |s| {
+                    owned_expansions.append(self.allocator, s) catch {
+                        build_ok = false;
+                    };
+                }
             } else if (hasGlobChars(arg)) {
                 const before = expanded_argv.items.len;
                 expandGlob(self.allocator, arg, &expanded_argv);
-                for (expanded_argv.items[before..]) |s| owned_expansions.append(self.allocator, s) catch {};
+                for (expanded_argv.items[before..]) |s| {
+                    owned_expansions.append(self.allocator, s) catch {
+                        build_ok = false;
+                    };
+                }
             } else {
-                expanded_argv.append(self.allocator, arg) catch {};
+                expanded_argv.append(self.allocator, arg) catch {
+                    build_ok = false;
+                };
             }
+        }
+        if (!build_ok) {
+            std.debug.print("slash: command setup failed (allocation error)\n", .{});
+            self.last_exit = 1;
+            return;
         }
         var argv = expanded_argv.items;
         if (argv.len == 0) return;
@@ -770,8 +794,16 @@ pub const Shell = struct {
         }
 
         if (ok_mode) {
-            redir_list.append(self.allocator, .{ .tag = .redir_out, .target = "/dev/null" }) catch {};
-            redir_list.append(self.allocator, .{ .tag = .redir_err, .target = "/dev/null" }) catch {};
+            redir_list.append(self.allocator, .{ .tag = .redir_out, .target = "/dev/null" }) catch {
+                std.debug.print("slash: command setup failed (allocation error)\n", .{});
+                self.last_exit = 1;
+                return;
+            };
+            redir_list.append(self.allocator, .{ .tag = .redir_err, .target = "/dev/null" }) catch {
+                std.debug.print("slash: command setup failed (allocation error)\n", .{});
+                self.last_exit = 1;
+                return;
+            };
         }
         const redirs = redir_list.items;
         const has_redirs = redirs.len > 0;
@@ -921,40 +953,41 @@ pub const Shell = struct {
         }
     }
 
-    fn collectRedirect(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, list: *std.ArrayList(Redirect)) void {
+    fn collectRedirect(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, list: *std.ArrayList(Redirect)) bool {
         if (tag == .redir_dup) {
-            list.append(self.allocator, .{ .tag = tag, .src_fd = posix.STDERR_FILENO, .dest_fd = posix.STDOUT_FILENO }) catch {};
-            return;
+            list.append(self.allocator, .{ .tag = tag, .src_fd = posix.STDERR_FILENO, .dest_fd = posix.STDOUT_FILENO }) catch return false;
+            return true;
         }
         if (tag == .redir_fd_dup) {
-            if (args.len < 1) return;
-            const token = self.sexpToStr(args[0], source) orelse return;
-            const parsed = parseFdDupToken(token) orelse return;
+            if (args.len < 1) return true;
+            const token = self.sexpToStr(args[0], source) orelse return true;
+            const parsed = parseFdDupToken(token) orelse return true;
             list.append(self.allocator, .{
                 .tag = tag,
                 .src_fd = parsed.src_fd,
                 .dest_fd = parsed.dest_fd,
-            }) catch {};
-            return;
+            }) catch return false;
+            return true;
         }
         if (tag == .redir_fd_out or tag == .redir_fd_in) {
-            if (args.len < 2) return;
-            const fd_token = self.sexpToStr(args[0], source) orelse return;
-            const fd = parseFdToken(fd_token) orelse return;
-            const target = self.sexpToStr(args[1], source) orelse return;
+            if (args.len < 2) return true;
+            const fd_token = self.sexpToStr(args[0], source) orelse return true;
+            const fd = parseFdToken(fd_token) orelse return true;
+            const target = self.sexpToStr(args[1], source) orelse return true;
             list.append(self.allocator, .{
                 .tag = tag,
                 .target = target,
                 .src_fd = fd,
-            }) catch {};
-            return;
+            }) catch return false;
+            return true;
         }
-        if (args.len < 1) return;
+        if (args.len < 1) return true;
         const target = if (tag == .herestring)
             self.sexpToExpandedStr(args[0], source)
         else
-            self.sexpToStr(args[0], source) orelse return;
-        list.append(self.allocator, .{ .tag = tag, .target = target }) catch {};
+            self.sexpToStr(args[0], source) orelse return true;
+        list.append(self.allocator, .{ .tag = tag, .target = target }) catch return false;
+        return true;
     }
 
     fn applyRedirects(alloc: Allocator, redirs: []const Redirect) bool {
@@ -2099,6 +2132,7 @@ pub const Shell = struct {
 
     fn evalExec(self: *Shell, args: []const Sexp, source: []const u8) void {
         if (args.len < 1) return;
+        var build_ok = true;
 
         var argv_list: std.ArrayList([]const u8) = .empty;
         defer argv_list.deinit(self.allocator);
@@ -2117,28 +2151,34 @@ pub const Shell = struct {
                 .src => |s| {
                     const text = source[s.pos..][0..s.len];
                     if (self.appendBareArgvVar(&argv_list, null, text)) continue;
-                    argv_list.append(self.allocator, self.expandToken(text)) catch {};
+                    argv_list.append(self.allocator, self.expandToken(text)) catch {
+                        build_ok = false;
+                    };
                 },
                 .list => |items| {
                     if (items.len == 0) continue;
                     switch (items[0]) {
                         .tag => |tag| {
                             if (isRedirTag(tag)) {
-                                self.collectRedirect(tag, items[1..], source, &redir_list);
+                                if (!self.collectRedirect(tag, items[1..], source, &redir_list)) build_ok = false;
                                 continue;
                             }
                             if (tag == .capture) {
                                 const val = self.evalCapture(items[1..], source);
-                                if (val) |v| argv_list.append(self.allocator, v) catch {};
+                                if (val) |v| argv_list.append(self.allocator, v) catch {
+                                    build_ok = false;
+                                };
                                 continue;
                             }
                             if (isHeredocTag(tag)) {
-                                self.collectHeredocRedirect(tag, items[1..], source, &redir_list);
+                                if (!self.collectHeredocRedirect(tag, items[1..], source, &redir_list)) build_ok = false;
                                 continue;
                             }
                             if (tag == .procsub_in or tag == .procsub_out) {
                                 if (self.spawnProcSub(tag, items[1..], source, &procsub_fds)) |path| {
-                                    argv_list.append(self.allocator, path) catch {};
+                                    argv_list.append(self.allocator, path) catch {
+                                        build_ok = false;
+                                    };
                                 }
                                 continue;
                             }
@@ -2148,6 +2188,11 @@ pub const Shell = struct {
                 },
                 else => {},
             }
+        }
+        if (!build_ok) {
+            std.debug.print("slash: exec: setup failed (allocation error)\n", .{});
+            self.last_exit = 1;
+            return;
         }
 
         const argv = argv_list.items;
@@ -2947,24 +2992,33 @@ pub const Shell = struct {
         };
     }
 
-    fn collectHeredocRedirect(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, list: *std.ArrayList(Redirect)) void {
+    fn collectHeredocRedirect(self: *Shell, tag: Tag, args: []const Sexp, source: []const u8, list: *std.ArrayList(Redirect)) bool {
         var content: std.ArrayListUnmanaged(u8) = .{};
+        defer content.deinit(self.allocator);
         const interpolate = (tag == .heredoc_interp or tag == .heredoc_lang);
         const start: usize = if (tag == .heredoc_lang and args.len > 0) 1 else 0;
         var first = true;
         for (args[start..]) |body| {
-            if (!first) content.append(self.allocator, '\n') catch {};
+            if (!first) content.append(self.allocator, '\n') catch return false;
             first = false;
             const text = self.sexpToStr(body, source) orelse continue;
             if (interpolate) {
                 self.expandInto(&content, text);
             } else {
-                content.appendSlice(self.allocator, text) catch {};
+                content.appendSlice(self.allocator, text) catch return false;
             }
         }
-        const result = content.toOwnedSlice(self.allocator) catch "";
-        self.cmd_expansions.append(self.allocator, result) catch {};
-        list.append(self.allocator, .{ .tag = .herestring, .target = result }) catch {};
+        const result = content.toOwnedSlice(self.allocator) catch return false;
+        self.cmd_expansions.append(self.allocator, result) catch {
+            self.allocator.free(result);
+            return false;
+        };
+        list.append(self.allocator, .{ .tag = .herestring, .target = result }) catch {
+            _ = self.cmd_expansions.pop();
+            self.allocator.free(result);
+            return false;
+        };
+        return true;
     }
 
     fn expandInto(self: *Shell, buf: *std.ArrayListUnmanaged(u8), text: []const u8) void {
