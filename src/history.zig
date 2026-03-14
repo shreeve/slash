@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const c = @cImport(@cInclude("sys/file.h"));
 
 const MAX_ENTRIES = 50_000;
 
@@ -23,7 +24,9 @@ pub const Db = struct {
     alloc: std.mem.Allocator,
     entries: std.ArrayListUnmanaged(Entry),
     file: ?std.fs.File,
+    lock_file: ?std.fs.File,
     path: []const u8,
+    lock_path: []const u8,
 
     pub fn open() !*Db {
         return openWith(std.heap.page_allocator);
@@ -40,27 +43,26 @@ pub const Db = struct {
         const path_tmp = std.fmt.bufPrint(&path_buf, "{s}/.slash/history", .{home}) catch return error.PathTooLong;
         const path = alloc.dupe(u8, path_tmp) catch return error.OutOfMemory;
         errdefer alloc.free(path);
+        var lock_path_buf: [4096]u8 = undefined;
+        const lock_path_tmp = std.fmt.bufPrint(&lock_path_buf, "{s}/.slash/history.lock", .{home}) catch return error.PathTooLong;
+        const lock_path = alloc.dupe(u8, lock_path_tmp) catch return error.OutOfMemory;
+        errdefer alloc.free(lock_path);
 
         const self = alloc.create(Db) catch return error.OutOfMemory;
         self.* = .{
             .alloc = alloc,
             .entries = .{},
             .file = null,
+            .lock_file = null,
             .path = path,
+            .lock_path = lock_path,
         };
 
         self.load();
         self.prune();
 
-        self.file = blk: {
-            const path_z = std.posix.toPosixPath(path) catch break :blk null;
-            const fd = posix.openatZ(posix.AT.FDCWD, &path_z, .{
-                .ACCMODE = .WRONLY,
-                .CREAT = true,
-                .APPEND = true,
-            }, 0o600) catch break :blk null;
-            break :blk std.fs.File{ .handle = fd };
-        };
+        self.lock_file = openLockFile(lock_path);
+        self.file = openHistoryAppendFile(path);
         if (self.file) |f| {
             posix.fchmod(f.handle, 0o600) catch {};
         }
@@ -70,12 +72,14 @@ pub const Db = struct {
 
     pub fn close(self: *Db) void {
         if (self.file) |f| f.close();
+        if (self.lock_file) |f| f.close();
         for (self.entries.items) |e| {
             self.alloc.free(e.cwd);
             self.alloc.free(e.command);
         }
         self.entries.deinit(self.alloc);
         self.alloc.free(self.path);
+        self.alloc.free(self.lock_path);
         self.alloc.destroy(self);
     }
 
@@ -90,26 +94,34 @@ pub const Db = struct {
         defer self.alloc.free(escaped_command);
         var persisted = true;
         if (self.file) |f| {
-            const line = std.fmt.allocPrint(self.alloc, "{d}\t{d}\t{d}\t{s}\t{s}\n", .{
-                now, exit_code, duration_ms, escaped_cwd, escaped_command,
-            }) catch return;
-            defer self.alloc.free(line);
-            const written: usize = blk: {
-                break :blk posix.write(f.handle, line) catch {
-                    persisted = false;
-                    break :blk 0;
+            if (!self.lockHistory()) {
+                persisted = false;
+            } else {
+                defer self.unlockHistory();
+                const line = std.fmt.allocPrint(self.alloc, "{d}\t{d}\t{d}\t{s}\t{s}\n", .{
+                    now, exit_code, duration_ms, escaped_cwd, escaped_command,
+                }) catch return;
+                defer self.alloc.free(line);
+                const written: usize = blk: {
+                    break :blk posix.write(f.handle, line) catch {
+                        persisted = false;
+                        break :blk 0;
+                    };
                 };
-            };
-            if (written != line.len) persisted = false;
-            if (persisted) {
-                posix.fsync(f.handle) catch {
-                    persisted = false;
-                };
+                if (written != line.len) persisted = false;
+                if (persisted) {
+                    posix.fsync(f.handle) catch {
+                        persisted = false;
+                    };
+                }
             }
             if (!persisted) {
+                if (self.lock_file == null)
+                    std.debug.print("slash: history: lock unavailable, disabling persistent history for this session\n", .{})
+                else
+                    std.debug.print("slash: history: append failed, disabling persistent history for this session\n", .{});
                 f.close();
                 self.file = null;
-                std.debug.print("slash: history: append failed, disabling persistent history for this session\n", .{});
             }
         }
         const cwd_copy = self.alloc.dupe(u8, cwd) catch return;
@@ -127,37 +139,44 @@ pub const Db = struct {
         if (self.entries.items.len > MAX_ENTRIES + 1024) self.prune();
     }
 
-    pub fn search(self: *const Db, alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 {
-        var results: std.ArrayList([]const u8) = .empty;
-        var seen = std.StringHashMap(void).init(alloc);
-        defer seen.deinit();
-        var i = self.entries.items.len;
-        while (i > 0) {
-            i -= 1;
-            const cmd = self.entries.items[i].command;
-            if (query.len > 0 and !containsSubstring(cmd, query)) continue;
-            if (seen.contains(cmd)) continue;
-            const dupe = alloc.dupe(u8, cmd) catch continue;
-            results.append(alloc, dupe) catch {
-                alloc.free(dupe);
-                continue;
-            };
-            seen.put(dupe, {}) catch {};
-            if (results.items.len >= limit) break;
-        }
-        return results.toOwnedSlice(alloc) catch &.{};
+    fn lockHistory(self: *Db) bool {
+        const lock_file = self.lock_file orelse return false;
+        return c.flock(lock_file.handle, c.LOCK_EX) == 0;
     }
 
-    pub fn suggest(self: *const Db, _: std.mem.Allocator, prefix: []const u8) ?[]const u8 {
-        if (prefix.len < 2) return null;
-        var i = self.entries.items.len;
-        while (i > 0) {
-            i -= 1;
-            const cmd = self.entries.items[i].command;
-            if (cmd.len > prefix.len and std.mem.startsWith(u8, cmd, prefix))
-                return cmd;
+    fn unlockHistory(self: *Db) void {
+        if (self.lock_file) |lock_file| {
+            _ = c.flock(lock_file.handle, c.LOCK_UN);
         }
-        return null;
+    }
+
+    fn openHistoryAppendFile(path: []const u8) ?std.fs.File {
+        const path_z = std.posix.toPosixPath(path) catch return null;
+        const fd = posix.openatZ(posix.AT.FDCWD, &path_z, .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+            .APPEND = true,
+        }, 0o600) catch return null;
+        return std.fs.File{ .handle = fd };
+    }
+
+    fn openLockFile(path: []const u8) ?std.fs.File {
+        const path_z = std.posix.toPosixPath(path) catch return null;
+        const fd = posix.openatZ(posix.AT.FDCWD, &path_z, .{
+            .ACCMODE = .WRONLY,
+            .CREAT = true,
+        }, 0o600) catch return null;
+        return std.fs.File{ .handle = fd };
+    }
+
+    fn reopenHistoryFile(self: *Db) void {
+        if (self.file) |f| f.close();
+        self.file = openHistoryAppendFile(self.path);
+        if (self.file) |f| {
+            posix.fchmod(f.handle, 0o600) catch {};
+        } else {
+            std.debug.print("slash: history: failed to reopen history file after rewrite\n", .{});
+        }
     }
 
     fn load(self: *Db) void {
@@ -218,6 +237,12 @@ pub const Db = struct {
     }
 
     fn rewrite(self: *Db) void {
+        if (!self.lockHistory()) {
+            std.debug.print("slash: history: lock acquisition failed for rewrite\n", .{});
+            return;
+        }
+        defer self.unlockHistory();
+
         const tmp = std.fmt.allocPrint(self.alloc, "{s}.tmp", .{self.path}) catch return;
         defer self.alloc.free(tmp);
         const out = std.fs.cwd().createFile(tmp, .{ .mode = 0o600 }) catch return;
@@ -253,12 +278,46 @@ pub const Db = struct {
                 return;
             };
             syncParentDir(self.path);
+            self.reopenHistoryFile();
         } else {
             std.fs.cwd().deleteFile(tmp) catch {
                 std.debug.print("slash: history: failed to clean temporary history file\n", .{});
             };
         }
     }
+    pub fn search(self: *const Db, alloc: std.mem.Allocator, query: []const u8, limit: usize) [][]const u8 {
+        var results: std.ArrayList([]const u8) = .empty;
+        var seen = std.StringHashMap(void).init(alloc);
+        defer seen.deinit();
+        var i = self.entries.items.len;
+        while (i > 0) {
+            i -= 1;
+            const cmd = self.entries.items[i].command;
+            if (query.len > 0 and !containsSubstring(cmd, query)) continue;
+            if (seen.contains(cmd)) continue;
+            const dupe = alloc.dupe(u8, cmd) catch continue;
+            results.append(alloc, dupe) catch {
+                alloc.free(dupe);
+                continue;
+            };
+            seen.put(dupe, {}) catch {};
+            if (results.items.len >= limit) break;
+        }
+        return results.toOwnedSlice(alloc) catch &.{};
+    }
+
+    pub fn suggest(self: *const Db, _: std.mem.Allocator, prefix: []const u8) ?[]const u8 {
+        if (prefix.len < 2) return null;
+        var i = self.entries.items.len;
+        while (i > 0) {
+            i -= 1;
+            const cmd = self.entries.items[i].command;
+            if (cmd.len > prefix.len and std.mem.startsWith(u8, cmd, prefix))
+                return cmd;
+        }
+        return null;
+    }
+
 };
 
 fn syncParentDir(path: []const u8) void {
@@ -330,16 +389,20 @@ test "record keeps in-memory history when persistence write fails" {
         .alloc = std.testing.allocator,
         .entries = .{},
         .file = read_only,
+        .lock_file = null,
         .path = try std.testing.allocator.dupe(u8, "/tmp/.slash-history-test"),
+        .lock_path = try std.testing.allocator.dupe(u8, "/tmp/.slash-history-test.lock"),
     };
     defer {
         if (db.file) |f| f.close();
+        if (db.lock_file) |f| f.close();
         for (db.entries.items) |e| {
             std.testing.allocator.free(e.cwd);
             std.testing.allocator.free(e.command);
         }
         db.entries.deinit(std.testing.allocator);
         std.testing.allocator.free(db.path);
+        std.testing.allocator.free(db.lock_path);
     }
 
     db.record("echo hi", "/tmp", 0, 1);
