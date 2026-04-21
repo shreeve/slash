@@ -1,0 +1,8 @@
+sequence
+  item
+    command
+      exe grep
+      arg foo
+      redir read target=in.txt
+      redir write target=out.txt
+      redir dup from_fd=2 to_fd=1

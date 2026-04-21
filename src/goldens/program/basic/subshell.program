@@ -1,0 +1,12 @@
+sequence
+  item
+    subshell
+      sequence
+        item next=always
+          command
+            exe cd
+            arg /tmp
+        item
+          command
+            exe ls
+      redir write target=out.txt

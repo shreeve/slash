@@ -1,0 +1,12 @@
+sequence
+  item
+    pipeline
+      command
+        exe bare ls
+        arg bare -la
+      command
+        exe bare grep
+        arg bare zig
+      command
+        exe bare wc
+        arg bare -l

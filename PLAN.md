@@ -128,7 +128,7 @@ Ordered stages connected by pipes. Stages are runnable `Program` nodes (typicall
 ### 3.5 `Sequence` — ordered programs with separators
 
 ```
-Sequence { items: [{op_before: ?Op, program}] }   where Op ∈ {always, and_then, or_else}
+Sequence { items: [{program, next_op: ?Op}] }   where Op ∈ {always, and_then, or_else}
 ```
 
 Flat linear list with `;`, `&&`, `||` separators. Left-to-right, short-circuit for `&&` and `||`.
@@ -356,13 +356,15 @@ pub const WordShape = struct {
     span: Span,
 };
 
+pub const Flavor = enum { bare, single_quoted, double_quoted };
+
 pub const WordPartShape = union(enum) {
-    text: struct { bytes: []const u8, quoted: bool, span: Span },
-    variable: struct { name: []const u8, quoted: bool, span: Span },
-    command_subst: struct { body: *const Shape, quoted: bool, span: Span },
+    text: struct { bytes: []const u8, flavor: Flavor, span: Span },
+    variable: struct { name: []const u8, flavor: Flavor, span: Span },
+    command_subst: struct { body: *const Shape, flavor: Flavor, span: Span },
     process_subst_in: struct { body: *const Shape, span: Span },   // <(...)
     process_subst_out: struct { body: *const Shape, span: Span },  // >(...)
-    glob: struct { pattern: []const u8, quoted: bool, span: Span },
+    glob: struct { pattern: []const u8, flavor: Flavor, span: Span },
 };
 
 pub const RedirectShape = struct {
@@ -403,8 +405,8 @@ pub const SequenceShape = struct {
 };
 
 pub const SequenceItemShape = struct {
-    op_before: ?enum { always, and_then, or_else },
     program: Shape,
+    next_op: ?enum { always, and_then, or_else },
 };
 
 pub const SubshellShape = struct {
@@ -526,8 +528,8 @@ pub const Sequence = struct {
 };
 
 pub const SequenceItem = struct {
-    op_before: ?enum { always, and_then, or_else },
     program: *const Program,
+    next_op: ?enum { always, and_then, or_else },
 };
 
 pub const Program = union(enum) {
@@ -710,8 +712,7 @@ Assume `pipefail = on` and `**/*.md` parses as a word with a glob part.
 ```
 sequence span=0..58
   items = [
-    { op_before = null,
-      program = pipeline span=0..42 {
+    { program = pipeline span=0..42 {
         pipefail = true,
         stages = [
           command span=0..19 {
@@ -728,12 +729,13 @@ sequence span=0..58
           },
         ],
       },
+      next_op = .or_else,
     },
-    { op_before = .or_else,
-      program = command span=46..58 {
+    { program = command span=46..58 {
         exe  = word("echo"),
         args = [ word("no"), word("matches") ],
       },
+      next_op = null,
     },
   ]
 ```
@@ -743,8 +745,7 @@ sequence span=0..58
 ```
 sequence {
   items = [
-    { op_before = null,
-      program = &pipeline {
+    { program = &pipeline {
         pipefail = true,
         stages = [
           &command {
@@ -764,13 +765,14 @@ sequence {
           },
         ],
       },
+      next_op = .or_else,
     },
-    { op_before = .or_else,
-      program = &command {
+    { program = &command {
         exe = Word{text="echo"},
         args = [Word{text="no"}, Word{text="matches"}],
         env = [], cwd = null, redirects = [],
       },
+      next_op = null,
     },
   ],
 }
