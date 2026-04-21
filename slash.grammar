@@ -1,0 +1,229 @@
+# ==============================================================================
+# slash.grammar — Phase 1 surface
+# ==============================================================================
+#
+# Lexer and parser for the Phase 1 subset of Slash. See PLAN.md §10.
+#
+# Generate: /Users/shreeve/Data/Code/nexus/bin/nexus slash.grammar src/parser.zig
+#
+# Phase 1 scope (commitments kept; everything else is deferred to later phases):
+#   - simple commands, bare and quoted words
+#   - pipelines with `|`
+#   - sequences with `;`, `&&`, `||`
+#   - subshells with `(...)` and optional trailing redirects
+#   - detached execution with trailing `&`
+#   - redirects: `<`, `>`, `>>`, `n<`, `n>`, `n>>`, `n>&m`, `n<&m`, `&>`, `&>>`
+#
+# Out of Phase 1 (rejected by parser, delivered in Phases 3+):
+#   heredocs, process substitution, variables, control forms,
+#   user-defined `cmd`, env-prefix assignments, line continuation,
+#   word concatenation across fragments, glob as a syntactic category.
+# ==============================================================================
+
+@lexer
+
+# ------------------------------------------------------------------------------
+# Token types
+# ------------------------------------------------------------------------------
+
+tokens
+    # literals — Nexus recognizes `ident`, `integer`, `string_sq`, `string_dq`
+    # as well-known token names and generates matchRules dispatch for each.
+    ident           # bare word (letters, digits, shell-safe punctuation)
+    integer         # purely-numeric run (subset of ident, but needed so that
+                    # fd-prefixed redirect rules can peel a leading number)
+    string_sq       # 'single quoted'
+    string_dq       # "double quoted"
+
+    # grouping
+    lparen          # (
+    rparen          # )
+
+    # sequence separators
+    semi            # ; or newline (run of newlines collapses to one)
+    and_and         # &&
+    or_or           # ||
+    amp             # & (backgrounding)
+
+    # pipes
+    pipe            # |
+
+    # redirects — default fds
+    lt              # <
+    gt              # >
+    gt_gt           # >>
+    amp_gt          # &>
+    amp_gt_gt       # &>>
+
+    # redirects — explicit fd prefix (N>>file deferred to Phase 3)
+    fd_lt           # N<
+    fd_gt           # N>
+    fd_dup_out      # N>&M
+    fd_dup_in       # N<&M
+
+    # trivia / sentinel — `comment` is a well-known Nexus name that triggers
+    # a dedicated scanner; Nexus handles it as trivia in the prefix scanner.
+    comment
+    err
+    eof
+
+# ------------------------------------------------------------------------------
+# Lexer rules
+# ------------------------------------------------------------------------------
+#
+# Order matters. Rules declared earlier take precedence when patterns overlap.
+# The fd-prefixed redirect compound patterns MUST appear before the word rule
+# so that e.g. `2>` lexes as fd_gt instead of getting absorbed into `word`.
+
+# Multi-char fixed operators (longest first)
+"&&"                                            → and_and
+"||"                                            → or_or
+"&>>"                                           → amp_gt_gt
+"&>"                                            → amp_gt
+">>"                                            → gt_gt
+
+# fd-prefixed compound operators. Nexus recognizes `[0-9]+` followed by
+# single-char operator literals as a post-scanNumber peek and generates the
+# appropriate lexer dispatch; using `'>'`/`'<'`/`'&'` here (not `">"`/`"<"`)
+# matches that recognition path. N>>file is deliberately deferred.
+[0-9]+ '>' '&' [0-9]+                           → fd_dup_out
+[0-9]+ '<' '&' [0-9]+                           → fd_dup_in
+[0-9]+ '>'                                      → fd_gt
+[0-9]+ '<'                                      → fd_lt
+
+# Single-char operators
+">"                                             → gt
+"<"                                             → lt
+"|"                                             → pipe
+";"                                             → semi
+"&"                                             → amp
+"("                                             → lparen
+")"                                             → rparen
+
+# String literals
+"'" ([^'\n] | "''")* "'"                        → string_sq
+'"' ([^"\\\n] | "\\" .)* '"'                    → string_dq
+
+# Comments — the well-known `comment` token triggers Nexus's dedicated
+# comment scanner. Nexus skips comment tokens in the prefix scanner, so they
+# never reach the parser. The trailing newline is NOT consumed, so it still
+# separates sequences.
+'#' [^\n]*                                      → comment
+
+# Newlines are sequence separators (equivalent to `;` at this layer)
+"\r\n"                                          → semi
+'\n'                                            → semi
+'\r'                                            → semi
+
+# Pure integer (must come before `ident` so fd-prefix redirect rules, which
+# are already above, are the only things that can prefix-consume a digit run).
+# Any purely-numeric token is valid as a shell word; the parser accepts it
+# alongside identifiers.
+[0-9]+                                          → integer
+
+# Bare word — a positive ASCII class of shell-safe characters, leading with
+# non-digit. Nexus tracks preceding horizontal whitespace count in `Token.pre`,
+# so no explicit whitespace rule is needed. Non-ASCII bytes, backslash-escape
+# inside bare words, and adjacent-fragment concatenation (foo"bar") are
+# deliberately deferred to Phase 3 — use quoted strings for anything outside
+# this class.
+[A-Za-z_./\-+=~@%!*?:,^$][A-Za-z0-9_./\-+=~@%!*?:,^$]*  → ident
+
+# Fallback — unrecognized byte
+.                                               → err
+
+
+@parser
+
+@lang      = "slash"
+@conflicts = 0
+
+# ------------------------------------------------------------------------------
+# Top level
+# ------------------------------------------------------------------------------
+
+program!        = sequence                              → 1
+
+# A sequence is a first item plus zero or more tails. Each tail encodes:
+#   - the kind of separator that preceded it: `;`/newline, `&&`, `||`, `&`
+#   - the item that follows, or `_` if the separator is terminal (trailing)
+#
+# `&` is encoded as `(seq_bg <item-or-nil>)`. shape.zig interprets `seq_bg`
+# by wrapping the PRECEDING item as detached and, if the bound element is
+# non-nil, appending it as the next item (with default `;` semantics). This
+# keeps the grammar LR(1)-clean without needing action-level rewriting of
+# previously-reduced items. See PLAN.md §7 Rule 14.
+
+sequence        = sequence_item sequence_tail*          → (sequence 1 ...2)
+
+sequence_item   = pipeline                              → 1
+
+sequence_tail   = SEMI    sequence_item                 → (seq_always 2)
+                | SEMI                                  → (seq_always _)
+                | AND_AND sequence_item                 → (seq_and 2)
+                | OR_OR   sequence_item                 → (seq_or 2)
+                | AMP     sequence_item                 → (seq_bg 2)
+                | AMP                                   → (seq_bg _)
+
+# ------------------------------------------------------------------------------
+# Pipelines
+# ------------------------------------------------------------------------------
+
+pipeline        = stage                                 → 1
+                | stage pipe_tail+                      → (pipeline 1 ...2)
+
+pipe_tail       = PIPE stage                            → 2
+
+stage           = simple_command
+                | subshell
+
+# ------------------------------------------------------------------------------
+# Subshells
+# ------------------------------------------------------------------------------
+#
+# A subshell may carry redirects on its body. PLAN.md §7 Rule 23 normalizes
+# compound-command redirects through subshells; here we preserve them in the
+# Shape for the lowerer to carry forward.
+
+subshell        = LPAREN sequence RPAREN redirect_list? → (subshell 2 4)
+
+redirect_list   = redirect+                             → (redirects ...1)
+
+# ------------------------------------------------------------------------------
+# Simple commands
+# ------------------------------------------------------------------------------
+#
+# A simple command requires at least one word (the exe). A redirect-only form
+# like `> file` is intentionally rejected in Phase 1.
+
+simple_command  = word_atom part*                       → (command 1 ...2)
+
+part            = word_atom
+                | redirect
+
+word_atom       = IDENT                                 → (word 1)
+                | INTEGER                               → (word 1)
+                | STRING_SQ                             → (word 1)
+                | STRING_DQ                             → (word 1)
+
+# ------------------------------------------------------------------------------
+# Redirects
+# ------------------------------------------------------------------------------
+#
+# Each redirect kind uses its own head tag. shape.zig dispatches on the tag.
+# The `_fd` suffix indicates an explicit numeric fd prefix (e.g. `2>`) whose
+# original text can be recovered by slicing Source.text at the token's
+# .src.pos/.len. Forms without the suffix use the default fd for the op.
+# Dup forms (`N>&M`, `N<&M`) are single-token and carry both fds in their
+# source text.
+
+redirect        = LT          word_atom                 → (redir_read 2)
+                | FD_LT       word_atom                 → (redir_read_fd 1 2)
+                | GT          word_atom                 → (redir_write 2)
+                | FD_GT       word_atom                 → (redir_write_fd 1 2)
+                | GT_GT       word_atom                 → (redir_append 2)
+                | AMP_GT      word_atom                 → (redir_both 2)
+                | AMP_GT_GT   word_atom                 → (redir_both_append 2)
+                | FD_DUP_OUT                            → (redir_dup_out 1)
+                | FD_DUP_IN                             → (redir_dup_in 1)
+
