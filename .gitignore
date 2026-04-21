@@ -1,4 +1,4 @@
 .DS_Store
-/.zig-cache
-bin/slash
-notes.txt
+.zig-cache/
+zig-out/
+bin/

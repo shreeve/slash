@@ -1,0 +1,20 @@
+.{
+    .name = .slash,
+    .version = "0.0.0",
+    .fingerprint = 0x7ce47f15c15a83c,
+
+    // Slash is written against Zig 0.16.0 APIs (Juicy Main, std.Io, std.process.Init,
+    // new writer/reader interface). Older toolchains hard-fail rather than producing
+    // cryptic partial-compile errors.
+    .minimum_zig_version = "0.16.0",
+
+    .dependencies = .{},
+
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+        "PLAN.md",
+    },
+}
