@@ -450,6 +450,44 @@ const cases: []const Case = &.{
         .source = "x=plain; echo \"${x}\"",
         .expect = .{ .exit_code = 0, .stdout = "plain\n" },
     },
+
+    // ---- source / . builtin ---------------------------------------------
+    //
+    // Loads another script's contents into the current session in shell
+    // context: assignments and definitions are visible after the source
+    // call returns. Failures (missing file, parse error) exit 1 with a
+    // diagnostic on stderr.
+
+    .{
+        .name = "source: assigns and emits in current session",
+        .source = "source /tmp/slash-source-fixture/basic.sl; echo got=$msg",
+        .expect = .{ .exit_code = 0, .stdout = "from-source\ngot=hello\n" },
+    },
+    .{
+        .name = "source: dot is an alias",
+        .source = ". /tmp/slash-source-fixture/basic.sl",
+        .expect = .{ .exit_code = 0, .stdout = "from-source\n" },
+    },
+    .{
+        .name = "source: vars set in script visible afterwards",
+        .source = "source /tmp/slash-source-fixture/setvars.sl; echo $a-$b",
+        .expect = .{ .exit_code = 0, .stdout = "alpha-beta\n" },
+    },
+    .{
+        .name = "source: exit status is the last statement's",
+        .source = "source /tmp/slash-source-fixture/exit7.sl",
+        .expect = .{ .exit_code = 7 },
+    },
+    .{
+        .name = "source: missing file exits 1",
+        .source = "source /tmp/slash-source-fixture/missing.sl",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "source: shebang line is skipped",
+        .source = "source /tmp/slash-source-fixture/shebang.sl",
+        .expect = .{ .exit_code = 0, .stdout = "after-shebang\n" },
+    },
 };
 
 // =============================================================================
@@ -589,6 +627,37 @@ fn teardownGlobFixture() void {
     _ = std.c.rmdir(fixture_root);
 }
 
+const source_fixture_root: [:0]const u8 = "/tmp/slash-source-fixture";
+
+fn setupSourceFixture() void {
+    teardownSourceFixture();
+    _ = std.c.mkdir(source_fixture_root, 0o755);
+    writeFile(
+        "/tmp/slash-source-fixture/basic.sl",
+        "msg=hello\necho from-source\n",
+    );
+    writeFile(
+        "/tmp/slash-source-fixture/setvars.sl",
+        "a=alpha\nb=beta\n",
+    );
+    writeFile(
+        "/tmp/slash-source-fixture/exit7.sl",
+        "/bin/sh -c 'exit 7'\n",
+    );
+    writeFile(
+        "/tmp/slash-source-fixture/shebang.sl",
+        "#!/usr/bin/env slash\necho after-shebang\n",
+    );
+}
+
+fn teardownSourceFixture() void {
+    _ = std.c.unlink("/tmp/slash-source-fixture/basic.sl");
+    _ = std.c.unlink("/tmp/slash-source-fixture/setvars.sl");
+    _ = std.c.unlink("/tmp/slash-source-fixture/exit7.sl");
+    _ = std.c.unlink("/tmp/slash-source-fixture/shebang.sl");
+    _ = std.c.rmdir(source_fixture_root);
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -596,6 +665,8 @@ fn teardownGlobFixture() void {
 test "headless v0" {
     setupGlobFixture();
     defer teardownGlobFixture();
+    setupSourceFixture();
+    defer teardownSourceFixture();
 
     const alloc = std.testing.allocator;
     var failures: u32 = 0;

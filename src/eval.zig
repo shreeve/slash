@@ -157,6 +157,13 @@ fn evalCommand(
     // cases need a child to apply redirects/env without leaking into the
     // parent shell.
     if (!ctx.in_child_context and c.redirects.len == 0 and c.env.len == 0) {
+        // `source` / `.` are special: they re-enter the parse/lower/eval
+        // pipeline on a file's contents in shell context. They can't be
+        // ordinary builtins because a builtin can't import eval without
+        // a module cycle; the dispatch happens here instead.
+        if (std.mem.eql(u8, exe_text, "source") or std.mem.eql(u8, exe_text, ".")) {
+            return try runSourceCommand(argv.items, session, ctx, sink);
+        }
         if (session.builtins.lookup(exe_text)) |b| {
             return try runShellContextBuiltin(c, b, argv.items, session);
         }
@@ -178,6 +185,85 @@ fn runShellContextBuiltin(
     const result = try b.run(argv, io, .{ .shell = session });
     session.jobs.completeZeroChild(j, result);
     return .{ .job = j, .expression_result = result };
+}
+
+/// Implementation of the `source` / `.` builtin. Reads the named file,
+/// parses, lowers, and evaluates it in shell context — no fork. The
+/// final result is the result of the last top-level statement that ran;
+/// I/O failures and parse/lower failures surface as exit 1 with a
+/// diagnostic. The sourced script sees the calling session's variables
+/// and may mutate them.
+fn runSourceCommand(
+    argv: []const []const u8,
+    session: *Session,
+    ctx: EvalContext,
+    sink: ?Sink,
+) !EvalOutcome {
+    if (argv.len < 2) {
+        const msg = "source: filename required\n";
+        _ = std.c.write(2, msg.ptr, msg.len);
+        return makeFailedOutcome(session, argv[0], .{ .exited = 2 });
+    }
+    const path = argv[1];
+
+    const src = readFileToBuffer(path, ctx.scratch) catch |err| {
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &msg_buf,
+            "source: {s}: {s}\n",
+            .{ path, @errorName(err) },
+        ) catch "source: cannot read file\n";
+        _ = std.c.write(2, msg.ptr, msg.len);
+        return makeFailedOutcome(session, argv[0], .{ .exited = 1 });
+    };
+
+    const source = diag.Source{ .name = path, .text = src };
+    const parsed = shape_mod.parse(source, ctx.scratch, sink) catch {
+        return makeFailedOutcome(session, argv[0], .{ .exited = 1 });
+    };
+    const low_ctx = program_mod.LowerContext{ .alloc = ctx.scratch, .source = source };
+    const inner_prog = program_mod.lower(parsed.root, &low_ctx, sink) catch {
+        return makeFailedOutcome(session, argv[0], .{ .exited = 1 });
+    };
+
+    return try evalProgram(inner_prog, session, ctx, sink);
+}
+
+const max_source_size: usize = 64 * 1024 * 1024;
+
+fn readFileToBuffer(path: []const u8, scratch: Allocator) ![]const u8 {
+    const path_z = try scratch.dupeZ(u8, path);
+    defer scratch.free(path_z);
+
+    const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.OpenFailed;
+    defer _ = std.c.close(fd);
+
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(scratch);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.read(fd, &chunk, chunk.len);
+        if (n < 0) {
+            const e = std.c.errno(@as(c_int, -1));
+            if (e == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (n == 0) break;
+        try buf.appendSlice(scratch, chunk[0..@intCast(n)]);
+        if (buf.items.len > max_source_size) return error.FileTooLarge;
+    }
+
+    var bytes = try buf.toOwnedSlice(scratch);
+    // Skip a leading shebang line if present.
+    if (bytes.len >= 2 and bytes[0] == '#' and bytes[1] == '!') {
+        const nl = std.mem.indexOfScalar(u8, bytes, '\n') orelse bytes.len;
+        const start = if (nl < bytes.len) nl + 1 else bytes.len;
+        const remaining = try scratch.dupe(u8, bytes[start..]);
+        scratch.free(bytes);
+        bytes = remaining;
+    }
+    return bytes;
 }
 
 fn runExternalSingle(
