@@ -175,7 +175,7 @@ fn runShellContextBuiltin(
     const j = try session.jobs.create(true, false, argv[0]);
     j.state = .running;
     const io: builtins.BuiltinIo = .{ .stdin = 0, .stdout = 1, .stderr = 2 };
-    const result = b.run(argv, io, .{ .shell = session });
+    const result = try b.run(argv, io, .{ .shell = session });
     session.jobs.completeZeroChild(j, result);
     return .{ .job = j, .expression_result = result };
 }
@@ -937,7 +937,13 @@ fn builtinChildTrampoline(raw: *const anyopaque) callconv(.c) u8 {
         .stdout = ctx.stdout,
         .stderr = ctx.stderr,
     };
-    const result = ctx.run_fn(ctx.argv, io, .child);
+    const result = ctx.run_fn(ctx.argv, io, .child) catch |err| switch (err) {
+        // Control-flow signals don't cross a child boundary. `break` /
+        // `continue` / `return` inside a forked stage just exit that
+        // child; the parent's loop or call frame is unaffected.
+        error.BreakLoop, error.ContinueLoop, error.ReturnFromCmd => Result{ .exited = 0 },
+        else => Result{ .exited = 1 },
+    };
     return result.toStatusByte();
 }
 

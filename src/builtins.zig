@@ -37,7 +37,16 @@ pub const BuiltinFn = *const fn (
     argv: []const []const u8,
     io: BuiltinIo,
     ctx: BuiltinContext,
-) Result;
+) anyerror!Result;
+
+/// Errors thrown by control-flow builtins (`break`, `continue`,
+/// `return`). Loop and call-frame evaluators catch these to redirect
+/// control without unwinding through every intermediate program node.
+pub const ControlError = error{
+    BreakLoop,
+    ContinueLoop,
+    ReturnFromCmd,
+};
 
 pub const Builtin = struct {
     name: []const u8,
@@ -69,6 +78,9 @@ pub fn init(alloc: Allocator) !BuiltinSet {
     try set.table.put(alloc, "test", .{ .name = "test", .run = testFn });
     try set.table.put(alloc, "[", .{ .name = "[", .run = testFn });
     try set.table.put(alloc, "printf", .{ .name = "printf", .run = printfFn });
+    try set.table.put(alloc, "break", .{ .name = "break", .run = breakFn });
+    try set.table.put(alloc, "continue", .{ .name = "continue", .run = continueFn });
+    try set.table.put(alloc, "return", .{ .name = "return", .run = returnFn });
     return set;
 }
 
@@ -95,7 +107,7 @@ fn writeAllToFd(fd: i32, bytes: []const u8) bool {
 // echo / true / false / pwd / exit
 // =============================================================================
 
-fn echoFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
+fn echoFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
     _ = ctx;
     var first = true;
     for (argv[1..]) |arg| {
@@ -109,21 +121,21 @@ fn echoFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
     return .{ .exited = 0 };
 }
 
-fn trueFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
+fn trueFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
     _ = argv;
     _ = io;
     _ = ctx;
     return .{ .exited = 0 };
 }
 
-fn falseFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
+fn falseFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
     _ = argv;
     _ = io;
     _ = ctx;
     return .{ .exited = 1 };
 }
 
-fn pwdFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
+fn pwdFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
     _ = argv;
     _ = ctx;
     var buf: [4096]u8 = undefined;
@@ -142,7 +154,7 @@ fn pwdFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
 /// success synchronously. The shell's top-level loop reads the request
 /// after evaluation completes. In child context, `exit N` ends the child
 /// with status N.
-fn exitFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
+fn exitFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
     var code: u8 = 0;
     if (argv.len >= 2) {
         code = std.fmt.parseInt(u8, argv[1], 10) catch {
@@ -163,7 +175,7 @@ fn exitFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
 // cd
 // =============================================================================
 
-fn cdFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
+fn cdFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
     const target_arg: []const u8 = if (argv.len >= 2) argv[1] else blk: {
         // No argument — go to $HOME.
         switch (ctx) {
@@ -223,7 +235,7 @@ fn cdFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
 // export / unset
 // =============================================================================
 
-fn exportFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
+fn exportFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
     _ = io;
     if (argv.len < 2) return .{ .exited = 0 };
     const session = switch (ctx) {
@@ -243,7 +255,7 @@ fn exportFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result
     return .{ .exited = 0 };
 }
 
-fn unsetFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
+fn unsetFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
     _ = io;
     const session = switch (ctx) {
         .shell => |s| s,
@@ -261,7 +273,7 @@ fn unsetFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result 
 // String compares: =, !=
 // Integer compares: -eq -ne -lt -le -gt -ge
 
-fn testFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
+fn testFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
     _ = ctx;
     // `[ ... ]` form requires last argv to be `]`.
     var args = argv[1..];
@@ -298,7 +310,7 @@ fn isUnaryOp(s: []const u8) bool {
     };
 }
 
-fn runUnaryTest(op: []const u8, arg: []const u8) Result {
+fn runUnaryTest(op: []const u8, arg: []const u8) !Result {
     if (std.mem.eql(u8, op, "-z")) return .{ .exited = if (arg.len == 0) 0 else 1 };
     if (std.mem.eql(u8, op, "-n")) return .{ .exited = if (arg.len > 0) 0 else 1 };
 
@@ -323,7 +335,7 @@ fn runUnaryTest(op: []const u8, arg: []const u8) Result {
     return .{ .exited = 2 };
 }
 
-fn runBinaryTest(lhs: []const u8, op: []const u8, rhs: []const u8) Result {
+fn runBinaryTest(lhs: []const u8, op: []const u8, rhs: []const u8) !Result {
     if (std.mem.eql(u8, op, "=")) return .{ .exited = if (std.mem.eql(u8, lhs, rhs)) 0 else 1 };
     if (std.mem.eql(u8, op, "!=")) return .{ .exited = if (!std.mem.eql(u8, lhs, rhs)) 0 else 1 };
 
@@ -353,7 +365,7 @@ fn runBinaryTest(lhs: []const u8, op: []const u8, rhs: []const u8) Result {
 // Minimal: `%s` and `%d` and `%%` and `\n`/`\t`/`\\` escape sequences. No
 // width/precision specifiers.
 
-fn printfFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result {
+fn printfFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
     _ = ctx;
     if (argv.len < 2) return .{ .exited = 1 };
     const fmt = argv[1];
@@ -411,4 +423,38 @@ fn printfFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) Result
     }
     if (!writeAllToFd(io.stdout, bw.buffered())) return .{ .exited = 1 };
     return .{ .exited = 0 };
+}
+
+// =============================================================================
+// break / continue / return
+// =============================================================================
+//
+// Control-flow builtins throw typed errors that loop and call-frame
+// evaluators catch. In child context (pipeline stage, subshell, detached
+// body) the error doesn't escape the child — the trampoline catches it
+// and exits the child with the optional numeric argument as the status.
+
+fn breakFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    _ = argv;
+    _ = io;
+    _ = ctx;
+    return error.BreakLoop;
+}
+
+fn continueFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    _ = argv;
+    _ = io;
+    _ = ctx;
+    return error.ContinueLoop;
+}
+
+fn returnFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    _ = io;
+    _ = ctx;
+    // `return N` would surface N to the call frame; for now we throw
+    // the typed error and let the catcher decide the status. When `cmd`
+    // definitions land, the call-frame catcher will read argv[1] off the
+    // session if needed.
+    _ = argv;
+    return error.ReturnFromCmd;
 }

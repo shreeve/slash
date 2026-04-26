@@ -300,6 +300,41 @@ const cases: []const Case = &.{
         .source = "true; echo \"last=$?\"",
         .expect = .{ .exit_code = 0, .stdout = "last=0\n" },
     },
+
+    // ---- break / continue / return ---------------------------------------
+
+    .{
+        .name = "break exits a for loop",
+        .source = "for x in a b stop c d { if test $x = stop { break }; echo $x }",
+        .expect = .{ .exit_code = 0, .stdout = "a\nb\n" },
+    },
+    .{
+        .name = "continue skips the current for iteration",
+        .source = "for x in 1 2 skip 3 4 { if test $x = skip { continue }; echo $x }",
+        .expect = .{ .exit_code = 0, .stdout = "1\n2\n3\n4\n",  },
+    },
+    .{
+        .name = "break exits while loop on first iteration",
+        .source = "while true { break }; echo after",
+        .expect = .{ .exit_code = 0, .stdout = "after\n" },
+    },
+    .{
+        // A flag-flipping pattern keeps the loop bounded without
+        // arithmetic — the body sets the flag that the condition reads.
+        .name = "while loop with body-set flag terminates cleanly",
+        .source = "f=go; while test $f = go { echo iter; f=stop }; echo done",
+        .expect = .{ .exit_code = 0, .stdout = "iter\ndone\n" },
+    },
+    .{
+        .name = "break in nested for breaks only the innermost",
+        .source = "for outer in A B { for inner in 1 2 3 { if test $inner = 2 { break }; echo $outer$inner } }",
+        .expect = .{ .exit_code = 0, .stdout = "A1\nB1\n" },
+    },
+    .{
+        .name = "continue in nested for continues only the innermost",
+        .source = "for outer in A B { for inner in 1 skip 2 { if test $inner = skip { continue }; echo $outer$inner } }",
+        .expect = .{ .exit_code = 0, .stdout = "A1\nA2\nB1\nB2\n" },
+    },
 };
 
 // =============================================================================
