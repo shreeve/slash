@@ -328,6 +328,12 @@ const LineEditor = struct {
     buf: std.ArrayListUnmanaged(u8),
     cursor: u32,
     prompt: []const u8,
+    /// Rows the previous render occupied (1 if no wrap, more if input
+    /// is long enough to wrap onto subsequent terminal rows).
+    last_rows: u32 = 1,
+    /// Which of those rows the cursor was on after the previous
+    /// render (0-indexed from the top of the rendered block).
+    last_cursor_row: u32 = 0,
 
     fn init(alloc: Allocator, prompt: []const u8) LineEditor {
         return .{
@@ -385,38 +391,109 @@ const LineEditor = struct {
         return out;
     }
 
-    /// Redraw the input line in place: cursor to column 0, write the
-    /// prompt + tokenized-and-colored buffer, clear to end of line,
-    /// then place the cursor at `cursor` printable columns past the
-    /// end of the prompt. ANSI escape sequences are zero-width on
-    /// terminal cells, so the cursor positioning stays in sync with
-    /// the user's typed-byte count.
-    fn render(self: *const LineEditor) !void {
+    /// Redraw the input line in place. Linenoise-style full repaint,
+    /// but wrap-aware: when the prompt + buffer span more than one
+    /// terminal row, the prior render's row count is remembered so
+    /// the cursor can climb back to the top of the rendered block
+    /// before writing fresh content. Without this, edits beyond the
+    /// terminal width leave stale rows above the editing line.
+    ///
+    /// ANSI escape sequences are zero-width on terminal cells, so
+    /// counting `prompt.len + cursor` printable bytes still gives
+    /// correct cursor placement after the colorized writes.
+    fn render(self: *LineEditor) !void {
+        const cols = queryTerminalCols();
+        const plen: u32 = @intCast(self.prompt.len);
+        const blen: u32 = @intCast(self.buf.items.len);
+
+        // New layout:
+        //   total_cols   = printable columns the prompt + buffer occupy
+        //   new_rows     = visual rows used (≥ 1)
+        //   new_cur_row  = row the cursor sits on (0-indexed from top)
+        //   new_cur_col  = cursor column within that row
+        const total_cols = plen + blen;
+        const new_rows = if (total_cols == 0) 1 else (total_cols + cols - 1) / cols;
+        const cursor_pos = plen + self.cursor;
+        const new_cur_row = if (cursor_pos == 0) 0 else cursor_pos / cols;
+        const new_cur_col = cursor_pos % cols;
+
         var out_buf: [16384]u8 = undefined;
         var w = std.Io.Writer.fixed(&out_buf);
+
+        // Step 1 — climb back to the TOP row of the previous render.
+        // After the last render the cursor was at `last_cursor_row`
+        // (0-indexed). We need to move up that many rows.
+        if (self.last_cursor_row > 0) {
+            try w.print("\x1b[{d}A", .{self.last_cursor_row});
+        }
         try w.writeByte('\r');
+
+        // Step 2 — clear from this point through the end of the
+        // screen. `\x1b[J` (default == `\x1b[0J`) erases from the
+        // cursor down, so any rows the previous render painted go
+        // away cleanly.
+        try w.writeAll("\x1b[J");
+
+        // Step 3 — write the new prompt + colored buffer.
         try w.writeAll(self.prompt);
         writeColored(&w, self.buf.items) catch {
-            // If the colored render runs out of buffer (~16 KB worth
-            // of input + escapes), fall back to plain bytes so the
-            // user can still see what they're typing.
+            // Colored buffer overflowed our scratch (rare — needs
+            // ~16 KB of input + escapes). Fall back to plain bytes so
+            // the user always sees what they're typing.
             w = std.Io.Writer.fixed(&out_buf);
+            if (self.last_cursor_row > 0) {
+                try w.print("\x1b[{d}A", .{self.last_cursor_row});
+            }
             try w.writeByte('\r');
+            try w.writeAll("\x1b[J");
             try w.writeAll(self.prompt);
             try w.writeAll(self.buf.items);
         };
-        // Clear to end of line.
-        try w.writeAll("\x1b[K");
-        // Move cursor to column (prompt + cursor).
-        const total_cols: usize = self.prompt.len + self.cursor;
-        try w.writeByte('\r');
-        if (total_cols > 0) {
-            try w.print("\x1b[{d}C", .{total_cols});
+
+        // Step 4 — terminal autowrap quirk: when content ends exactly
+        // at the right edge of a row, the cursor stays on the current
+        // row physically (column == cols) until another byte is
+        // written. Force a newline so subsequent vertical moves count
+        // from the correct logical row. Skip when the buffer is
+        // empty (prompt-only line).
+        const needs_phantom_nl = total_cols > 0 and total_cols % cols == 0;
+        if (needs_phantom_nl) {
+            try w.writeAll("\n\r");
         }
+
+        // Step 5 — move cursor from where it ended (after the writes)
+        // to the desired position (`new_cur_row`, `new_cur_col`). The
+        // post-write cursor sits on the LAST row of new content
+        // (or one past it if we just emitted the phantom newline).
+        const end_row: u32 = if (needs_phantom_nl) new_rows else new_rows - 1;
+        if (end_row > new_cur_row) {
+            try w.print("\x1b[{d}A", .{end_row - new_cur_row});
+        } else if (new_cur_row > end_row) {
+            try w.print("\x1b[{d}B", .{new_cur_row - end_row});
+        }
+        try w.writeByte('\r');
+        if (new_cur_col > 0) {
+            try w.print("\x1b[{d}C", .{new_cur_col});
+        }
+
         const bytes = w.buffered();
         _ = std.c.write(1, bytes.ptr, bytes.len);
+
+        // Save state for the next render to use as its starting point.
+        self.last_rows = @intCast(new_rows);
+        self.last_cursor_row = @intCast(new_cur_row);
     }
 };
+
+/// Query the terminal width for the current STDOUT. Falls back to a
+/// safe 80 columns if the ioctl fails (e.g. STDOUT isn't a tty, which
+/// shouldn't happen on the raw-mode path but doesn't hurt to guard).
+fn queryTerminalCols() u32 {
+    var ws: std.c.winsize = undefined;
+    const rc = std.c.ioctl(1, std.c.T.IOCGWINSZ, &ws);
+    if (rc < 0 or ws.col == 0) return 80;
+    return ws.col;
+}
 
 // =============================================================================
 // Syntax highlighting

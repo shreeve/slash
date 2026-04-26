@@ -29,6 +29,30 @@ extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname(fd: c_int) ?[*:0]u8;
 extern "c" fn setsid() std.c.pid_t;
 
+/// Custom `ioctl` extern with `c_ulong` request. The BSD/macOS magic
+/// value for `TIOCSWINSZ` overflows `c_int` (signed 32-bit), so the
+/// `std.c.ioctl` declaration's `c_int` request type can't hold it at
+/// compile time.
+const ioctl_with_ulong_request = struct {
+    extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+}.ioctl;
+
+/// Set the PTY's winsize so the line editor sees a known terminal
+/// width. Useful for forcing the wrap path with short test inputs.
+/// `std.c.T.IOCSWINSZ` is missing from the macOS stdlib mapping (only
+/// `IOCGWINSZ` is exposed there), so we hardcode the platform values.
+const TIOCSWINSZ: c_ulong = switch (builtin.target.os.tag) {
+    .linux => 0x5414,
+    .macos, .ios, .driverkit, .maccatalyst, .tvos, .visionos, .watchos => 0x80087467,
+    .freebsd, .netbsd, .openbsd, .dragonfly => 0x80087467,
+    else => 0x80087467,
+};
+
+fn setWinsize(master: c_int, rows: u16, cols: u16) void {
+    var ws: std.c.winsize = .{ .row = rows, .col = cols, .xpixel = 0, .ypixel = 0 };
+    _ = ioctl_with_ulong_request(master, TIOCSWINSZ, &ws);
+}
+
 const O_RDWR: c_int = 2;
 const O_NOCTTY: c_int = switch (builtin.target.os.tag) {
     .macos, .ios => 0x20000,
@@ -138,6 +162,16 @@ fn waitReadable(fd: c_int, deadline_ms: i64) !bool {
         return error.PollFailed;
     }
     return rc > 0;
+}
+
+/// Spawn slash against a fresh PTY with an explicit window size. The
+/// width is what the line editor's wrap math will use, so callers can
+/// deliberately exercise the multi-row repaint by picking a small
+/// `cols` and typing past it.
+fn spawnSlashSized(args: []const []const u8, rows: u16, cols: u16) !Spawned {
+    const child = try spawnSlash(args);
+    setWinsize(child.master, rows, cols);
+    return child;
 }
 
 /// Spawn slash against a fresh PTY. Inherits the calling process's
@@ -337,6 +371,35 @@ test "pty: Ctrl-D on an empty buffer exits cleanly" {
     });
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
+}
+
+test "pty: wrap-aware repaint runs a line longer than terminal width" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+
+    // Force a narrow window so a routine command wraps.
+    const child = try spawnSlashSized(&.{"--norc"}, 24, 20);
+    defer child.close();
+
+    // The line is 33 bytes plus the prompt — well past 20 columns.
+    // The wrap-aware renderer must climb back to the top row before
+    // each repaint; the bug-symptom on a non-wrap-aware renderer is
+    // stale glyphs above the prompt and a corrupted run.
+    try child.send("echo wrap-runs-anyway\n");
+    try child.send("exit 0\n");
+
+    var collected = std.ArrayListUnmanaged(u8).empty;
+    defer collected.deinit(alloc);
+    try child.drain(alloc, &collected, 1500);
+    const status = child.reap();
+
+    try std.testing.expectEqual(@as(u8, 0), status);
+    try std.testing.expect(std.mem.indexOf(u8, collected.items, "wrap-runs-anyway") != null);
+    // The renderer should have emitted at least one cursor-up sequence
+    // while editing wrapped content.
+    try std.testing.expect(std.mem.indexOf(u8, collected.items, "\x1b[1A") != null or
+        std.mem.indexOf(u8, collected.items, "\x1b[2A") != null);
 }
 
 test "pty: typed input is syntax-highlighted with ANSI escapes" {
