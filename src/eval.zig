@@ -719,7 +719,7 @@ fn expandWordToScalar(
     session: *Session,
     scratch: Allocator,
     sink: ?Sink,
-) ![]const u8 {
+) anyerror![]const u8 {
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(scratch);
     for (word.parts) |part| try appendPartScalar(part, session, scratch, &buf, sink);
@@ -733,7 +733,6 @@ fn appendPartScalar(
     buf: *std.ArrayListUnmanaged(u8),
     sink: ?Sink,
 ) !void {
-    _ = sink;
     switch (part) {
         .text => |t| try buf.appendSlice(scratch, t),
         .variable => |name| {
@@ -742,12 +741,21 @@ fn appendPartScalar(
                 scratch.free(val);
             }
         },
-        .var_braced => |body| {
-            // Strip leading/trailing whitespace; treat body as a name only.
-            const trimmed = std.mem.trim(u8, body, " \t");
-            if (try lookupSpecialOrVar(trimmed, session, scratch)) |val| {
-                try buf.appendSlice(scratch, val);
+        .var_braced => |vb| {
+            if (try lookupSpecialOrVar(vb.name, session, scratch)) |val| {
+                if (val.len > 0) {
+                    try buf.appendSlice(scratch, val);
+                    scratch.free(val);
+                    return;
+                }
                 scratch.free(val);
+            }
+            // Variable is unset OR resolved to the empty string. Fall back
+            // to the default expression if the user wrote `??`.
+            if (vb.default) |dw| {
+                const def = try expandWordToScalar(dw.*, session, scratch, sink);
+                try buf.appendSlice(scratch, def);
+                scratch.free(def);
             }
         },
         .cmd_subst => |inner| {

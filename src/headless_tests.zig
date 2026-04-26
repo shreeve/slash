@@ -394,6 +394,62 @@ const cases: []const Case = &.{
         .source = "cd /tmp/slash-glob-fixture && for f in *.txt { echo got $f }",
         .expect = .{ .exit_code = 0, .stdout = "got a.txt\ngot b.txt\ngot c.txt\n" },
     },
+
+    // ---- ${var ?? default} fallback expansion (PLAN §12) -----------------
+    //
+    // The narrow form: bare name on the left of `??`, fallback word on
+    // the right. Name set & non-empty → use the value. Name unset or
+    // empty → use the fallback. The fallback is itself a Word, supporting
+    // `$name` references, double- and single-quoted segments, and escape
+    // decoding. No nested `${...}` form.
+
+    .{
+        .name = "fallback: set variable wins",
+        .source = "x=alice; echo \"${x ?? guest}\"",
+        .expect = .{ .exit_code = 0, .stdout = "alice\n" },
+    },
+    .{
+        .name = "fallback: unset variable picks default literal",
+        .source = "echo \"${nope ?? guest}\"",
+        .expect = .{ .exit_code = 0, .stdout = "guest\n" },
+    },
+    .{
+        .name = "fallback: default with $var reference",
+        .source = "alt=BACKUP; echo \"${nope ?? $alt}\"",
+        .expect = .{ .exit_code = 0, .stdout = "BACKUP\n" },
+    },
+    .{
+        .name = "fallback: default with mixed text and var",
+        .source = "u=root; echo \"${user ?? hi-$u-end}\"",
+        .expect = .{ .exit_code = 0, .stdout = "hi-root-end\n" },
+    },
+    .{
+        // The outer dq already preserves spaces in the default, so no
+        // inner quoting is needed for a multi-word fallback.
+        .name = "fallback: default with multi-word literal",
+        .source = "echo \"${nope ?? two words}\"",
+        .expect = .{ .exit_code = 0, .stdout = "two words\n" },
+    },
+    .{
+        .name = "fallback: single-quoted default in body",
+        .source = "echo \"${nope ?? 'literal $x'}\"",
+        .expect = .{ .exit_code = 0, .stdout = "literal $x\n" },
+    },
+    .{
+        .name = "fallback: default literal path with slashes",
+        .source = "echo \"${LOG ?? /var/log/app.log}\"",
+        .expect = .{ .exit_code = 0, .stdout = "/var/log/app.log\n" },
+    },
+    .{
+        .name = "fallback: outside dq context still works",
+        .source = "echo ${maybe ?? safe}",
+        .expect = .{ .exit_code = 0, .stdout = "safe\n" },
+    },
+    .{
+        .name = "fallback: no `??` is a plain braced reference",
+        .source = "x=plain; echo \"${x}\"",
+        .expect = .{ .exit_code = 0, .stdout = "plain\n" },
+    },
 };
 
 // =============================================================================

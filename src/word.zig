@@ -23,12 +23,19 @@ pub const Word = struct {
         text: []const u8,
         /// Variable reference by bare name (`$name`, or `0..9`/`@`/`#`/`?`/`$`/`!`/`*`).
         variable: []const u8,
-        /// Braced variable reference body — interior of `${...}`.
-        var_braced: []const u8,
+        /// Braced variable reference (`${name}` or `${name ?? default}`).
+        /// `default` is the lowered Word evaluated only when the named
+        /// variable resolves to an unset or empty value (PLAN §12).
+        var_braced: VarBraced,
         /// Command substitution capturing the program's stdout.
         cmd_subst: *const program_mod.Program,
         /// Glob pattern from an unquoted bare word containing `*`/`?`/`[...]`.
         glob: []const u8,
+    };
+
+    pub const VarBraced = struct {
+        name: []const u8,
+        default: ?*const Word,
     };
 };
 
@@ -63,7 +70,7 @@ fn lowerPart(
             break :blk Word.Part{ .text = out };
         },
         .variable => |v| Word.Part{ .variable = try ctx.alloc.dupe(u8, v.name) },
-        .var_braced => |v| Word.Part{ .var_braced = try ctx.alloc.dupe(u8, v.body) },
+        .var_braced => |v| try lowerVarBraced(v.body, v.span, ctx),
         .cmd_subst => |c| blk: {
             const inner = try program_mod.lower(c.body.*, ctx, null);
             break :blk Word.Part{ .cmd_subst = inner };
@@ -78,6 +85,233 @@ fn containsGlobMeta(bytes: []const u8) bool {
         else => {},
     };
     return false;
+}
+
+// =============================================================================
+// `${name}` / `${name ?? default}` lowering
+// =============================================================================
+//
+// The body bytes of `${...}` come straight from the lexer with no inner
+// parsing; the splitter here promotes them to a structured `VarBraced`.
+// The body's name is required (everything up to optional `??`); the
+// default — if present — is itself parsed as a Word. Defaults support
+// literal text, escape decoding (`\n`, `\t`, `\$`, ...), bare and special
+// variable references (`$name`, `$?`, `$@`, ...), and double-quoted/
+// single-quoted segments. They do not nest another `${...}` form; that
+// would require feeding bytes back through the main parser and is out of
+// scope for the narrow PLAN §12 form.
+
+fn lowerVarBraced(
+    body: []const u8,
+    span: shape_mod.Span,
+    ctx: *const program_mod.LowerContext,
+) !Word.Part {
+    if (findFallbackOp(body)) |idx| {
+        const name = std.mem.trim(u8, body[0..idx], " \t");
+        const default_text = std.mem.trim(u8, body[idx + 2 ..], " \t");
+        const default_word = try parseDefaultWord(default_text, span, ctx.alloc);
+        return .{ .var_braced = .{
+            .name = try ctx.alloc.dupe(u8, name),
+            .default = default_word,
+        } };
+    }
+    const name = std.mem.trim(u8, body, " \t");
+    return .{ .var_braced = .{
+        .name = try ctx.alloc.dupe(u8, name),
+        .default = null,
+    } };
+}
+
+/// Find the first `??` operator outside of any quoted region. Returns
+/// the byte index of the first `?`, or null if no fallback operator is
+/// present in the body.
+fn findFallbackOp(body: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < body.len) {
+        const c = body[i];
+        if (c == '"' or c == '\'') {
+            const quote = c;
+            i += 1;
+            while (i < body.len and body[i] != quote) {
+                if (quote == '"' and body[i] == '\\' and i + 1 < body.len) i += 1;
+                i += 1;
+            }
+            if (i < body.len) i += 1;
+            continue;
+        }
+        if (c == '?' and i + 1 < body.len and body[i + 1] == '?') return i;
+        i += 1;
+    }
+    return null;
+}
+
+fn parseDefaultWord(
+    text: []const u8,
+    span: shape_mod.Span,
+    alloc: Allocator,
+) !*const Word {
+    var parts = std.ArrayListUnmanaged(Word.Part).empty;
+    defer parts.deinit(alloc);
+
+    var text_buf = std.ArrayListUnmanaged(u8).empty;
+    defer text_buf.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+
+        if (c == '\\' and i + 1 < text.len) {
+            const decoded: u8 = switch (text[i + 1]) {
+                '\\' => '\\',
+                '$' => '$',
+                '"' => '"',
+                '\'' => '\'',
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                '0' => 0,
+                else => {
+                    try text_buf.append(alloc, c);
+                    try text_buf.append(alloc, text[i + 1]);
+                    i += 2;
+                    continue;
+                },
+            };
+            try text_buf.append(alloc, decoded);
+            i += 2;
+            continue;
+        }
+
+        if (c == '\'') {
+            // Single-quoted: literal up to the next `'`. No interpolation.
+            i += 1;
+            while (i < text.len and text[i] != '\'') {
+                try text_buf.append(alloc, text[i]);
+                i += 1;
+            }
+            if (i < text.len) i += 1;
+            continue;
+        }
+
+        if (c == '"') {
+            // Double-quoted: same escape table as bare context, plus the
+            // contained `$name` / `$?` etc. interpolate. Closes at the
+            // next unescaped `"`.
+            i += 1;
+            while (i < text.len and text[i] != '"') {
+                if (text[i] == '\\' and i + 1 < text.len) {
+                    const dn: u8 = switch (text[i + 1]) {
+                        '\\' => '\\',
+                        '$' => '$',
+                        '"' => '"',
+                        'n' => '\n',
+                        't' => '\t',
+                        'r' => '\r',
+                        '0' => 0,
+                        else => {
+                            try text_buf.append(alloc, text[i]);
+                            try text_buf.append(alloc, text[i + 1]);
+                            i += 2;
+                            continue;
+                        },
+                    };
+                    try text_buf.append(alloc, dn);
+                    i += 2;
+                    continue;
+                }
+                if (text[i] == '$' and i + 1 < text.len) {
+                    if (consumeVarRef(text, i, alloc, &parts, &text_buf)) |new_i| {
+                        i = new_i;
+                        continue;
+                    }
+                }
+                try text_buf.append(alloc, text[i]);
+                i += 1;
+            }
+            if (i < text.len) i += 1;
+            continue;
+        }
+
+        if (c == '$' and i + 1 < text.len) {
+            if (consumeVarRef(text, i, alloc, &parts, &text_buf)) |new_i| {
+                i = new_i;
+                continue;
+            }
+        }
+
+        try text_buf.append(alloc, c);
+        i += 1;
+    }
+
+    if (text_buf.items.len > 0) {
+        try parts.append(alloc, .{ .text = try alloc.dupe(u8, text_buf.items) });
+    }
+
+    if (parts.items.len == 0) {
+        try parts.append(alloc, .{ .text = try alloc.dupe(u8, "") });
+    }
+
+    const word = try alloc.create(Word);
+    word.* = .{
+        .parts = try parts.toOwnedSlice(alloc),
+        .span = span,
+    };
+    return word;
+}
+
+/// Try to consume a variable reference at `text[at]` (which must be `$`).
+/// On success, flush any pending text run, append a `.variable` part, and
+/// return the new offset. On failure (not a recognized var prefix), return
+/// null so the caller can fall through to literal handling.
+fn consumeVarRef(
+    text: []const u8,
+    at: usize,
+    alloc: Allocator,
+    parts: *std.ArrayListUnmanaged(Word.Part),
+    text_buf: *std.ArrayListUnmanaged(u8),
+) ?usize {
+    const next = text[at + 1];
+    if (isVarStart(next)) {
+        var j = at + 2;
+        while (j < text.len and isVarCont(text[j])) : (j += 1) {}
+        flushPendingText(parts, text_buf, alloc) catch return null;
+        const name = alloc.dupe(u8, text[at + 1 .. j]) catch return null;
+        parts.append(alloc, .{ .variable = name }) catch return null;
+        return j;
+    }
+    if (isSpecialVarChar(next)) {
+        flushPendingText(parts, text_buf, alloc) catch return null;
+        const name = alloc.dupe(u8, text[at + 1 .. at + 2]) catch return null;
+        parts.append(alloc, .{ .variable = name }) catch return null;
+        return at + 2;
+    }
+    return null;
+}
+
+fn flushPendingText(
+    parts: *std.ArrayListUnmanaged(Word.Part),
+    text_buf: *std.ArrayListUnmanaged(u8),
+    alloc: Allocator,
+) !void {
+    if (text_buf.items.len == 0) return;
+    const cooked = try alloc.dupe(u8, text_buf.items);
+    try parts.append(alloc, .{ .text = cooked });
+    text_buf.clearRetainingCapacity();
+}
+
+fn isVarStart(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+}
+
+fn isVarCont(c: u8) bool {
+    return isVarStart(c) or (c >= '0' and c <= '9');
+}
+
+fn isSpecialVarChar(c: u8) bool {
+    return switch (c) {
+        '0'...'9', '?', '#', '@', '!', '*', '$' => true,
+        else => false,
+    };
 }
 
 fn canonicalizeText(bytes: []const u8, flavor: shape_mod.Flavor, alloc: Allocator) ![]const u8 {

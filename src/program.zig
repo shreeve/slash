@@ -458,7 +458,21 @@ fn dumpWordParts(word: Word, depth: u32, w: *Writer) WriteError!void {
         switch (part) {
             .text => |t| try w.print("text {s}\n", .{t}),
             .variable => |name| try w.print("var {s}\n", .{name}),
-            .var_braced => |body| try w.print("var_braced {s}\n", .{body}),
+            .var_braced => |vb| {
+                if (vb.default == null) {
+                    try w.print("var_braced {s}\n", .{vb.name});
+                } else {
+                    try w.print("var_braced {s} ??\n", .{vb.name});
+                    for (vb.default.?.parts) |dp| {
+                        try indent(w, depth + 1);
+                        switch (dp) {
+                            .text => |t| try w.print("text {s}\n", .{t}),
+                            .variable => |n| try w.print("var {s}\n", .{n}),
+                            else => try w.writeAll("<other>\n"),
+                        }
+                    }
+                }
+            },
             .cmd_subst => try w.writeAll("cmd_subst\n"),
             .glob => |pat| try w.print("glob {s}\n", .{pat}),
         }
