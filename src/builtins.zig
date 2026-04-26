@@ -475,13 +475,20 @@ fn continueFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anye
 }
 
 fn returnFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
-    _ = io;
-    _ = ctx;
-    // `return N` would surface N to the call frame; for now we throw
-    // the typed error and let the catcher decide the status. When `cmd`
-    // definitions land, the call-frame catcher will read argv[1] off the
-    // session if needed.
-    _ = argv;
+    // `return N` inside a `cmd` body raises `ReturnFromCmd`; the call
+    // frame catches and uses `session.last_status` as the exit code.
+    // Stashing the requested status here keeps the builtin signature
+    // pure (it can't return both Result and the typed control error).
+    if (argv.len >= 2) {
+        const code = std.fmt.parseInt(u8, argv[1], 10) catch {
+            _ = writeAllToFd(io.stderr, "return: numeric argument required\n");
+            return .{ .exited = 2 };
+        };
+        switch (ctx) {
+            .shell => |s| s.last_status = code,
+            .child => {},
+        }
+    }
     return error.ReturnFromCmd;
 }
 

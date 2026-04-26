@@ -111,6 +111,12 @@ pub const For = struct {
     span: Span,
 };
 
+pub const Define = struct {
+    name: []const u8,
+    body: *const Program,
+    span: Span,
+};
+
 // =============================================================================
 // Program union
 // =============================================================================
@@ -142,6 +148,7 @@ pub const Program = union(enum) {
     conditional: Conditional,
     @"while": While,
     @"for": For,
+    define: Define,
 
     pub fn span(self: Program) Span {
         return switch (self) {
@@ -155,6 +162,7 @@ pub const Program = union(enum) {
             .conditional => |c| c.span,
             .@"while" => |w| w.span,
             .@"for" => |f| f.span,
+            .define => |d| d.span,
         };
     }
 };
@@ -194,6 +202,7 @@ fn lowerShape(shape: shape_mod.Shape, ctx: *const LowerContext, sink: ?Sink) any
         .conditional => |c| try lowerConditional(c, ctx, sink),
         .@"while" => |w| try lowerWhile(w, ctx, sink),
         .@"for" => |f| try lowerFor(f, ctx, sink),
+        .cmd_def => |d| try lowerCmdDef(d, ctx, sink),
         .word => {
             try diag.emit(sink, diag.make(
                 .lower,
@@ -326,6 +335,15 @@ fn lowerFor(f: shape_mod.ForShape, ctx: *const LowerContext, sink: ?Sink) anyerr
     } });
 }
 
+fn lowerCmdDef(d: shape_mod.CmdDefShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
+    const body = try lowerShape(d.body.*, ctx, sink);
+    return put(ctx.alloc, .{ .define = .{
+        .name = try ctx.alloc.dupe(u8, d.name),
+        .body = body,
+        .span = d.span,
+    } });
+}
+
 fn lowerEnvBind(b: shape_mod.EnvBindShape, ctx: *const LowerContext) !EnvBind {
     const name = try ctx.alloc.dupe(u8, b.name);
     const value: AssignValue = switch (b.value) {
@@ -393,6 +411,149 @@ fn put(alloc: Allocator, p: Program) !*const Program {
 }
 
 // =============================================================================
+// Deep clone (PLAN §6.8 — user-defined `cmd` definitions need session-
+// scoped storage). Used by eval when installing a `define` so the body
+// survives past the originating parse/lowering arena.
+// =============================================================================
+
+pub fn clone(p: *const Program, alloc: Allocator) anyerror!*const Program {
+    const slot = try alloc.create(Program);
+    slot.* = switch (p.*) {
+        .command => |c| .{ .command = try cloneCommand(c, alloc) },
+        .pipeline => |pl| .{ .pipeline = try clonePipeline(pl, alloc) },
+        .sequence => |s| .{ .sequence = try cloneSequence(s, alloc) },
+        .subshell => |sb| .{ .subshell = .{
+            .body = try clone(sb.body, alloc),
+            .redirects = try cloneRedirects(sb.redirects, alloc),
+            .span = sb.span,
+        } },
+        .block => |b| .{ .block = .{
+            .body = try clone(b.body, alloc),
+            .redirects = try cloneRedirects(b.redirects, alloc),
+            .span = b.span,
+        } },
+        .detached => |d| .{ .detached = .{
+            .body = try clone(d.body, alloc),
+            .span = d.span,
+        } },
+        .assigns => |a| .{ .assigns = try cloneAssigns(a, alloc) },
+        .conditional => |c| .{ .conditional = .{
+            .cond = try clone(c.cond, alloc),
+            .then_body = try clone(c.then_body, alloc),
+            .else_body = if (c.else_body) |eb| try clone(eb, alloc) else null,
+            .redirects = try cloneRedirects(c.redirects, alloc),
+            .span = c.span,
+        } },
+        .@"while" => |x| .{ .@"while" = .{
+            .cond = try clone(x.cond, alloc),
+            .body = try clone(x.body, alloc),
+            .redirects = try cloneRedirects(x.redirects, alloc),
+            .span = x.span,
+        } },
+        .@"for" => |x| .{ .@"for" = .{
+            .binding = try alloc.dupe(u8, x.binding),
+            .items = try cloneWords(x.items, alloc),
+            .body = try clone(x.body, alloc),
+            .redirects = try cloneRedirects(x.redirects, alloc),
+            .span = x.span,
+        } },
+        .define => |d| .{ .define = .{
+            .name = try alloc.dupe(u8, d.name),
+            .body = try clone(d.body, alloc),
+            .span = d.span,
+        } },
+    };
+    return slot;
+}
+
+fn cloneCommand(c: Command, alloc: Allocator) !Command {
+    return .{
+        .exe = try cloneWord(c.exe, alloc),
+        .args = try cloneWords(c.args, alloc),
+        .env = try cloneEnvBinds(c.env, alloc),
+        .cwd = if (c.cwd) |w| try cloneWord(w, alloc) else null,
+        .redirects = try cloneRedirects(c.redirects, alloc),
+        .span = c.span,
+    };
+}
+
+fn clonePipeline(p: Pipeline, alloc: Allocator) !Pipeline {
+    var stages = try alloc.alloc(*const Program, p.stages.len);
+    for (p.stages, 0..) |st, i| stages[i] = try clone(st, alloc);
+    return .{ .stages = stages, .pipefail = p.pipefail, .span = p.span };
+}
+
+fn cloneSequence(s: Sequence, alloc: Allocator) !Sequence {
+    var items = try alloc.alloc(SequenceItem, s.items.len);
+    for (s.items, 0..) |it, i| items[i] = .{
+        .program = try clone(it.program, alloc),
+        .next_op = it.next_op,
+    };
+    return .{ .items = items, .span = s.span };
+}
+
+fn cloneAssigns(a: Assigns, alloc: Allocator) !Assigns {
+    return .{ .binds = try cloneEnvBinds(a.binds, alloc), .span = a.span };
+}
+
+fn cloneEnvBinds(binds: []const EnvBind, alloc: Allocator) ![]const EnvBind {
+    var out = try alloc.alloc(EnvBind, binds.len);
+    for (binds, 0..) |b, i| out[i] = .{
+        .name = try alloc.dupe(u8, b.name),
+        .value = switch (b.value) {
+            .scalar => |w| AssignValue{ .scalar = try cloneWord(w, alloc) },
+            .list => |ws| AssignValue{ .list = try cloneWords(ws, alloc) },
+        },
+    };
+    return out;
+}
+
+fn cloneWords(words: []const Word, alloc: Allocator) ![]const Word {
+    var out = try alloc.alloc(Word, words.len);
+    for (words, 0..) |w, i| out[i] = try cloneWord(w, alloc);
+    return out;
+}
+
+fn cloneWord(w: Word, alloc: Allocator) anyerror!Word {
+    var parts = try alloc.alloc(Word.Part, w.parts.len);
+    for (w.parts, 0..) |part, i| parts[i] = try cloneWordPart(part, alloc);
+    return .{ .parts = parts, .span = w.span };
+}
+
+fn cloneWordPart(part: Word.Part, alloc: Allocator) !Word.Part {
+    return switch (part) {
+        .text => |t| Word.Part{ .text = try alloc.dupe(u8, t) },
+        .variable => |n| Word.Part{ .variable = try alloc.dupe(u8, n) },
+        .var_braced => |vb| blk: {
+            const dw_clone: ?*const Word = if (vb.default) |dw| dwblk: {
+                const slot = try alloc.create(Word);
+                slot.* = try cloneWord(dw.*, alloc);
+                break :dwblk slot;
+            } else null;
+            break :blk Word.Part{ .var_braced = .{
+                .name = try alloc.dupe(u8, vb.name),
+                .default = dw_clone,
+            } };
+        },
+        .cmd_subst => |inner| Word.Part{ .cmd_subst = try clone(inner, alloc) },
+        .list_capture => |inner| Word.Part{ .list_capture = try clone(inner, alloc) },
+        .glob => |g| Word.Part{ .glob = try alloc.dupe(u8, g) },
+    };
+}
+
+fn cloneRedirects(reds: []const Redirect, alloc: Allocator) ![]const Redirect {
+    var out = try alloc.alloc(Redirect, reds.len);
+    for (reds, 0..) |r, i| out[i] = .{
+        .op = r.op,
+        .from_fd = r.from_fd,
+        .to_fd = r.to_fd,
+        .target = if (r.target) |t| try cloneWord(t, alloc) else null,
+        .span = r.span,
+    };
+    return out;
+}
+
+// =============================================================================
 // Dump
 // =============================================================================
 
@@ -418,6 +579,7 @@ fn dumpProgram(source: Source, p: *const Program, depth: u32, w: *Writer, opts: 
         .conditional => |c| try dumpConditional(source, c, depth, w, opts),
         .@"while" => |x| try dumpWhile(source, x, depth, w, opts),
         .@"for" => |x| try dumpFor(source, x, depth, w, opts),
+        .define => |d| try dumpDefine(source, d, depth, w, opts),
     }
 }
 
@@ -588,6 +750,13 @@ fn dumpFor(source: Source, x: For, depth: u32, w: *Writer, opts: DumpOptions) Wr
     try indent(w, depth + 1);
     try w.writeAll("body\n");
     try dumpProgram(source, x.body, depth + 2, w, opts);
+}
+
+fn dumpDefine(source: Source, d: Define, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.print("define {s}", .{d.name});
+    try maybeSpan(d.span, w, opts);
+    try w.writeByte('\n');
+    try dumpProgram(source, d.body, depth + 1, w, opts);
 }
 
 fn dumpRedirect(r: Redirect, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {

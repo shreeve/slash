@@ -5,14 +5,74 @@ const job = @import("job.zig");
 const builtins = @import("builtins.zig");
 const runtime = @import("runtime.zig");
 const vars = @import("vars.zig");
+const program_mod = @import("program.zig");
 
 pub const Allocator = std.mem.Allocator;
+
+/// Store for user-defined `cmd` bodies. Both keys (definition names) and
+/// values (lowered Programs) live in the entry's own arena so the
+/// definition outlives the originating parse.
+pub const DefStore = struct {
+    alloc: Allocator,
+    table: std.StringHashMapUnmanaged(*Entry) = .empty,
+
+    pub const Entry = struct {
+        arena: std.heap.ArenaAllocator,
+        program: *const program_mod.Program,
+    };
+
+    pub fn init(alloc: Allocator) DefStore {
+        return .{ .alloc = alloc };
+    }
+
+    pub fn deinit(self: *DefStore) void {
+        var it = self.table.iterator();
+        while (it.next()) |e| {
+            self.alloc.free(e.key_ptr.*);
+            e.value_ptr.*.arena.deinit();
+            self.alloc.destroy(e.value_ptr.*);
+        }
+        self.table.deinit(self.alloc);
+    }
+
+    pub fn lookup(self: *const DefStore, name: []const u8) ?*const program_mod.Program {
+        if (self.table.get(name)) |entry| return entry.program;
+        return null;
+    }
+
+    /// Install a definition. The caller passes a freshly initialized
+    /// arena and the lowered Program allocated from it. Ownership of
+    /// the arena transfers to the store; on key replacement the old
+    /// entry's arena is destroyed.
+    pub fn install(
+        self: *DefStore,
+        name: []const u8,
+        arena: std.heap.ArenaAllocator,
+        program: *const program_mod.Program,
+    ) !void {
+        const key = try self.alloc.dupe(u8, name);
+        errdefer self.alloc.free(key);
+
+        const entry = try self.alloc.create(Entry);
+        errdefer self.alloc.destroy(entry);
+        entry.* = .{ .arena = arena, .program = program };
+
+        const gop = try self.table.getOrPut(self.alloc, key);
+        if (gop.found_existing) {
+            self.alloc.free(key);
+            gop.value_ptr.*.arena.deinit();
+            self.alloc.destroy(gop.value_ptr.*);
+        }
+        gop.value_ptr.* = entry;
+    }
+};
 
 pub const Session = struct {
     alloc: Allocator,
     jobs: job.JobTable,
     builtins: builtins.BuiltinSet,
     vars: vars.VarStore,
+    defs: DefStore,
     /// Inherited environment as a raw `execve`-ready pointer. Threaded
     /// from `std.c.environ` in `main`; not owned by Session.
     envp: [*:null]const ?[*:0]const u8,
@@ -41,6 +101,7 @@ pub const Session = struct {
             .jobs = job.JobTable.init(alloc),
             .builtins = try builtins.init(alloc),
             .vars = vars.VarStore.init(alloc),
+            .defs = DefStore.init(alloc),
             .envp = envp,
             .interactive = interactive,
             .default_pipefail = true,
@@ -53,6 +114,7 @@ pub const Session = struct {
         self.jobs.deinit();
         self.builtins.deinit(self.alloc);
         self.vars.deinit();
+        self.defs.deinit();
         self.clearPathCache();
         self.path_cache.deinit(self.alloc);
         if (self.path_cache_signature) |sig| self.alloc.free(sig);

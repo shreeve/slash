@@ -164,31 +164,8 @@ Stretch: render multi-byte characters in REPL highlighting without
 collapsing the cursor.
 
 
-### 11. `cmd` user-defined commands (positional only)
 
-PLAN §3 mentions, §7 Rule 26 commits to "session-scoped unless created
-inside a subshell". Implementation:
-
-- Surface syntax: `cmd name { body }`. **Positional parameters only** —
-  `$1..$N`, `$@`, `$#` inside the body. No named-parameter form.
-- Lower into `Program.define` (already a kernel form per PLAN §6.5)
-- Session has a `defs` store keyed by name, holding promoted Programs
-- Resolution order: builtins → defs → PATH (PLAN §7 Rule 10)
-- A `return N` builtin throws `error.ReturnFromCmd` caught by the call
-  frame
-
-The choice for positional-only is deliberate. Named parameters drift
-toward language-design territory; positional keeps the shell a shell.
-Users who want clarity can name explicitly inside the body:
-
-```
-cmd greet {
-  name = $1
-  echo hello $name
-}
-```
-
-### 12. Process substitution `<(...)` / `>(...)`
+### 11. Process substitution `<(...)` / `>(...)`
 
 PLAN §6.2 documents. Implementation:
 - Lexer adds `proc_sub_in` (`<(`) and `proc_sub_out` (`>(`) tokens
@@ -197,7 +174,7 @@ PLAN §6.2 documents. Implementation:
   (BSD/macOS) bindings, threads the path into the parent's argv
 - Job-owned cleanup on every termination path (PLAN §7 Rule 25)
 
-### 13. Configuration loading
+### 12. Configuration loading
 
 `~/.slashrc` is sourced at interactive shell startup. That's the entire
 mechanism. No `~/.slash/config` file format, no `set` runtime config
@@ -211,7 +188,7 @@ builtin. Users configure by writing Slash code in `.slashrc`.
 
 
 
-### 14. `trap` builtin
+### 13. `trap` builtin
 
 `trap 'CMD' SIGNAL...` registers a Slash source string to run when the
 named signal is received. `trap '' SIGNAL` ignores the signal. `trap -`
@@ -401,7 +378,7 @@ This work depends on Tier 1 #1 (recoverable parse errors with partial
 Shape on incomplete input) and benefits from Tier 3 #7 (real
 diagnostics).
 
-### 15. Live syntax highlighting
+### 14. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -416,7 +393,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 16. Multi-line continuation
+### 15. Multi-line continuation
 
 If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
 heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
@@ -432,7 +409,7 @@ if test -d /tmp {
 We know exactly when they're inside the block (open `{` on stack) and
 when the statement is complete (matched `}` and shape is well-formed).
 
-### 17. Tab completion via Shape introspection
+### 16. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -445,7 +422,7 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 18. History
+### 17. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -458,12 +435,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 19. Bracket matching
+### 18. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 20. Prompt
+### 19. Prompt
 
 Default is minimal but useful:
 
@@ -481,7 +458,7 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 21. Implementation foundation
+### 20. Implementation foundation
 
 The REPL is one new module — `src/repl.zig`, ~600-800 lines.
 Dependencies:

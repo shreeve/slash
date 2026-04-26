@@ -205,6 +205,12 @@ pub const ForShape = struct {
     span: Span,
 };
 
+pub const CmdDefShape = struct {
+    name: []const u8,
+    body: *const Shape,
+    span: Span,
+};
+
 // =============================================================================
 // Shape union
 // =============================================================================
@@ -221,6 +227,7 @@ pub const Shape = union(enum) {
     conditional: ConditionalShape,
     @"while": WhileShape,
     @"for": ForShape,
+    cmd_def: CmdDefShape,
 
     pub fn span(self: Shape) Span {
         return switch (self) {
@@ -235,6 +242,7 @@ pub const Shape = union(enum) {
             .conditional => |c| c.span,
             .@"while" => |w| w.span,
             .@"for" => |f| f.span,
+            .cmd_def => |d| d.span,
         };
     }
 };
@@ -300,6 +308,7 @@ fn convertShape(
         .@"if" => Shape{ .conditional = try convertConditional(alloc, source, items[1..], sink) },
         .@"while" => Shape{ .@"while" = try convertWhile(alloc, source, items[1..], sink) },
         .@"for" => Shape{ .@"for" = try convertFor(alloc, source, items[1..], sink) },
+        .cmd_def => Shape{ .cmd_def = try convertCmdDef(alloc, source, items[1..], sink) },
         else => {
             try emitBadShape(source, sexp, sink, "unexpected head tag at top level");
             return error.InvalidShape;
@@ -416,6 +425,7 @@ fn convertStage(
         .@"if" => Shape{ .conditional = try convertConditional(alloc, source, items[1..], sink) },
         .@"while" => Shape{ .@"while" = try convertWhile(alloc, source, items[1..], sink) },
         .@"for" => Shape{ .@"for" = try convertFor(alloc, source, items[1..], sink) },
+        .cmd_def => Shape{ .cmd_def = try convertCmdDef(alloc, source, items[1..], sink) },
         else => {
             try emitBadShape(source, sexp, sink, "expected a command, pipeline, subshell, block, assignment, or control form");
             return error.InvalidShape;
@@ -707,6 +717,30 @@ fn convertWhile(
         .cond = cond_ptr,
         .body = body_ptr,
         .span = .{ .start = cond.span().start, .end = body.span().end },
+    };
+}
+
+fn convertCmdDef(
+    alloc: Allocator,
+    source: Source,
+    children: []const parser.Sexp,
+    sink: ?Sink,
+) anyerror!CmdDefShape {
+    if (children.len != 2) {
+        try emitBadShape(source, .nil, sink, "cmd definition requires a name and a body");
+        return error.InvalidShape;
+    }
+    const name_span = try expectSrcSpan(children[0], source, sink);
+    const name = source.text[name_span.start..name_span.end];
+
+    const body = try convertBody(alloc, source, children[1], sink);
+    const body_ptr = try alloc.create(Shape);
+    body_ptr.* = body;
+
+    return .{
+        .name = name,
+        .body = body_ptr,
+        .span = .{ .start = name_span.start, .end = body.span().end },
     };
 }
 
@@ -1591,6 +1625,7 @@ fn dumpShape(source: Source, s: Shape, depth: u32, w: *Writer, opts: DumpOptions
         .conditional => |c| try dumpConditional(source, c, depth, w, opts),
         .@"while" => |x| try dumpWhile(source, x, depth, w, opts),
         .@"for" => |x| try dumpFor(source, x, depth, w, opts),
+        .cmd_def => |d| try dumpCmdDef(source, d, depth, w, opts),
     }
 }
 
@@ -1765,6 +1800,15 @@ fn dumpFor(source: Source, x: ForShape, depth: u32, w: *Writer, opts: DumpOption
     try indent(w, depth + 1);
     try w.writeAll("body\n");
     try dumpShape(source, x.body.*, depth + 2, w, opts);
+}
+
+fn dumpCmdDef(source: Source, d: CmdDefShape, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.print("cmd_def {s}", .{d.name});
+    try maybeSpan(d.span, w, opts);
+    try w.writeByte('\n');
+    try indent(w, depth + 1);
+    try w.writeAll("body\n");
+    try dumpShape(source, d.body.*, depth + 2, w, opts);
 }
 
 fn dumpRedirect(source: Source, r: RedirectShape, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {

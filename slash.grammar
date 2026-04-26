@@ -170,6 +170,7 @@ sequence_item   = pipeline
                 | for_loop
                 | block_stmt
                 | assigns
+                | cmd_def
 
 sequence_tail   = SEMI    sequence_item                 → (seq_always 2)
                 | SEMI                                  → (seq_always _)
@@ -287,6 +288,17 @@ block_form      = LBRACE sequence RBRACE                → (body 2)
 while_loop      = WHILE cond_chain block_form           → (while 2 3)
 
 for_loop        = FOR IDENT IN word_atoms block_form    → (for 2 4 5)
+
+# ------------------------------------------------------------------------------
+# User-defined commands
+# ------------------------------------------------------------------------------
+#
+# `cmd name { body }` defines a positional-only command body. Resolution
+# order at call-time is builtins → defs → PATH. The body sees `$1..$N`,
+# `$@`, and `$#` bound from the call's argv; on `return N` (a control-
+# flow builtin) the call frame catches and propagates `N` as exit status.
+
+cmd_def         = CMD IDENT block_form                  → (cmd_def 2 3)
 
 word_atoms      = word_atom+                            → (words ...1)
 

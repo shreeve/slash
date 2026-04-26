@@ -27,6 +27,7 @@ const exec = @import("exec.zig");
 const job = @import("job.zig");
 const builtins = @import("builtins.zig");
 const session_mod = @import("session.zig");
+const vars_mod = @import("vars.zig");
 
 pub const Allocator = std.mem.Allocator;
 pub const Result = runtime.Result;
@@ -109,6 +110,7 @@ fn evalProgram(
         .conditional => |c| try evalConditional(c, session, ctx, sink),
         .@"while" => |w| try evalWhile(w, session, ctx, sink),
         .@"for" => |f| try evalFor(f, session, ctx, sink),
+        .define => |d| try evalDefine(d, session, ctx, sink),
     };
     // `$?` reflects the most recent command result. Every program node
     // updates it on completion so subsequent statements in the same
@@ -186,6 +188,9 @@ fn evalCommand(
                 return try runShellContextBuiltin(c, b, argv.items, session);
             }
             return try runShellContextBuiltinWithRedirects(c, b, argv.items, session, ctx, sink);
+        }
+        if (session.defs.lookup(exe_text)) |def_body| {
+            return try runUserDefinedCommand(c, def_body, argv.items, session, ctx, sink);
         }
     }
 
@@ -339,6 +344,110 @@ fn applyRedirInParent(op: exec.RedirectOp) !void {
             }
             _ = std.c.close(opened);
         },
+    }
+}
+
+/// Invoke a user-defined `cmd` body with positional parameters bound to
+/// the call's argv. Saves the caller's positional state, installs new
+/// `$1..$N` / `$#` / `$@`, evaluates the body, then restores. A `return
+/// N` builtin in the body raises `error.ReturnFromCmd`; the call frame
+/// here catches it and translates to a normal exit status.
+///
+/// State not saved: anything else the body mutates (regular vars, defs,
+/// cwd, exports). PLAN §7 Rule 26 makes user commands session-scoped,
+/// so these mutations are visible to subsequent statements — that's the
+/// difference between a `cmd` and a subshell.
+fn runUserDefinedCommand(
+    c: *const Command,
+    body: *const program_mod.Program,
+    argv: []const []const u8,
+    session: *Session,
+    ctx: EvalContext,
+    sink: ?Sink,
+) !EvalOutcome {
+    _ = c;
+
+    // Snapshot positional params so the call frame can restore them. We
+    // only need to capture what's in scope: `$0..$#` and `$@`.
+    const snapshot = try snapshotPositionals(session, ctx.scratch);
+    defer restorePositionals(session, snapshot, ctx.scratch);
+
+    // Install the call's argv as $0/$1/$.../@/#.
+    try installPositionals(session, argv);
+
+    const outcome = evalProgram(body, session, ctx, sink) catch |err| switch (err) {
+        error.ReturnFromCmd => {
+            const j = try session.jobs.create(true, false, argv[0]);
+            const result = Result{ .exited = session.last_status };
+            session.jobs.completeZeroChild(j, result);
+            return .{ .job = j, .expression_result = result };
+        },
+        else => return err,
+    };
+    return outcome;
+}
+
+const Positional = struct {
+    name: []const u8,
+    value: ?vars_mod.Value,
+};
+
+fn snapshotPositionals(session: *Session, scratch: Allocator) ![]Positional {
+    var saved = std.ArrayListUnmanaged(Positional).empty;
+    defer saved.deinit(scratch);
+
+    const names = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "#", "@" };
+    for (names) |name| {
+        const dup = try scratch.dupe(u8, name);
+        if (session.vars.get(name)) |v| {
+            const cloned: vars_mod.Value = switch (v.value) {
+                .scalar => |s| .{ .scalar = try scratch.dupe(u8, s) },
+                .list => |xs| blk: {
+                    var arr = try scratch.alloc([]const u8, xs.len);
+                    for (xs, 0..) |e, i| arr[i] = try scratch.dupe(u8, e);
+                    break :blk .{ .list = arr };
+                },
+            };
+            try saved.append(scratch, .{ .name = dup, .value = cloned });
+        } else {
+            try saved.append(scratch, .{ .name = dup, .value = null });
+        }
+    }
+    return saved.toOwnedSlice(scratch);
+}
+
+fn restorePositionals(session: *Session, snapshot: []Positional, scratch: Allocator) void {
+    _ = scratch; // entries live in scratch; arena cleanup releases them
+    for (snapshot) |entry| {
+        if (entry.value) |v| switch (v) {
+            .scalar => |s| session.vars.setScalar(entry.name, s, false) catch {},
+            .list => |xs| session.vars.setList(entry.name, xs, false) catch {},
+        } else {
+            session.vars.unset(entry.name);
+        }
+    }
+}
+
+fn installPositionals(session: *Session, argv: []const []const u8) !void {
+    // `$0` is the command's own name; `$1..$N` are the rest.
+    try session.vars.setScalar("0", argv[0], false);
+    var i: usize = 1;
+    while (i <= 9) : (i += 1) {
+        var keybuf: [4]u8 = undefined;
+        const key = std.fmt.bufPrint(&keybuf, "{d}", .{i}) catch continue;
+        if (i < argv.len) {
+            try session.vars.setScalar(key, argv[i], false);
+        } else {
+            session.vars.unset(key);
+        }
+    }
+    var countbuf: [16]u8 = undefined;
+    const count = std.fmt.bufPrint(&countbuf, "{d}", .{argv.len -| 1}) catch unreachable;
+    try session.vars.setScalar("#", count, false);
+    if (argv.len > 1) {
+        try session.vars.setList("@", argv[1..], false);
+    } else {
+        session.vars.unset("@");
     }
 }
 
@@ -892,6 +1001,28 @@ fn spawnPipelineNoWait(
 // =============================================================================
 // Assignments
 // =============================================================================
+
+fn evalDefine(
+    d: program_mod.Define,
+    session: *Session,
+    ctx: EvalContext,
+    sink: ?Sink,
+) !EvalOutcome {
+    _ = ctx;
+    _ = sink;
+    // Promote the body into a session-lifetime arena. The caller's parse
+    // arena may be torn down (REPL turn boundary, sourced-file return,
+    // etc.); cloning into a fresh arena keeps the definition addressable
+    // for the life of the session.
+    var arena = std.heap.ArenaAllocator.init(session.alloc);
+    errdefer arena.deinit();
+    const cloned = try program_mod.clone(d.body, arena.allocator());
+    try session.defs.install(d.name, arena, cloned);
+
+    const j = try session.jobs.create(true, false, d.name);
+    session.jobs.completeZeroChild(j, .{ .exited = 0 });
+    return .{ .job = j, .expression_result = .{ .exited = 0 } };
+}
 
 fn evalAssigns(
     a: program_mod.Assigns,

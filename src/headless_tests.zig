@@ -615,6 +615,60 @@ const cases: []const Case = &.{
         .source = "cd -",
         .expect = .{ .exit_code = 1 },
     },
+
+    // ---- cmd user-defined commands (PLAN §7 Rule 26) ---------------------
+    //
+    // `cmd name { body }` registers a session-scoped command body.
+    // Resolution order: builtins → defs → PATH. Body sees `$1..$N`,
+    // `$@`, `$#` bound from the call site; the call frame restores the
+    // caller's positionals on return. Mutations to vars/cwd/etc. escape
+    // back into the calling session — `cmd` is NOT a subshell.
+
+    .{
+        .name = "cmd: simple greet by positional",
+        .source = "cmd greet { echo hello $1 }; greet world",
+        .expect = .{ .exit_code = 0, .stdout = "hello world\n" },
+    },
+    .{
+        .name = "cmd: $#, $@ inside body",
+        .source = "cmd args { echo n=$#; for a in $@ { echo a=$a } }; args x y z",
+        .expect = .{ .exit_code = 0, .stdout = "n=3\na=x\na=y\na=z\n" },
+    },
+    .{
+        .name = "cmd: return N propagates to caller",
+        .source = "cmd bad { return 7 }; bad || echo \"got=$?\"",
+        .expect = .{ .exit_code = 0, .stdout = "got=7\n" },
+    },
+    .{
+        .name = "cmd: return 0 is success",
+        .source = "cmd ok { return 0 }; ok && echo all-good",
+        .expect = .{ .exit_code = 0, .stdout = "all-good\n" },
+    },
+    .{
+        .name = "cmd: var mutation escapes (not a subshell)",
+        .source = "cmd set { x=inside }; x=outer; set; echo $x",
+        .expect = .{ .exit_code = 0, .stdout = "inside\n" },
+    },
+    .{
+        .name = "cmd: caller's positionals restored after body",
+        .source = "cmd inner { echo inner=$1 }; cmd outer { inner X; echo outer=$1 }; outer A",
+        .expect = .{ .exit_code = 0, .stdout = "inner=X\nouter=A\n" },
+    },
+    .{
+        .name = "cmd: redefinition replaces the body",
+        .source = "cmd f { echo first }; f; cmd f { echo second }; f",
+        .expect = .{ .exit_code = 0, .stdout = "first\nsecond\n" },
+    },
+    .{
+        .name = "cmd: builtins still win the lookup",
+        .source = "cmd echo { /bin/echo never-fires }; echo direct",
+        .expect = .{ .exit_code = 0, .stdout = "direct\n" },
+    },
+    .{
+        .name = "cmd: defined cmd beats PATH external",
+        .source = "cmd cat { echo overridden }; cat",
+        .expect = .{ .exit_code = 0, .stdout = "overridden\n" },
+    },
 };
 
 // =============================================================================
