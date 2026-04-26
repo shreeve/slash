@@ -22,6 +22,7 @@ const program = @import("program.zig");
 const session_mod = @import("session.zig");
 const eval = @import("eval.zig");
 const exec = @import("exec.zig");
+const builtins = @import("builtins.zig");
 
 extern "c" var environ: [*:null]?[*:0]u8;
 
@@ -809,6 +810,50 @@ const cases: []const Case = &.{
         .source = "cat <<'EOF'\na\\nb\nEOF\n",
         .expect = .{ .exit_code = 0, .stdout = "a\\nb\n" },
     },
+
+    // ---- trap builtin ----------------------------------------------------
+    //
+    // EXIT pseudo-signal fires before the shell process returns. Real
+    // signals (HUP/INT/QUIT/TERM/USR1/USR2) install async-signal-safe
+    // handlers that flip a flag; the eval safe-point loop drains and
+    // runs the body. Trap source is parsed at registration time so
+    // surface errors surface there, not on signal delivery.
+
+    .{
+        .name = "trap: EXIT runs after the body completes",
+        .source = "trap 'echo bye' EXIT; echo hi",
+        .expect = .{ .exit_code = 0, .stdout = "hi\nbye\n" },
+    },
+    .{
+        .name = "trap: EXIT runs after `exit N`",
+        .source = "trap 'echo bye' EXIT; echo before; exit 5",
+        .expect = .{ .exit_code = 5, .stdout = "before\nbye\n" },
+    },
+    .{
+        .name = "trap: '' ignores the signal",
+        .source = "trap '' INT; echo registered",
+        .expect = .{ .exit_code = 0, .stdout = "registered\n" },
+    },
+    .{
+        .name = "trap: - restores default",
+        .source = "trap 'echo y' INT; trap - INT; echo done",
+        .expect = .{ .exit_code = 0, .stdout = "done\n" },
+    },
+    .{
+        .name = "trap: unknown signal name fails",
+        .source = "trap 'echo x' NOPE",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "trap: missing args fails",
+        .source = "trap",
+        .expect = .{ .exit_code = 2 },
+    },
+    .{
+        .name = "trap: EXIT body sees session vars",
+        .source = "trap 'echo trap=$x' EXIT; x=outer; echo before",
+        .expect = .{ .exit_code = 0, .stdout = "before\ntrap=outer\n" },
+    },
 };
 
 // =============================================================================
@@ -870,8 +915,10 @@ fn runHeadless(alloc: std.mem.Allocator, source_text: []const u8) !RunOutput {
     const envp_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(environ));
     var session = try session_mod.Session.init(alloc, envp_ptr, false);
     defer session.deinit();
+    builtins.installSession(&session);
 
     const result = try eval.runForeground(prog, &session, a, null);
+    eval.fireExitTrap(&session, a, null) catch {};
     const final = session.exit_request orelse result;
     const exit_code = final.toStatusByte();
 

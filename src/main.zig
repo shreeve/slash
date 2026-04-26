@@ -8,6 +8,7 @@ const shape = @import("shape.zig");
 const program = @import("program.zig");
 const session_mod = @import("session.zig");
 const eval = @import("eval.zig");
+const builtins = @import("builtins.zig");
 
 const DumpMode = enum { sexp, shape, program };
 
@@ -125,6 +126,7 @@ fn runSource(
 
     var session = try session_mod.Session.init(alloc, envp, false);
     defer session.deinit();
+    builtins.installSession(&session);
 
     // Bind positional parameters.
     try session.vars.setScalar("0", name, false);
@@ -142,9 +144,11 @@ fn runSource(
 
     const result = eval.runForeground(prog, &session, a, null) catch |err| {
         std.debug.print("slash: eval error: {s}\n", .{@errorName(err)});
+        eval.fireExitTrap(&session, a, null) catch {};
         return 1;
     };
 
+    eval.fireExitTrap(&session, a, null) catch {};
     const final = session.exit_request orelse result;
     return final.toStatusByte();
 }

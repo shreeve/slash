@@ -19,6 +19,9 @@ const runtime = @import("runtime.zig");
 const session_mod = @import("session.zig");
 const vars_mod = @import("vars.zig");
 const job_mod = @import("job.zig");
+const shape_mod = @import("shape.zig");
+const program_mod = @import("program.zig");
+const diag = @import("diagnostics.zig");
 
 pub const Allocator = std.mem.Allocator;
 pub const Result = runtime.Result;
@@ -87,6 +90,7 @@ pub fn init(alloc: Allocator) !BuiltinSet {
     try set.table.put(alloc, "type", .{ .name = "type", .run = typeFn });
     try set.table.put(alloc, "jobs", .{ .name = "jobs", .run = jobsFn });
     try set.table.put(alloc, "wait", .{ .name = "wait", .run = waitFn });
+    try set.table.put(alloc, "trap", .{ .name = "trap", .run = trapFn });
     return set;
 }
 
@@ -868,4 +872,173 @@ fn parseJobSpec(arg: []const u8) ?u32 {
     var bytes = arg;
     if (bytes.len >= 1 and bytes[0] == '%') bytes = bytes[1..];
     return std.fmt.parseInt(u32, bytes, 10) catch null;
+}
+
+// =============================================================================
+// trap
+// =============================================================================
+//
+// Surface forms:
+//   trap CMD  SIG ...      register CMD as the handler for each SIG
+//   trap ''   SIG ...      ignore the signal
+//   trap '-'  SIG ...      restore default disposition
+//
+// CMD is parsed and lowered at registration time, not at fire time, so
+// surface errors surface immediately. Real signals install a minimal
+// async-signal-safe handler that flips a flag in the session's trap
+// table; the eval safe-point loop drains the flag and runs the trap
+// program in shell context. The pseudo-signal `EXIT` runs at shell
+// exit (no signal handler involved) and is the most common form.
+
+fn trapFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    if (argv.len < 3) {
+        _ = writeAllToFd(io.stderr, "trap: usage: trap CMD SIGNAL [SIGNAL...]\n");
+        return .{ .exited = 2 };
+    }
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+
+    const cmd = argv[1];
+    const sig_args = argv[2..];
+
+    // Pre-parse + pre-lower if a real handler is being installed. Errors
+    // surface here so the user finds out at trap time.
+    var prepared_arena: ?std.heap.ArenaAllocator = null;
+    var prepared_program: ?*const program_mod.Program = null;
+    const action: enum { run, ignore, default } = blk: {
+        if (cmd.len == 0) break :blk .ignore;
+        if (std.mem.eql(u8, cmd, "-")) break :blk .default;
+
+        var arena = std.heap.ArenaAllocator.init(session.alloc);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+
+        const source = diag.Source{ .name = "<trap>", .text = cmd };
+        const parsed = shape_mod.parse(source, a, null) catch {
+            arena.deinit();
+            _ = writeAllToFd(io.stderr, "trap: parse error in trap source\n");
+            return .{ .exited = 1 };
+        };
+        const low_ctx = program_mod.LowerContext{ .alloc = a, .source = source };
+        const prog = program_mod.lower(parsed.root, &low_ctx, null) catch {
+            arena.deinit();
+            _ = writeAllToFd(io.stderr, "trap: lower error in trap source\n");
+            return .{ .exited = 1 };
+        };
+        prepared_arena = arena;
+        prepared_program = prog;
+        break :blk .run;
+    };
+
+    // Apply to every named signal. If any signal name is bad, abort
+    // before installing — partial install is worse than no install.
+    var sigs = std.ArrayListUnmanaged(session_mod.TrapSignal).empty;
+    defer sigs.deinit(session.alloc);
+    for (sig_args) |name| {
+        const sig = session_mod.TrapTable.parseSignal(name) orelse {
+            if (prepared_arena) |*arena| arena.deinit();
+            var msg_buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "trap: unknown signal `{s}`\n", .{name}) catch "trap: unknown signal\n";
+            _ = writeAllToFd(io.stderr, msg);
+            return .{ .exited = 1 };
+        };
+        try sigs.append(session.alloc, sig);
+    }
+
+    for (sigs.items, 0..) |sig, i| {
+        switch (action) {
+            .ignore => {
+                session.traps.setIgnore(sig);
+                installSignalDispatch(sig, .ignore);
+            },
+            .default => {
+                session.traps.setDefault(sig);
+                installSignalDispatch(sig, .default);
+            },
+            .run => {
+                if (i == 0) {
+                    session.traps.setRun(sig, prepared_arena.?, prepared_program.?);
+                    prepared_arena = null;
+                } else {
+                    // Subsequent signals share the same source — re-parse
+                    // and re-lower into a fresh arena per slot so the
+                    // table owns each entry independently.
+                    var arena = std.heap.ArenaAllocator.init(session.alloc);
+                    const a = arena.allocator();
+                    const source = diag.Source{ .name = "<trap>", .text = cmd };
+                    const parsed = shape_mod.parse(source, a, null) catch {
+                        arena.deinit();
+                        continue;
+                    };
+                    const low_ctx = program_mod.LowerContext{ .alloc = a, .source = source };
+                    const prog = program_mod.lower(parsed.root, &low_ctx, null) catch {
+                        arena.deinit();
+                        continue;
+                    };
+                    session.traps.setRun(sig, arena, prog);
+                }
+                installSignalDispatch(sig, .run);
+            },
+        }
+    }
+    return .{ .exited = 0 };
+}
+
+const SignalDispatch = enum { run, ignore, default };
+
+/// Install (or remove) the per-signal disposition. Real signals get a
+/// minimal handler that toggles the session's pending flag via a
+/// `current_session` pointer. EXIT is a pseudo-signal — no kernel
+/// handler is installed; the trap fires on shell exit instead.
+fn installSignalDispatch(sig: session_mod.TrapSignal, mode: SignalDispatch) void {
+    if (sig == .EXIT) return;
+    const sig_id = sigToCSig(sig);
+    var sa: std.posix.Sigaction = .{
+        .handler = switch (mode) {
+            .ignore => .{ .handler = std.c.SIG.IGN },
+            .default => .{ .handler = std.c.SIG.DFL },
+            .run => .{ .handler = trapSignalHandler },
+        },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.c.SA.RESTART,
+    };
+    std.posix.sigaction(sig_id, &sa, null);
+}
+
+fn sigToCSig(sig: session_mod.TrapSignal) std.c.SIG {
+    return switch (sig) {
+        .EXIT => unreachable,
+        .HUP => .HUP,
+        .INT => .INT,
+        .QUIT => .QUIT,
+        .TERM => .TERM,
+        .USR1 => .USR1,
+        .USR2 => .USR2,
+    };
+}
+
+/// Module-level pointer to the session whose trap table the handler
+/// should mark. Slash is single-session per process; `installSession`
+/// is called once near startup. The handler itself does nothing more
+/// than flip a boolean — async-signal-safe per PLAN §19.
+var current_session: ?*session_mod.Session = null;
+
+pub fn installSession(s: *session_mod.Session) void {
+    current_session = s;
+}
+
+fn trapSignalHandler(sig_id: std.c.SIG) callconv(.c) void {
+    const s = current_session orelse return;
+    const sig: session_mod.TrapSignal = switch (sig_id) {
+        .HUP => .HUP,
+        .INT => .INT,
+        .QUIT => .QUIT,
+        .TERM => .TERM,
+        .USR1 => .USR1,
+        .USR2 => .USR2,
+        else => return,
+    };
+    s.traps.markPending(sig);
 }

@@ -9,6 +9,116 @@ const program_mod = @import("program.zig");
 
 pub const Allocator = std.mem.Allocator;
 
+/// Tabulated signals supported by `trap`. The values are sequential
+/// (0..N) because the trap table indexes by `@intFromEnum`; the mapping
+/// to POSIX signal numbers lives in `builtins.sigToCSig`.
+pub const TrapSignal = enum(u8) {
+    EXIT, // pseudo-signal: runs at shell exit
+    HUP,
+    INT,
+    QUIT,
+    TERM,
+    USR1,
+    USR2,
+};
+
+pub const TrapDispo = union(enum) {
+    default,
+    ignore,
+    run: TrapEntry,
+
+    pub const TrapEntry = struct {
+        arena: std.heap.ArenaAllocator,
+        program: *const program_mod.Program,
+    };
+};
+
+/// Per-session signal trap registry. Each slot holds either the default
+/// disposition, an "ignore" marker, or a session-scoped Program parsed
+/// from the registered source string. Real signals (everything except
+/// EXIT) also have a `pending` flag set by the async-signal-safe handler;
+/// the eval layer drains the flag at safe points and runs the trap.
+pub const TrapTable = struct {
+    alloc: Allocator,
+    /// Indexed by the TrapSignal enum value (offset zero is EXIT).
+    dispo: [num_slots]TrapDispo,
+    /// Set by the signal handler; read at safe points.
+    pending: [num_slots]bool,
+
+    pub const num_slots: usize = @typeInfo(TrapSignal).@"enum".fields.len;
+
+    pub fn init(alloc: Allocator) TrapTable {
+        var t: TrapTable = .{
+            .alloc = alloc,
+            .dispo = undefined,
+            .pending = [_]bool{false} ** num_slots,
+        };
+        for (&t.dispo) |*slot| slot.* = .default;
+        return t;
+    }
+
+    pub fn deinit(self: *TrapTable) void {
+        for (&self.dispo) |*slot| switch (slot.*) {
+            .run => |*entry| entry.arena.deinit(),
+            else => {},
+        };
+    }
+
+    pub fn parseSignal(name: []const u8) ?TrapSignal {
+        if (std.mem.eql(u8, name, "EXIT")) return .EXIT;
+        if (std.mem.eql(u8, name, "HUP")) return .HUP;
+        if (std.mem.eql(u8, name, "INT")) return .INT;
+        if (std.mem.eql(u8, name, "QUIT")) return .QUIT;
+        if (std.mem.eql(u8, name, "TERM")) return .TERM;
+        if (std.mem.eql(u8, name, "USR1")) return .USR1;
+        if (std.mem.eql(u8, name, "USR2")) return .USR2;
+        return null;
+    }
+
+    pub fn setIgnore(self: *TrapTable, sig: TrapSignal) void {
+        self.clearSlot(sig);
+        self.dispo[@intFromEnum(sig)] = .ignore;
+    }
+
+    pub fn setDefault(self: *TrapTable, sig: TrapSignal) void {
+        self.clearSlot(sig);
+        self.dispo[@intFromEnum(sig)] = .default;
+    }
+
+    pub fn setRun(
+        self: *TrapTable,
+        sig: TrapSignal,
+        arena: std.heap.ArenaAllocator,
+        program: *const program_mod.Program,
+    ) void {
+        self.clearSlot(sig);
+        self.dispo[@intFromEnum(sig)] = .{ .run = .{ .arena = arena, .program = program } };
+    }
+
+    pub fn lookup(self: *const TrapTable, sig: TrapSignal) TrapDispo {
+        return self.dispo[@intFromEnum(sig)];
+    }
+
+    pub fn markPending(self: *TrapTable, sig: TrapSignal) void {
+        self.pending[@intFromEnum(sig)] = true;
+    }
+
+    pub fn takePending(self: *TrapTable, sig: TrapSignal) bool {
+        const idx = @intFromEnum(sig);
+        const was = self.pending[idx];
+        self.pending[idx] = false;
+        return was;
+    }
+
+    fn clearSlot(self: *TrapTable, sig: TrapSignal) void {
+        const idx = @intFromEnum(sig);
+        switch (self.dispo[idx]) {
+            .run => |*entry| entry.arena.deinit(),
+            else => {},
+        }
+    }
+};
+
 /// Store for user-defined `cmd` bodies. Both keys (definition names) and
 /// values (lowered Programs) live in the entry's own arena so the
 /// definition outlives the originating parse.
@@ -73,6 +183,7 @@ pub const Session = struct {
     builtins: builtins.BuiltinSet,
     vars: vars.VarStore,
     defs: DefStore,
+    traps: TrapTable,
     /// Inherited environment as a raw `execve`-ready pointer. Threaded
     /// from `std.c.environ` in `main`; not owned by Session.
     envp: [*:null]const ?[*:0]const u8,
@@ -102,6 +213,7 @@ pub const Session = struct {
             .builtins = try builtins.init(alloc),
             .vars = vars.VarStore.init(alloc),
             .defs = DefStore.init(alloc),
+            .traps = TrapTable.init(alloc),
             .envp = envp,
             .interactive = interactive,
             .default_pipefail = true,
@@ -115,6 +227,7 @@ pub const Session = struct {
         self.builtins.deinit(self.alloc);
         self.vars.deinit();
         self.defs.deinit();
+        self.traps.deinit();
         self.clearPathCache();
         self.path_cache.deinit(self.alloc);
         if (self.path_cache_signature) |sig| self.alloc.free(sig);

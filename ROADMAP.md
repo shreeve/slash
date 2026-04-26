@@ -130,22 +130,6 @@ builtin. Users configure by writing Slash code in `.slashrc`.
 
 
 
-### 9. `trap` builtin
-
-`trap 'CMD' SIGNAL...` registers a Slash source string to run when the
-named signal is received. `trap '' SIGNAL` ignores the signal. `trap -`
-restores default. The `EXIT` pseudo-signal runs on shell exit.
-
-Real scripts need this for cleanup paths. Implementation requires:
-- Per-session signal handler table (signal → Slash source)
-- The minimal `SIGCHLD`-style flag handler pattern (PLAN §19) extended
-  to user signals
-- Trap source is parsed to a `Program` at registration, not at fire time
-- Trap fires at the next safe point (between sequence items, or before
-  the next prompt)
-
----
-
 
 ## REPL — world class
 
@@ -158,7 +142,7 @@ This work depends on partial-Shape support for incomplete input (REPL
 continuation prompt) and benefits from Tier 3 #3 (real
 diagnostics).
 
-### 10. Live syntax highlighting
+### 9. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -173,7 +157,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 11. Multi-line continuation
+### 10. Multi-line continuation
 
 If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
 heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
@@ -189,7 +173,7 @@ if test -d /tmp {
 We know exactly when they're inside the block (open `{` on stack) and
 when the statement is complete (matched `}` and shape is well-formed).
 
-### 12. Tab completion via Shape introspection
+### 11. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -202,7 +186,7 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 13. History
+### 12. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -215,12 +199,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 14. Bracket matching
+### 13. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 15. Prompt
+### 14. Prompt
 
 Default is minimal but useful:
 
@@ -238,7 +222,7 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 16. Implementation foundation
+### 15. Implementation foundation
 
 The REPL is one new module — `src/repl.zig`, ~600-800 lines.
 Dependencies:

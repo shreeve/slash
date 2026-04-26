@@ -735,12 +735,20 @@ fn evalSequence(
             continue;
         }
 
+        // Safe point: between sequence items, fire any pending signal
+        // traps before launching the next program. This is the spot
+        // PLAN §19 calls out as "after each top-level item completes,
+        // before starting the next".
+        try fireSignalTraps(session, ctx, sink);
+
         const out = try evalProgram(item.program, session, ctx, sink);
         last_result = out.expression_result;
         last_job = out.job;
 
         job.service(&session.jobs, .poll, null) catch {};
         if (session.exit_request != null) break;
+
+        try fireSignalTraps(session, ctx, sink);
 
         if (item.next_op) |op| {
             skip_next = !shouldRun(last_result, op);
@@ -751,6 +759,50 @@ fn evalSequence(
         session.jobs.completeZeroChild(j, .{ .exited = 0 });
         break :blk j;
     }, .expression_result = last_result };
+}
+
+/// Drain pending signal flags and run the registered trap programs.
+/// Each trap fires at most once per sequence boundary; if its body
+/// raises an error, we let it bubble. The trap body inherits the
+/// surrounding context — same scratch allocator, same in-child flag —
+/// so a trap inside a forked child still does the right thing.
+const real_trap_signals = [_]session_mod.TrapSignal{
+    .HUP, .INT, .QUIT, .TERM, .USR1, .USR2,
+};
+
+fn fireSignalTraps(session: *Session, ctx: EvalContext, sink: ?Sink) !void {
+    for (real_trap_signals) |sig| {
+        if (!session.traps.takePending(sig)) continue;
+        const dispo = session.traps.lookup(sig);
+        switch (dispo) {
+            .run => |entry| {
+                const out = evalProgram(entry.program, session, ctx, sink) catch |err| switch (err) {
+                    error.BreakLoop, error.ContinueLoop, error.ReturnFromCmd => continue,
+                    else => return err,
+                };
+                _ = out;
+            },
+            else => {},
+        }
+    }
+}
+
+/// Run the EXIT pseudo-signal trap if one is registered. Called by the
+/// top-level entry point right before returning to the OS so cleanup
+/// scripts get a last-call moment.
+pub fn fireExitTrap(session: *Session, scratch: Allocator, sink: ?Sink) !void {
+    const dispo = session.traps.lookup(.EXIT);
+    switch (dispo) {
+        .run => |entry| {
+            const ctx: EvalContext = .{ .scratch = scratch };
+            const out = evalProgram(entry.program, session, ctx, sink) catch |err| switch (err) {
+                error.BreakLoop, error.ContinueLoop, error.ReturnFromCmd => return,
+                else => return err,
+            };
+            _ = out;
+        },
+        else => {},
+    }
 }
 
 fn shouldRun(prev: Result, op: program_mod.SequenceOp) bool {
