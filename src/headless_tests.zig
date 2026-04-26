@@ -202,6 +202,104 @@ const cases: []const Case = &.{
         .source = "x=alive; echo first $x; unset x; echo second $x",
         .expect = .{ .exit_code = 0, .stdout = "first alive\nsecond\n" },
     },
+
+    // ---- dq variable interpolation ---------------------------------------
+
+    .{
+        .name = "dq simple variable",
+        .source = "x=world; echo \"hello $x\"",
+        .expect = .{ .exit_code = 0, .stdout = "hello world\n" },
+    },
+    .{
+        .name = "dq variable alone",
+        .source = "x=world; echo \"$x\"",
+        .expect = .{ .exit_code = 0, .stdout = "world\n" },
+    },
+    .{
+        .name = "dq braced variable",
+        .source = "dir=/tmp; echo \"path: ${dir}/x\"",
+        .expect = .{ .exit_code = 0, .stdout = "path: /tmp/x\n" },
+    },
+    .{
+        .name = "dq concatenated variables",
+        .source = "x=alpha; y=beta; echo \"$x$y\"",
+        .expect = .{ .exit_code = 0, .stdout = "alphabeta\n" },
+    },
+    .{
+        .name = "dq command substitution",
+        .source = "echo \"got: $(/bin/echo hi)\"",
+        .expect = .{ .exit_code = 0, .stdout = "got: hi\n" },
+    },
+    .{
+        .name = "dq cmd subst sandwiched between text",
+        .source = "echo \"prefix-$(/bin/echo body)-suffix\"",
+        .expect = .{ .exit_code = 0, .stdout = "prefix-body-suffix\n" },
+    },
+    .{
+        .name = "dq escape backslash dollar keeps literal",
+        .source = "x=expanded; echo \"\\$x is literal\"",
+        .expect = .{ .exit_code = 0, .stdout = "$x is literal\n" },
+    },
+    .{
+        .name = "dq escape newline",
+        .source = "echo \"line1\\nline2\"",
+        .expect = .{ .exit_code = 0, .stdout = "line1\nline2\n" },
+    },
+    .{
+        .name = "dq escape tab",
+        .source = "echo \"a\\tb\"",
+        .expect = .{ .exit_code = 0, .stdout = "a\tb\n" },
+    },
+    .{
+        .name = "dq escape embedded quote",
+        .source = "echo \"q\\\"end\"",
+        .expect = .{ .exit_code = 0, .stdout = "q\"end\n" },
+    },
+    .{
+        .name = "dq empty string",
+        .source = "echo \"\"",
+        .expect = .{ .exit_code = 0, .stdout = "\n" },
+    },
+    .{
+        .name = "dq preserves leading and trailing whitespace",
+        .source = "echo \"  spaces  \"",
+        .expect = .{ .exit_code = 0, .stdout = "  spaces  \n" },
+    },
+    .{
+        .name = "dq single-quoted is unaffected",
+        .source = "x=expanded; echo '$x literal'",
+        .expect = .{ .exit_code = 0, .stdout = "$x literal\n" },
+    },
+    .{
+        .name = "dq variable then literal text",
+        .source = "name=alice; echo \"hi $name, welcome\"",
+        .expect = .{ .exit_code = 0, .stdout = "hi alice, welcome\n" },
+    },
+    .{
+        .name = "dq undefined variable expands to empty",
+        .source = "echo \"begin>$nope<end\"",
+        .expect = .{ .exit_code = 0, .stdout = "begin><end\n" },
+    },
+    .{
+        .name = "dq inside if condition",
+        .source = "x=hello; if test \"$x\" = hello { echo match } else { echo no }",
+        .expect = .{ .exit_code = 0, .stdout = "match\n" },
+    },
+    .{
+        .name = "dq inside for items",
+        .source = "for s in \"red apple\" \"green pear\" { echo got: $s }",
+        .expect = .{ .exit_code = 0, .stdout = "got: red apple\ngot: green pear\n" },
+    },
+    .{
+        .name = "$? sees previous command result within a sequence",
+        .source = "/bin/sh -c 'exit 7'; echo \"last=$?\"",
+        .expect = .{ .exit_code = 0, .stdout = "last=7\n" },
+    },
+    .{
+        .name = "$? after success is 0",
+        .source = "true; echo \"last=$?\"",
+        .expect = .{ .exit_code = 0, .stdout = "last=0\n" },
+    },
 };
 
 // =============================================================================

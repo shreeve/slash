@@ -18,18 +18,7 @@ whichever order makes sense.
 These are not optional. Without them, common scripts fail in the first
 ten lines and Slash feels half-built.
 
-### 1. Variable expansion inside double-quoted strings
-
-`"hello $name"` is one lexer token today. The variable doesn't expand.
-This is the single most common shell construct on Earth. The fix: split
-the dq string at lex/Shape time into typed fragments (text + variable +
-text + ...). Every shell does this. Without it, scripts feel broken from
-line one.
-
-The expansion engine for this is the same one needed for interpolating
-heredocs (see the Heredoc section), so they should land together.
-
-### 2. Glob expansion against the filesystem
+### 1. Glob expansion against the filesystem
 
 `*.zig` lexes and lowers, but the evaluator emits the literal pattern.
 We need real `fnmatch`-style matching against cwd at expansion time.
@@ -42,7 +31,7 @@ Edge cases that matter:
 
 Without globs, `for f in *.md` is just three letters to nowhere.
 
-### 3. `break` / `continue` (and `return`)
+### 2. `break` / `continue` (and `return`)
 
 PLAN says they're builtins that throw typed errors caught by the loop or
 call frame. They are currently not implemented. Loops without `break`
@@ -55,7 +44,7 @@ The `LoopControl` error type already exists in `eval.zig`. Just need:
   verify
 - A future call frame for `cmd` definitions catches `ReturnFromCmd`
 
-### 4. Recoverable parse errors with line/column/caret
+### 3. Recoverable parse errors with line/column/caret
 
 Today a parse error prints `slash: parse error` and aborts. For both
 scripts and the REPL, this is unacceptable. We have spans on every
@@ -76,16 +65,14 @@ is mid-block, prompt for continuation". This is the difference between
 
 ## Tier 2 — common patterns break
 
-### 5. Heredocs
+### 4. Heredocs
 
-See the dedicated **Heredoc spec** section below. Two natural commits:
+See the dedicated **Heredoc spec** section below. Both literal
+(`<<'TAG'`) and interpolating (`<<TAG`) forms ship in one piece — the
+expansion machinery for the interpolating form is the same one already
+in place for `"$x"` inside double-quoted strings.
 
-a. Literal heredocs (`<<'TAG'`) — independent of any other Tier-1 work.
-   The `<<'TAG'` form just dedents and feeds raw bytes.
-b. Interpolating heredocs (`<<TAG`) — together with item #1 (dq-string
-   interpolation), sharing the same expansion machinery.
-
-### 6. `source` / `.` builtin
+### 5. `source` / `.` builtin
 
 Load another script's contents into the current session, executing in
 shell context (so the assignments and `cmd` definitions in the loaded
@@ -95,7 +82,7 @@ impossible. With it, `~/.slashrc` becomes natural.
 Implementation: read the file, parse, lower, eval with `in_child_context
 = false`. No fork. Errors propagate as the source statement's exit code.
 
-### 7. List-valued command-substitution capture
+### 6. List-valued command-substitution capture
 
 PLAN §7 Rule 29 says `$(...)` is scalar by design, and that list capture
 should be a **distinct surface form**. Pick that surface and ship it.
@@ -107,7 +94,7 @@ Strong candidates:
 
 Without one of these, users can't iterate cleanly over command output.
 
-### 8. Variable expansion fallbacks in `${...}`
+### 7. Variable expansion fallbacks in `${...}`
 
 Just `${var ?? default}`. PLAN §12 explicitly allows the narrow form
 inside quoted strings. No other form ships.
@@ -116,7 +103,7 @@ The `var_braced` Shape part already carries the interior body bytes. The
 expansion engine needs to parse the body: bare name → simple lookup,
 `name ?? default` → lookup-or-fallback.
 
-### 9. Comment handling inside compound forms
+### 8. Comment handling inside compound forms
 
 The wrapper drops comments at the lexer boundary. Need explicit tests
 that comments work:
@@ -130,7 +117,7 @@ that comments work:
 
 ## Tier 3 — robustness
 
-### 10. Memory ownership audit and tightening
+### 9. Memory ownership audit and tightening
 
 Concrete model needs locking down:
 
@@ -146,7 +133,7 @@ session arena (PLAN §6.8).
 Stress test: 10,000 commands in a row, no leaks, no fragmentation. Easy
 to build now, hard to retrofit later.
 
-### 11. Signal handling at the REPL boundary
+### 10. Signal handling at the REPL boundary
 
 PLAN §18-§19 documents the model. The implementation:
 
@@ -158,7 +145,7 @@ PLAN §18-§19 documents the model. The implementation:
 - Foreground-job's process group receives terminal-generated signals;
   shell does not forward `SIGINT` itself.
 
-### 12. Job-control builtins
+### 11. Job-control builtins
 
 `jobs`, `wait`. Detached jobs already register in the table. Just
 expose:
@@ -172,7 +159,7 @@ expose:
 `fg`/`bg` need terminal handoff via `tcsetpgrp` (PLAN §11
 must-get-right #4) and SIGCONT plumbing — separate, larger commit.
 
-### 13. PATH resolution caching
+### 12. PATH resolution caching
 
 We walk `$PATH` linearly on every external command. For a REPL where
 users hit the same commands repeatedly, this is wasteful.
@@ -180,7 +167,7 @@ users hit the same commands repeatedly, this is wasteful.
 A small hashmap on `Session` (name → resolved-path), invalidated on
 `PATH` change. Two dozen lines.
 
-### 14. Diagnostic infrastructure actually used
+### 13. Diagnostic infrastructure actually used
 
 We built `diag.Sink` / `ListSink` / codes per PLAN §16. Almost nothing
 emits structured diagnostics. Every `slash: parse error` print today
@@ -196,7 +183,7 @@ Specific call sites needing structured diagnostics:
 - `exec.spawn` — `EX00xx` for fork/exec/redirect failures with the
   failing path
 
-### 15. CLOEXEC discipline audit
+### 14. CLOEXEC discipline audit
 
 Pipes get FD_CLOEXEC. What about other fds opened by the shell? Verify
 no fd leaks into spawned children when:
@@ -210,7 +197,7 @@ no fd leaks into spawned children when:
 
 ## Tier 4 — quality of execution
 
-### 16. Comprehensive test suite
+### 15. Comprehensive test suite
 
 Need:
 
@@ -228,7 +215,7 @@ Need:
   (PLAN §17.8) — and **only** for those; intentional deltas don't get a
   diff case
 
-### 17. UTF-8 awareness
+### 16. UTF-8 awareness
 
 Today the lexer is ASCII. A user typing `let café = 5` or piping Chinese
 filenames hits errors. We need at minimum:
@@ -241,7 +228,7 @@ filenames hits errors. We need at minimum:
 Stretch: render multi-byte characters in REPL highlighting without
 collapsing the cursor.
 
-### 18. `cd` polish
+### 17. `cd` polish
 
 - `cd -` — toggle to `$OLDPWD`
 - `cd` with no arg goes to `$HOME` (already works), but verify `~` and
@@ -250,7 +237,7 @@ collapsing the cursor.
   decide logical-vs-physical and document
 - `$PWD` and `$OLDPWD` updates in **every** path that changes cwd
 
-### 19. `cmd` user-defined commands (positional only)
+### 18. `cmd` user-defined commands (positional only)
 
 PLAN §3 mentions, §7 Rule 26 commits to "session-scoped unless created
 inside a subshell". Implementation:
@@ -274,7 +261,7 @@ cmd greet {
 }
 ```
 
-### 20. Process substitution `<(...)` / `>(...)`
+### 19. Process substitution `<(...)` / `>(...)`
 
 PLAN §6.2 documents. Implementation:
 - Lexer adds `proc_sub_in` (`<(`) and `proc_sub_out` (`>(`) tokens
@@ -283,7 +270,7 @@ PLAN §6.2 documents. Implementation:
   (BSD/macOS) bindings, threads the path into the parent's argv
 - Job-owned cleanup on every termination path (PLAN §7 Rule 25)
 
-### 21. Configuration loading
+### 20. Configuration loading
 
 `~/.slashrc` is sourced at interactive shell startup. That's the entire
 mechanism. No `~/.slash/config` file format, no `set` runtime config
@@ -293,13 +280,13 @@ builtin. Users configure by writing Slash code in `.slashrc`.
 - `.slashrc` is run before the first prompt; non-interactive shells (`-c`,
   scripts) do not source it
 
-### 22. `read` builtin
+### 21. `read` builtin
 
 `read NAME` consumes a line from stdin into a variable. `read NAME1
 NAME2 ...` consumes a line and splits on whitespace into the named
 variables. Required for any script that takes interactive input.
 
-### 23. `shift` builtin
+### 22. `shift` builtin
 
 `shift` shifts positional parameters down by one (`$2` becomes `$1`,
 etc.); `$#` decrements. `shift N` shifts by N. Required for the
@@ -314,13 +301,13 @@ while test $# -gt 0 {
 }
 ```
 
-### 24. `exec` builtin
+### 23. `exec` builtin
 
 `exec CMD ARGS...` replaces the shell process with the named command (no
 fork). `exec` with redirects and no command applies the redirects to the
 shell itself permanently.
 
-### 25. `type` and `command` builtins
+### 24. `type` and `command` builtins
 
 - `type NAME` — describes how `NAME` resolves: builtin, `cmd`
   definition, alias (none yet), or external (with PATH location)
@@ -329,7 +316,7 @@ shell itself permanently.
 
 Introspection. ~30 lines each.
 
-### 26. `trap` builtin
+### 25. `trap` builtin
 
 `trap 'CMD' SIGNAL...` registers a Slash source string to run when the
 named signal is received. `trap '' SIGNAL` ignores the signal. `trap -`
@@ -519,7 +506,7 @@ This work depends on Tier 1 #4 (recoverable parse errors with partial
 Shape on incomplete input) and benefits from Tier 3 #14 (real
 diagnostics).
 
-### 27. Live syntax highlighting
+### 26. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -534,7 +521,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 28. Multi-line continuation
+### 27. Multi-line continuation
 
 If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
 heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
@@ -550,7 +537,7 @@ if test -d /tmp {
 We know exactly when they're inside the block (open `{` on stack) and
 when the statement is complete (matched `}` and shape is well-formed).
 
-### 29. Tab completion via Shape introspection
+### 28. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -563,7 +550,7 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 30. History
+### 29. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -576,12 +563,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 31. Bracket matching
+### 30. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 32. Prompt
+### 31. Prompt
 
 Default is minimal but useful:
 
@@ -599,7 +586,7 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 33. Implementation foundation
+### 32. Implementation foundation
 
 The REPL is one new module — `src/repl.zig`, ~600-800 lines.
 Dependencies:

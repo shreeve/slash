@@ -953,9 +953,274 @@ fn convertWordPart(
         '"' => .double_quoted,
         else => .bare,
     };
+
+    // Double-quoted strings interpolate `$name`, `${...}`, and `$(...)` —
+    // the body is split into typed parts at Shape time. Escapes are
+    // decoded inline. Outer flavor=double_quoted is preserved on the
+    // first text fragment (if any) so the Word lowering round-trip is
+    // observable in tests; subsequent fragments use .bare since their
+    // bytes are already cooked.
+    if (flavor == .double_quoted) {
+        const parts = try splitDoubleQuoted(alloc, source, bytes, span, sink);
+        return .{ .parts = parts, .span = span };
+    }
+
     const parts = try alloc.alloc(WordPartShape, 1);
     parts[0] = .{ .text = .{ .bytes = bytes, .flavor = flavor, .span = span } };
     return .{ .parts = parts, .span = span };
+}
+
+// =============================================================================
+// Double-quoted string interpolation
+// =============================================================================
+//
+// A `"..."` lexer token is one byte run. The Shape converter walks the
+// interior, decoding escapes and splitting on `$name`, `${name}`, and
+// `$(...)` to produce a list of typed `WordPartShape` items. The Word
+// layer concatenates them at runtime; list-typed variables in the middle
+// of a quoted string are caught at expansion time.
+//
+// Escape table (matching word.zig's decodeDouble):
+//   \"  → "
+//   \\  → \
+//   \n  → newline
+//   \t  → tab
+//   \r  → carriage return
+//   \$  → $ (literal — no interpolation)
+//   \0  → NUL
+//   \X  → \X verbatim (unknown escape)
+
+fn splitDoubleQuoted(
+    alloc: Allocator,
+    source: Source,
+    bytes: []const u8,
+    full_span: Span,
+    sink: ?Sink,
+) ![]WordPartShape {
+    std.debug.assert(bytes.len >= 2 and bytes[0] == '"' and bytes[bytes.len - 1] == '"');
+    const body = bytes[1 .. bytes.len - 1];
+    const body_start: u32 = full_span.start + 1;
+
+    var parts = std.ArrayListUnmanaged(WordPartShape).empty;
+    defer parts.deinit(alloc);
+    var text_buf = std.ArrayListUnmanaged(u8).empty;
+    defer text_buf.deinit(alloc);
+    var text_run_start: usize = 0;
+
+    var i: usize = 0;
+    while (i < body.len) {
+        const c = body[i];
+
+        if (c == '\\' and i + 1 < body.len) {
+            const n = body[i + 1];
+            const decoded: u8 = switch (n) {
+                '"' => '"',
+                '\\' => '\\',
+                '$' => '$',
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                '0' => 0,
+                else => {
+                    try text_buf.append(alloc, c);
+                    try text_buf.append(alloc, n);
+                    i += 2;
+                    continue;
+                },
+            };
+            try text_buf.append(alloc, decoded);
+            i += 2;
+            continue;
+        }
+
+        if (c == '$' and i + 1 < body.len) {
+            const n = body[i + 1];
+
+            // ${name} — braced reference (interior left for runtime parsing)
+            if (n == '{') {
+                var j = i + 2;
+                while (j < body.len and body[j] != '}') : (j += 1) {}
+                if (j < body.len) {
+                    try flushTextRun(alloc, &parts, &text_buf, body_start, text_run_start, i);
+                    const interior = body[i + 2 .. j];
+                    const part_span = Span{
+                        .start = body_start + @as(u32, @intCast(i)),
+                        .end = body_start + @as(u32, @intCast(j + 1)),
+                    };
+                    try parts.append(alloc, .{ .var_braced = .{
+                        .body = try alloc.dupe(u8, interior),
+                        .span = part_span,
+                    } });
+                    i = j + 1;
+                    text_run_start = i;
+                    continue;
+                }
+                // unterminated; emit a diagnostic and treat the `$` as text
+                try emitBadShape(source, .nil, sink, "unterminated `${...}` in double-quoted string");
+                try text_buf.append(alloc, '$');
+                i += 1;
+                continue;
+            }
+
+            // $(...) — command substitution. Find matching `)` honoring
+            // nested parentheses inside the captured body.
+            if (n == '(') {
+                var depth: u32 = 1;
+                var j = i + 2;
+                while (j < body.len) {
+                    const ch = body[j];
+                    if (ch == '"') {
+                        // Skip a nested string entirely so its parens are
+                        // ignored by depth tracking. Honor backslash.
+                        j += 1;
+                        while (j < body.len and body[j] != '"') {
+                            if (body[j] == '\\' and j + 1 < body.len) j += 1;
+                            j += 1;
+                        }
+                        if (j < body.len) j += 1;
+                        continue;
+                    }
+                    if (ch == '\'') {
+                        j += 1;
+                        while (j < body.len and body[j] != '\'') j += 1;
+                        if (j < body.len) j += 1;
+                        continue;
+                    }
+                    if (ch == '(') depth += 1;
+                    if (ch == ')') {
+                        depth -= 1;
+                        if (depth == 0) break;
+                    }
+                    j += 1;
+                }
+                if (j < body.len and depth == 0) {
+                    try flushTextRun(alloc, &parts, &text_buf, body_start, text_run_start, i);
+
+                    const inner_bytes = body[i + 2 .. j];
+                    const inner_source = Source{ .name = source.name, .text = inner_bytes };
+                    var p = parser.Parser.init(alloc, inner_bytes);
+                    defer p.deinit();
+                    const inner_sexp = p.parseProgram() catch {
+                        try emitBadShape(source, .nil, sink, "parse error in `$(...)` inside double-quoted string");
+                        try text_buf.append(alloc, '$');
+                        i += 1;
+                        continue;
+                    };
+                    const inner_shape = try convertShape(alloc, inner_source, inner_sexp, sink);
+                    const body_ptr = try alloc.create(Shape);
+                    body_ptr.* = inner_shape;
+
+                    const part_span = Span{
+                        .start = body_start + @as(u32, @intCast(i)),
+                        .end = body_start + @as(u32, @intCast(j + 1)),
+                    };
+                    try parts.append(alloc, .{ .cmd_subst = .{
+                        .body = body_ptr,
+                        .span = part_span,
+                    } });
+                    i = j + 1;
+                    text_run_start = i;
+                    continue;
+                }
+                try emitBadShape(source, .nil, sink, "unterminated `$(...)` in double-quoted string");
+                try text_buf.append(alloc, '$');
+                i += 1;
+                continue;
+            }
+
+            // $name — identifier-style reference
+            if (isVarNameStart(n)) {
+                try flushTextRun(alloc, &parts, &text_buf, body_start, text_run_start, i);
+                var j = i + 2;
+                while (j < body.len and isVarNameCont(body[j])) : (j += 1) {}
+                const name = body[i + 1 .. j];
+                const part_span = Span{
+                    .start = body_start + @as(u32, @intCast(i)),
+                    .end = body_start + @as(u32, @intCast(j)),
+                };
+                try parts.append(alloc, .{ .variable = .{
+                    .name = try alloc.dupe(u8, name),
+                    .span = part_span,
+                } });
+                i = j;
+                text_run_start = i;
+                continue;
+            }
+
+            // $0..$9 / $? / $$ / $# / $@ / $! / $* — single-byte specials
+            if (isSpecialVarChar(n)) {
+                try flushTextRun(alloc, &parts, &text_buf, body_start, text_run_start, i);
+                const name = body[i + 1 .. i + 2];
+                const part_span = Span{
+                    .start = body_start + @as(u32, @intCast(i)),
+                    .end = body_start + @as(u32, @intCast(i + 2)),
+                };
+                try parts.append(alloc, .{ .variable = .{
+                    .name = try alloc.dupe(u8, name),
+                    .span = part_span,
+                } });
+                i += 2;
+                text_run_start = i;
+                continue;
+            }
+        }
+
+        // Plain byte (or lonely `$` at end of string).
+        try text_buf.append(alloc, c);
+        i += 1;
+    }
+
+    // Flush any trailing text run.
+    try flushTextRun(alloc, &parts, &text_buf, body_start, text_run_start, body.len);
+
+    // Empty `""` produces a single empty-text part so the resulting Word
+    // is observably an empty argv element rather than a missing one.
+    if (parts.items.len == 0) {
+        try parts.append(alloc, .{ .text = .{
+            .bytes = "",
+            .flavor = .bare,
+            .span = full_span,
+        } });
+    }
+
+    return parts.toOwnedSlice(alloc);
+}
+
+fn flushTextRun(
+    alloc: Allocator,
+    parts: *std.ArrayListUnmanaged(WordPartShape),
+    text_buf: *std.ArrayListUnmanaged(u8),
+    body_start: u32,
+    text_run_start: usize,
+    body_offset_now: usize,
+) !void {
+    if (text_buf.items.len == 0) return;
+    const cooked = try alloc.dupe(u8, text_buf.items);
+    const part_span = Span{
+        .start = body_start + @as(u32, @intCast(text_run_start)),
+        .end = body_start + @as(u32, @intCast(body_offset_now)),
+    };
+    try parts.append(alloc, .{ .text = .{
+        .bytes = cooked,
+        .flavor = .bare,
+        .span = part_span,
+    } });
+    text_buf.clearRetainingCapacity();
+}
+
+fn isVarNameStart(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+}
+
+fn isVarNameCont(c: u8) bool {
+    return isVarNameStart(c) or (c >= '0' and c <= '9');
+}
+
+fn isSpecialVarChar(c: u8) bool {
+    return switch (c) {
+        '0'...'9', '?', '#', '@', '!', '*', '$' => true,
+        else => false,
+    };
 }
 
 fn convertVariableAtom(

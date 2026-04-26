@@ -98,18 +98,23 @@ fn evalProgram(
     ctx: EvalContext,
     sink: ?Sink,
 ) anyerror!EvalOutcome {
-    return switch (prog.*) {
-        .command => |c| evalCommand(&c, session, ctx, sink),
-        .pipeline => |p| evalPipeline(p, session, ctx, sink),
-        .sequence => |s| evalSequence(s, session, ctx, sink),
-        .subshell => |s| evalSubshell(s, session, ctx, sink),
-        .block => |b| evalBlock(b, session, ctx, sink),
-        .detached => |d| evalDetached(d, session, ctx, sink),
-        .assigns => |a| evalAssigns(a, session, ctx, sink),
-        .conditional => |c| evalConditional(c, session, ctx, sink),
-        .@"while" => |w| evalWhile(w, session, ctx, sink),
-        .@"for" => |f| evalFor(f, session, ctx, sink),
+    const outcome: EvalOutcome = switch (prog.*) {
+        .command => |c| try evalCommand(&c, session, ctx, sink),
+        .pipeline => |p| try evalPipeline(p, session, ctx, sink),
+        .sequence => |s| try evalSequence(s, session, ctx, sink),
+        .subshell => |s| try evalSubshell(s, session, ctx, sink),
+        .block => |b| try evalBlock(b, session, ctx, sink),
+        .detached => |d| try evalDetached(d, session, ctx, sink),
+        .assigns => |a| try evalAssigns(a, session, ctx, sink),
+        .conditional => |c| try evalConditional(c, session, ctx, sink),
+        .@"while" => |w| try evalWhile(w, session, ctx, sink),
+        .@"for" => |f| try evalFor(f, session, ctx, sink),
     };
+    // `$?` reflects the most recent command result. Every program node
+    // updates it on completion so subsequent statements in the same
+    // sequence (or condition / body) observe the correct value.
+    session.last_status = outcome.expression_result.toStatusByte();
+    return outcome;
 }
 
 // =============================================================================
