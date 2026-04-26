@@ -914,6 +914,93 @@ const cases: []const Case = &.{
         .source = "for naïve in alpha beta { echo $naïve }",
         .expect = .{ .exit_code = 0, .stdout = "alpha\nbeta\n" },
     },
+
+    // ---- pipefail across multi-stage pipelines (PLAN §7 Rule 11) --------
+    //
+    // pipefail = on by default. The pipeline's exit status is the FIRST
+    // non-zero/signaled stage; otherwise zero. Tests cover a 3-stage
+    // pipeline with the failure at each position.
+
+    .{
+        .name = "pipeline: 3 stages all succeed",
+        .source = "/bin/echo hello | /bin/cat | /bin/cat",
+        .expect = .{ .exit_code = 0, .stdout = "hello\n" },
+    },
+    .{
+        .name = "pipeline: failure in stage 1 propagates",
+        .source = "/bin/sh -c 'exit 5' | /bin/cat | /bin/cat",
+        .expect = .{ .exit_code = 5 },
+    },
+    .{
+        .name = "pipeline: failure in stage 2 propagates",
+        .source = "/bin/echo data | /bin/sh -c 'exit 6' | /bin/cat",
+        .expect = .{ .exit_code = 6 },
+    },
+    .{
+        .name = "pipeline: failure in stage 3 propagates",
+        .source = "/bin/echo data | /bin/cat | /bin/sh -c 'exit 7'",
+        .expect = .{ .exit_code = 7 },
+    },
+    .{
+        .name = "pipeline: first non-zero wins (multiple failures)",
+        .source = "/bin/sh -c 'exit 3' | /bin/sh -c 'exit 5' | /bin/sh -c 'exit 7'",
+        .expect = .{ .exit_code = 3 },
+    },
+
+    // ---- redirect ordering ----------------------------------------------
+    //
+    // `>file 2>&1` writes both stdout and stderr to file. Reverse order
+    // `2>&1 >file` redirects stderr to whatever stdout was THEN points
+    // stdout to file — only stdout ends up in the file. Both shells
+    // should agree.
+
+    .{
+        .name = "redirect: > file 2>&1 captures both streams",
+        .source = "/bin/sh -c 'echo out; echo err 1>&2' >/tmp/slash-redir-1.txt 2>&1; /bin/cat /tmp/slash-redir-1.txt; rm -f /tmp/slash-redir-1.txt",
+        .expect = .{ .exit_code = 0, .stdout = "out\nerr\n" },
+    },
+    .{
+        .name = "redirect: append to file",
+        .source = "/bin/echo a > /tmp/slash-redir-2.txt; /bin/echo b >> /tmp/slash-redir-2.txt; /bin/cat /tmp/slash-redir-2.txt; rm -f /tmp/slash-redir-2.txt",
+        .expect = .{ .exit_code = 0, .stdout = "a\nb\n" },
+    },
+    .{
+        .name = "redirect: numbered fd write",
+        .source = "/bin/sh -c 'echo err 1>&2' 2>/tmp/slash-redir-3.txt; /bin/cat /tmp/slash-redir-3.txt; rm -f /tmp/slash-redir-3.txt",
+        .expect = .{ .exit_code = 0, .stdout = "err\n" },
+    },
+    .{
+        .name = "redirect: input < file",
+        .source = "printf 'aa\\nbb\\n' > /tmp/slash-redir-4.txt; /usr/bin/wc -l < /tmp/slash-redir-4.txt; rm -f /tmp/slash-redir-4.txt",
+        .expect = .{ .exit_code = 0, .stdout = "2", .stdout_contains = true },
+    },
+
+    // ---- multi-line scripts with comments & mixed structure --------------
+    //
+    // Smoke that the lexer/parser handle the common idiomatic
+    // combinations: blank lines, comments, mixed brace/indent forms,
+    // nested control flow.
+
+    .{
+        .name = "multiline: blank lines are statement separators",
+        .source = "echo a\n\n\necho b\n\necho c",
+        .expect = .{ .exit_code = 0, .stdout = "a\nb\nc\n" },
+    },
+    .{
+        .name = "multiline: indented for body",
+        .source = "for x in 1 2 3\n  echo n=$x\n",
+        .expect = .{ .exit_code = 0, .stdout = "n=1\nn=2\nn=3\n" },
+    },
+    .{
+        .name = "multiline: nested if inside for body",
+        .source = "for x in 0 1 2 3 {\n  if test $x -gt 1 { echo big-$x }\n}",
+        .expect = .{ .exit_code = 0, .stdout = "big-2\nbig-3\n" },
+    },
+    .{
+        .name = "multiline: cmd def + invocation across lines",
+        .source = "cmd greet {\n  echo hello $1\n}\ngreet world\ngreet alice",
+        .expect = .{ .exit_code = 0, .stdout = "hello world\nhello alice\n" },
+    },
 };
 
 // =============================================================================
