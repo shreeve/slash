@@ -18,6 +18,7 @@ const std = @import("std");
 const runtime = @import("runtime.zig");
 const session_mod = @import("session.zig");
 const vars_mod = @import("vars.zig");
+const job_mod = @import("job.zig");
 
 pub const Allocator = std.mem.Allocator;
 pub const Result = runtime.Result;
@@ -84,6 +85,8 @@ pub fn init(alloc: Allocator) !BuiltinSet {
     try set.table.put(alloc, "read", .{ .name = "read", .run = readFn });
     try set.table.put(alloc, "shift", .{ .name = "shift", .run = shiftFn });
     try set.table.put(alloc, "type", .{ .name = "type", .run = typeFn });
+    try set.table.put(alloc, "jobs", .{ .name = "jobs", .run = jobsFn });
+    try set.table.put(alloc, "wait", .{ .name = "wait", .run = waitFn });
     return set;
 }
 
@@ -729,4 +732,140 @@ fn accessExecutable(path: []const u8) bool {
     pathbuf[path.len] = 0;
     const path_z: [*:0]const u8 = @ptrCast(&pathbuf);
     return std.c.access(path_z, std.c.X_OK) == 0;
+}
+
+// =============================================================================
+// jobs / wait
+// =============================================================================
+//
+// `jobs` lists the session's background/detached jobs with their current
+// state and command text. Foreground zero-child jobs are runtime
+// bookkeeping and stay invisible.
+//
+// `wait` (no args) blocks until every currently-known background job is
+// done; the result is the last completing job's exit status. `wait %N`
+// blocks on the given job id specifically.
+
+fn jobsFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    _ = argv;
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+
+    // Drain any pending child events before listing so the displayed
+    // state is as fresh as possible (PLAN §19 safe-point reaping).
+    job_mod.service(&session.jobs, .poll, null) catch {};
+
+    var line_buf: [512]u8 = undefined;
+    for (session.jobs.list()) |j| {
+        if (!j.detached) continue;
+        const status_label = formatJobState(j.state);
+        const text = j.command_text orelse "<job>";
+        const line = std.fmt.bufPrint(
+            &line_buf,
+            "[{d}] {s} {s}\n",
+            .{ j.id, status_label.bytes(&line_buf), text },
+        ) catch continue;
+        _ = writeAllToFd(io.stdout, line);
+    }
+    return .{ .exited = 0 };
+}
+
+const StateLabel = struct {
+    inline_buf: [32]u8 = undefined,
+    len: u8 = 0,
+
+    fn bytes(self: *const StateLabel, _: []u8) []const u8 {
+        return self.inline_buf[0..self.len];
+    }
+};
+
+fn formatJobState(state: job_mod.JobState) StateLabel {
+    var label = StateLabel{};
+    const text = switch (state) {
+        .pending => "Pending",
+        .running => "Running",
+        .stopped => "Stopped",
+        .done => |r| switch (r) {
+            .exited => |n| return scalarLabel("Done", n),
+            .signaled => return constLabel("Signaled"),
+        },
+    };
+    @memcpy(label.inline_buf[0..text.len], text);
+    label.len = @intCast(text.len);
+    return label;
+}
+
+fn constLabel(text: []const u8) StateLabel {
+    var label = StateLabel{};
+    @memcpy(label.inline_buf[0..text.len], text);
+    label.len = @intCast(text.len);
+    return label;
+}
+
+fn scalarLabel(prefix: []const u8, n: u8) StateLabel {
+    var label = StateLabel{};
+    const written = std.fmt.bufPrint(&label.inline_buf, "{s}({d})", .{ prefix, n }) catch {
+        @memcpy(label.inline_buf[0..prefix.len], prefix);
+        label.len = @intCast(prefix.len);
+        return label;
+    };
+    label.len = @intCast(written.len);
+    return label;
+}
+
+fn waitFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    _ = io;
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+
+    if (argv.len >= 2) {
+        const id = parseJobSpec(argv[1]) orelse {
+            var msg_buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "wait: invalid job id `{s}`\n", .{argv[1]}) catch "wait: invalid job id\n";
+            _ = std.c.write(2, msg.ptr, msg.len);
+            return .{ .exited = 2 };
+        };
+        const j = session.jobs.lookup(id) orelse {
+            var msg_buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "wait: no such job {d}\n", .{id}) catch "wait: no such job\n";
+            _ = std.c.write(2, msg.ptr, msg.len);
+            return .{ .exited = 127 };
+        };
+        try job_mod.service(&session.jobs, .foreground, j);
+        return j.result orelse Result{ .exited = 0 };
+    }
+
+    // No args: wait for every currently-known background job. Aggregate
+    // result is the last-completed job's status — matches POSIX `wait`
+    // with no operands.
+    var last_result: Result = .{ .exited = 0 };
+    while (true) {
+        const target = pickPendingBgJob(session) orelse break;
+        try job_mod.service(&session.jobs, .foreground, target);
+        if (target.result) |r| last_result = r;
+    }
+    return last_result;
+}
+
+fn pickPendingBgJob(session: *session_mod.Session) ?*job_mod.Job {
+    for (session.jobs.list()) |j| {
+        if (!j.detached) continue;
+        switch (j.state) {
+            .done => continue,
+            else => return j,
+        }
+    }
+    return null;
+}
+
+/// `%N` or bare integer N. Returns the parsed numeric job id, or null
+/// if the argument doesn't fit either form.
+fn parseJobSpec(arg: []const u8) ?u32 {
+    var bytes = arg;
+    if (bytes.len >= 1 and bytes[0] == '%') bytes = bytes[1..];
+    return std.fmt.parseInt(u32, bytes, 10) catch null;
 }

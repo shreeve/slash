@@ -669,6 +669,34 @@ const cases: []const Case = &.{
         .source = "cmd cat { echo overridden }; cat",
         .expect = .{ .exit_code = 0, .stdout = "overridden\n" },
     },
+
+    // ---- jobs / wait builtins (PLAN §19) --------------------------------
+
+    .{
+        .name = "wait: with no jobs is a no-op success",
+        .source = "wait",
+        .expect = .{ .exit_code = 0 },
+    },
+    .{
+        .name = "wait %N: returns the named job's status",
+        .source = "/bin/sh -c 'exit 5' & wait %1; echo result=$?",
+        .expect = .{ .exit_code = 0, .stdout = "result=5\n" },
+    },
+    .{
+        .name = "wait: aggregates over all background jobs",
+        .source = "/bin/sh -c 'exit 0' & wait; echo done=$?",
+        .expect = .{ .exit_code = 0, .stdout = "done=0\n" },
+    },
+    .{
+        .name = "jobs: lists a running detached job",
+        .source = "/bin/sleep 0.05 & jobs; wait",
+        .expect = .{ .exit_code = 0, .stdout = "[1]", .stdout_contains = true },
+    },
+    .{
+        .name = "jobs: empty when no detached jobs",
+        .source = "true; jobs",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
 };
 
 // =============================================================================
