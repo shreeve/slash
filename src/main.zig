@@ -9,6 +9,7 @@ const program = @import("program.zig");
 const session_mod = @import("session.zig");
 const eval = @import("eval.zig");
 const builtins = @import("builtins.zig");
+const repl = @import("repl.zig");
 
 const DumpMode = enum { sexp, shape, program };
 
@@ -22,6 +23,7 @@ pub fn main(init: std.process.Init) !u8 {
     var run_source: ?[]const u8 = null;
     var script_path: ?[]const u8 = null;
     var script_args: []const []const u8 = &.{};
+    var norc = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -33,6 +35,10 @@ pub fn main(init: std.process.Init) !u8 {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             printUsage();
             return 0;
+        }
+        if (std.mem.eql(u8, arg, "--norc")) {
+            norc = true;
+            continue;
         }
         if (std.mem.eql(u8, arg, "-c")) {
             i += 1;
@@ -89,9 +95,20 @@ pub fn main(init: std.process.Init) !u8 {
         };
     }
 
-    std.debug.print("slash {s}\n", .{build_options.version});
-    std.debug.print("use -c '<source>', a script path, --dump-shape, --dump-program, or --help\n", .{});
-    return 0;
+    // No script, no `-c`, no dump request — drop into the REPL.
+    const envp: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(std.c.environ));
+    return runRepl(alloc, envp, .{ .norc = norc });
+}
+
+fn runRepl(
+    alloc: std.mem.Allocator,
+    envp: [*:null]const ?[*:0]const u8,
+    options: repl.Options,
+) !u8 {
+    var session = try session_mod.Session.init(alloc, envp, true);
+    defer session.deinit();
+    builtins.installSession(&session);
+    return repl.run(&session, alloc, options);
 }
 
 // =============================================================================
@@ -299,6 +316,7 @@ test {
     _ = @import("session.zig");
     _ = @import("vars.zig");
     _ = @import("eval.zig");
+    _ = @import("repl.zig");
     _ = @import("headless_tests.zig");
 }
 
@@ -307,6 +325,7 @@ fn printUsage() void {
         \\slash — a Unix shell with structured commands, composable pipelines, and first-class jobs.
         \\
         \\Usage:
+        \\  slash                     Start an interactive shell (sources ~/.slashrc unless --norc)
         \\  slash <file> [args...]    Run a script with positional args bound to $1..$N
         \\  slash -c 'source'         Run a source string
         \\
@@ -314,6 +333,7 @@ fn printUsage() void {
         \\  -h, --help                Show this help and exit
         \\  -v, --version             Show version and exit
         \\  -c 'src'                  Run a source string and exit with its status
+        \\  --norc                    Do not source ~/.slashrc on interactive startup
         \\  -s, --dump-sexp 'src'     Dump the s-expression for a source string
         \\      --dump-shape 'src'    Dump the Shape tree
         \\      --dump-program 'src'  Dump the lowered Program

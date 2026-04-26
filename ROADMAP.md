@@ -92,32 +92,19 @@ Need:
   (PLAN §17.8) — and **only** for those; intentional deltas don't get a
   diff case
 
+---
 
-### 6. Configuration loading
+## REPL — world-class polish
 
-`~/.slashrc` is sourced at interactive shell startup. That's the entire
-mechanism. No `~/.slash/config` file format, no `set` runtime config
-builtin. Users configure by writing Slash code in `.slashrc`.
+The cooked-mode REPL with multi-line continuation and `~/.slashrc`
+sourcing is in. The remaining items upgrade the experience to what a
+modern shell user expects.
 
-- `--norc` flag to skip
-- `.slashrc` is run before the first prompt; non-interactive shells (`-c`,
-  scripts) do not source it
+### 6. Raw-mode line editor
 
-
-
-
-
-
-## REPL — world class
-
-The killer feature: we have a real parser. Every keystroke can re-parse
-the line and we know the Shape immediately. That means we're not
-pattern-matching tokens for highlighting, completion, or error preview —
-we're rendering the parse tree. It can never lie.
-
-This work depends on partial-Shape support for incomplete input (REPL
-continuation prompt) and benefits from Tier 3 #3 (real
-diagnostics).
+`tcgetattr` / `tcsetattr` for raw mode, ANSI escape sequences, cursor
+movement, Backspace / Ctrl-W / Ctrl-U / Home / End. The terminal-
+abstraction layer the rest of the REPL items depend on.
 
 ### 7. Live syntax highlighting
 
@@ -134,23 +121,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 8. Multi-line continuation
-
-If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
-heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
-
-User types:
-
-```
-if test -d /tmp {
-  echo found
-}
-```
-
-We know exactly when they're inside the block (open `{` on stack) and
-when the statement is complete (matched `}` and shape is well-formed).
-
-### 9. Tab completion via Shape introspection
+### 8. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -163,10 +134,11 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 10. History
+### 9. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
+
 - Timestamp (Unix seconds)
 - cwd at execution
 - Exit code
@@ -176,12 +148,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 11. Bracket matching
+### 10. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 12. Prompt
+### 11. Prompt
 
 Default is minimal but useful:
 
@@ -191,6 +163,7 @@ $
 ```
 
 Components (each independently disable-able):
+
 - PWD (home-collapsed)
 - Git branch + dirty flag (`+3` = 3 staged, `!` = unstaged changes)
 - Last-command duration if >1s
@@ -199,22 +172,24 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 13. Implementation foundation
+Need:
 
-The REPL is one new module — `src/repl.zig`, ~600-800 lines.
-Dependencies:
+- Word-expansion table tests — every quoting × variable type × position
+  combination
+- Glob match tests — with a tmpfs fixture (or a `tmpdir/` setup helper)
+- Redirect ordering tests — `>file 2>&1` vs `2>&1 >file`
+- Pipeline pipefail tests — across 2/3/4 stages, with failures at each
+  position
+- Signal/PTY tests — `Ctrl-C`, `Ctrl-Z`, `fg`, foreground takeover
+- Multi-line script fixtures — comments, blank lines, mixed brace/indent,
+  nested control flow
+- Memory-leak tests — `DebugAllocator` + thousands of iterations
+- Differential tests against `bash`/`dash` for explicitly-aligned semantics
+  (PLAN §17.8) — and **only** for those; intentional deltas don't get a
+  diff case
 
-- `tcgetattr` / `tcsetattr` for raw mode (Zig 0.16's `std.posix`)
-- ANSI escape sequences (small constant table)
-- `shape.parse` already provides everything for highlighting and
-  completion
-- A thin terminal abstraction (cursor pos, line clear, color reset)
 
-The hard part isn't writing the REPL. The hard part is making sure the
-foundation (Tier 1–3 above) doesn't have holes. Building a beautiful
-REPL on top of `"$x"` not expanding would be embarrassing.
 
----
 
 ## Done means done
 
