@@ -214,9 +214,12 @@ fn sourceRcFile(session: *session_mod.Session, alloc: Allocator) !void {
     const path = try std.fmt.allocPrint(a, "{s}/.slashrc", .{home});
     const path_z = try a.dupeZ(u8, path);
 
-    const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = std.c.open(
+        path_z.ptr,
+        .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
+        @as(std.c.mode_t, 0),
+    );
     if (fd < 0) return; // missing rc file is fine, not an error
-    defer _ = std.c.close(fd);
 
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(a);
@@ -226,11 +229,16 @@ fn sourceRcFile(session: *session_mod.Session, alloc: Allocator) !void {
         if (n < 0) {
             const e = std.c.errno(@as(c_int, -1));
             if (e == .INTR) continue;
+            _ = std.c.close(fd);
             return;
         }
         if (n == 0) break;
         try buf.appendSlice(a, chunk[0..@intCast(n)]);
     }
+    // Close the rc-file fd BEFORE the eval below so any external commands
+    // it spawns don't inherit it. CLOEXEC above is the belt; this is the
+    // suspenders for clarity.
+    _ = std.c.close(fd);
 
     const source = diag.Source{ .name = path, .text = buf.items };
     var sink_list = diag.ListSink.init(a);

@@ -568,7 +568,11 @@ fn readFileToBuffer(path: []const u8, scratch: Allocator) ![]const u8 {
     const path_z = try scratch.dupeZ(u8, path);
     defer scratch.free(path_z);
 
-    const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = std.c.open(
+        path_z.ptr,
+        .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
+        @as(std.c.mode_t, 0),
+    );
     if (fd < 0) return error.OpenFailed;
     defer _ = std.c.close(fd);
 
@@ -608,19 +612,26 @@ fn runExternalSingle(
     sink: ?Sink,
 ) !EvalOutcome {
     const action = try buildAction(argv[0], argv, local_env, session, ctx.scratch);
-    const redirs = try buildRedirectOps(ctx.scratch, c.redirects, session);
+    var heredoc_fds = std.ArrayListUnmanaged(exec.Fd).empty;
+    defer heredoc_fds.deinit(ctx.scratch);
+    const redirs = try buildRedirectOpsAndCollectHeredocs(ctx.scratch, c.redirects, session, &heredoc_fds);
     const pid = exec.spawn(.{
         .redirects = redirs,
         .extra_close = &.{},
         .pgid = 0,
         .action = action,
     }) catch |err| {
+        for (heredoc_fds.items) |fd| exec.closeFd(fd);
         try diag.emit(sink, diag.make(
             .exec, .@"error", "EX0001",
             @errorName(err), .{ .name = "<eval>", .text = "" }, c.span,
         ));
         return makeFailedOutcome(session, argv[0], .{ .exited = 127 });
     };
+    // Close the parent's copies of any heredoc pipe read ends now that
+    // the child has them; the alternative is a slow fd leak per heredoc
+    // every command run.
+    for (heredoc_fds.items) |fd| exec.closeFd(fd);
 
     const j = try session.jobs.create(true, false, argv[0]);
     var pids = [_]exec.Pid{pid};
@@ -651,6 +662,9 @@ fn evalPipeline(
     var pids = try ctx.scratch.alloc(exec.Pid, n);
     var leader_pgid: exec.Pid = 0;
 
+    var heredoc_fds = std.ArrayListUnmanaged(exec.Fd).empty;
+    defer heredoc_fds.deinit(ctx.scratch);
+
     for (p.stages, 0..) |stage_prog, i| {
         const stage_cmd = switch (stage_prog.*) {
             .command => |*cc| cc,
@@ -674,7 +688,7 @@ fn evalPipeline(
         defer redirs.deinit(ctx.scratch);
         if (i > 0) try redirs.append(ctx.scratch, .{ .dup = .{ .src = pipes[i - 1][0], .dst = 0 } });
         if (i < n - 1) try redirs.append(ctx.scratch, .{ .dup = .{ .src = pipes[i][1], .dst = 1 } });
-        const file_redirs = try buildRedirectOps(ctx.scratch, stage_cmd.redirects, session);
+        const file_redirs = try buildRedirectOpsAndCollectHeredocs(ctx.scratch, stage_cmd.redirects, session, &heredoc_fds);
         try redirs.appendSlice(ctx.scratch, file_redirs);
 
         var extra_close = std.ArrayListUnmanaged(exec.Fd).empty;
@@ -706,6 +720,7 @@ fn evalPipeline(
         exec.closeFd(pipe[0]);
         exec.closeFd(pipe[1]);
     }
+    for (heredoc_fds.items) |fd| exec.closeFd(fd);
 
     const j = try session.jobs.create(true, false, "<pipeline>");
     try session.jobs.setProcesses(j, leader_pgid, pids);
@@ -1588,6 +1603,19 @@ fn buildRedirectOps(
     reds: []const Redirect,
     session: *Session,
 ) ![]const exec.RedirectOp {
+    return buildRedirectOpsAndCollectHeredocs(scratch, reds, session, null);
+}
+
+/// Variant of `buildRedirectOps` that also records every heredoc pipe
+/// read end the caller is responsible for closing in the parent after
+/// the spawn. Pass `null` for callers that don't fork (shell-context
+/// builtin redirects close on their own).
+fn buildRedirectOpsAndCollectHeredocs(
+    scratch: Allocator,
+    reds: []const Redirect,
+    session: *Session,
+    heredoc_fds: ?*std.ArrayListUnmanaged(exec.Fd),
+) ![]const exec.RedirectOp {
     var out = std.ArrayListUnmanaged(exec.RedirectOp).empty;
     defer out.deinit(scratch);
 
@@ -1631,6 +1659,7 @@ fn buildRedirectOps(
                 const read_fd = try installHeredocPipe(expanded);
                 try out.append(scratch, .{ .dup = .{ .src = read_fd, .dst = dst } });
                 try out.append(scratch, .{ .close = read_fd });
+                if (heredoc_fds) |fds| try fds.append(scratch, read_fd);
             },
         }
     }

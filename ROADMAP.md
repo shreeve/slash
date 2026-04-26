@@ -48,21 +48,10 @@ Specific call sites needing structured diagnostics:
 - `exec.spawn` — `EX00xx` for fork/exec/redirect failures with the
   failing path
 
-### 3. CLOEXEC discipline audit
-
-Pipes get FD_CLOEXEC. What about other fds opened by the shell? Verify
-no fd leaks into spawned children when:
-- The shell opens a config file with `source`
-- The shell opens a heredoc body via `pipe()`
-- The shell stat's a path during PATH resolution
-- The shell's own stdin/stdout/stderr aren't accidentally inherited
-  cross-purpose
-
----
 
 ## Tier 4 — quality of execution
 
-### 4. Comprehensive test suite
+### 3. Comprehensive test suite
 
 Need:
 
@@ -88,13 +77,13 @@ The cooked-mode REPL with multi-line continuation and `~/.slashrc`
 sourcing is in. The remaining items upgrade the experience to what a
 modern shell user expects.
 
-### 5. Raw-mode line editor
+### 4. Raw-mode line editor
 
 `tcgetattr` / `tcsetattr` for raw mode, ANSI escape sequences, cursor
 movement, Backspace / Ctrl-W / Ctrl-U / Home / End. The terminal-
 abstraction layer the rest of the REPL items depend on.
 
-### 6. Live syntax highlighting
+### 5. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -109,7 +98,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 7. Tab completion via Shape introspection
+### 6. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -122,7 +111,7 @@ parser is fast enough — even multi-KB lines re-parse in microseconds.
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 8. History
+### 7. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -136,12 +125,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 9. Bracket matching
+### 8. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 10. Prompt
+### 9. Prompt
 
 Default is minimal but useful:
 

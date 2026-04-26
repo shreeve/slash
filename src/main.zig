@@ -187,12 +187,15 @@ fn runScript(
     const path_z = try alloc.dupeZ(u8, path);
     defer alloc.free(path_z);
 
-    const fd = std.c.open(path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = std.c.open(
+        path_z,
+        .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
+        @as(std.c.mode_t, 0),
+    );
     if (fd < 0) {
         std.debug.print("slash: cannot open {s}\n", .{path});
         return 1;
     }
-    defer _ = std.c.close(fd);
 
     var buf = std.ArrayListUnmanaged(u8).empty;
     defer buf.deinit(alloc);
@@ -202,16 +205,21 @@ fn runScript(
         if (n < 0) {
             const e = std.c.errno(@as(c_int, -1));
             if (e == .INTR) continue;
+            _ = std.c.close(fd);
             std.debug.print("slash: read error\n", .{});
             return 1;
         }
         if (n == 0) break;
         try buf.appendSlice(alloc, chunk[0..@intCast(n)]);
         if (buf.items.len > max_size) {
+            _ = std.c.close(fd);
             std.debug.print("slash: script too large\n", .{});
             return 1;
         }
     }
+    // Close the script-file fd before invoking the runtime — the
+    // commands inside this script must not inherit it via fork+exec.
+    _ = std.c.close(fd);
 
     var src = buf.items;
     if (src.len >= 2 and src[0] == '#' and src[1] == '!') {
