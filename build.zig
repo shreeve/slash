@@ -85,4 +85,27 @@ pub fn build(b: *std.Build) void {
 
     const test_headless_step = b.step("test-headless", "Run headless integration tests");
     test_headless_step.dependOn(&run_tests.step);
+
+    // PTY-driven REPL tests live in their own test binary so they can
+    // be skipped on platforms without /dev/ptmx. They run the just-built
+    // slash binary as a subprocess attached to a pseudo-terminal, drive
+    // keystrokes through the master end, and assert on the rendered
+    // output. The build path makes them depend on the installed
+    // executable so `zig build test-pty` always uses a fresh binary.
+    const pty_mod = b.createModule(.{
+        .root_source_file = b.path("src/pty_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pty_mod.linkSystemLibrary("c", .{});
+    const pty_tests = b.addTest(.{ .root_module = pty_mod });
+    const run_pty_tests = b.addRunArtifact(pty_tests);
+    run_pty_tests.step.dependOn(&install_exe.step);
+
+    const test_pty_step = b.step("test-pty", "Run PTY-driven REPL tests");
+    test_pty_step.dependOn(&run_pty_tests.step);
+
+    // Roll PTY tests into the default `test` step too so a clean build
+    // catches REPL regressions without an extra command.
+    test_step.dependOn(&run_pty_tests.step);
 }

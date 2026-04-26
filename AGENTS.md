@@ -65,6 +65,9 @@ source  →  Shape  →  Program  →  Job
 - **`src/runtime.zig`** — `Result`, `Signal`, status-byte conversion.
 - **`src/diagnostics.zig`** — `Diagnostic`, `Sink`, error codes.
 - **`src/headless_tests.zig`** — end-to-end integration tests.
+- **`src/pty_tests.zig`** — PTY-driven REPL tests; spawns the built
+  `bin/slash` against a pseudo-terminal and asserts on rendered output.
+  Run via `zig build test-pty` (also runs as part of `zig build test`).
 - **`src/main.zig`** — CLI entry point.
 - **`PLAN.md`** — design constitution.
 - **`ROADMAP.md`** — concrete remaining work; items disappear as they
@@ -124,7 +127,8 @@ Requires Zig 0.16.0.
 ```sh
 zig build                                # build ./bin/slash
 zig build run -- --version               # version
-zig build test                           # run all tests
+zig build test                           # run all tests (headless + PTY)
+zig build test-pty                       # run only the PTY-driven REPL tests
 zig build run -- -c 'echo hello'         # one-liner
 zig build run -- script.sh arg1 arg2     # script with positional args
 ```
