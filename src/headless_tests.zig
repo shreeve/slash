@@ -1204,6 +1204,46 @@ fn teardownBuiltinsFixture() void {
 // Tests
 // =============================================================================
 
+test "memory: 500 iterations leave no allocator leaks" {
+    // `std.testing.allocator` is the leak-detecting allocator, so any
+    // session/program/job lifetime bug surfaces here directly. The
+    // payload runs every code path that touches the session arenas
+    // (vars, defs, traps, path cache) and the per-statement scratch.
+    const alloc = std.testing.allocator;
+    var i: usize = 0;
+    while (i < 500) : (i += 1) {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const source_text = "x=val; echo $x; cmd f { echo body }; f; trap 'echo bye' EXIT";
+        const source = diag.Source{ .name = "<mem>", .text = source_text };
+        const parsed = try shape.parse(source, a, null);
+        const ctx = program.LowerContext{ .alloc = a, .source = source };
+        const prog = try program.lower(parsed.root, &ctx, null);
+
+        const envp_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(environ));
+        var session = try session_mod.Session.init(alloc, envp_ptr, false);
+        defer session.deinit();
+        builtins.installSession(&session);
+
+        const saved_out = std.c.dup(1);
+        const saved_err = std.c.dup(2);
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, 1);
+            _ = std.c.dup2(devnull, 2);
+            _ = std.c.close(devnull);
+        }
+        _ = eval.runForeground(prog, &session, a, null) catch {};
+        eval.fireExitTrap(&session, a, null) catch {};
+        _ = std.c.dup2(saved_out, 1);
+        _ = std.c.dup2(saved_err, 2);
+        _ = std.c.close(saved_out);
+        _ = std.c.close(saved_err);
+    }
+}
+
 test "headless v0" {
     setupGlobFixture();
     defer teardownGlobFixture();

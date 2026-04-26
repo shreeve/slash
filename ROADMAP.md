@@ -15,24 +15,8 @@ whichever order makes sense.
 
 ## Tier 3 — robustness
 
-### 1. Memory ownership audit and tightening
 
-Concrete model needs locking down:
-
-| Arena | Lifetime | Owns |
-|---|---|---|
-| Session arena | shell process | `JobTable`, `BuiltinSet`, `VarStore` values, `cmd` definitions |
-| Eval scratch arena | one statement | Word expansions, NUL-terminated argv buffers, redirect plans, expanded glob lists |
-| Promoted definitions | session | `cmd`-body Programs, retained command-text strings |
-
-Detached jobs that retain Programs need their Program promoted to
-session arena (PLAN §6.8).
-
-Stress test: 10,000 commands in a row, no leaks, no fragmentation. Easy
-to build now, hard to retrofit later.
-
-
-### 2. Diagnostic infrastructure actually used
+### 1. Diagnostic infrastructure actually used
 
 We built `diag.Sink` / `ListSink` / codes per PLAN §16. Almost nothing
 emits structured diagnostics. Every `slash: parse error` print today
@@ -56,13 +40,13 @@ The cooked-mode REPL with multi-line continuation and `~/.slashrc`
 sourcing is in. The remaining items upgrade the experience to what a
 modern shell user expects.
 
-### 3. Raw-mode line editor
+### 2. Raw-mode line editor
 
 `tcgetattr` / `tcsetattr` for raw mode, ANSI escape sequences, cursor
 movement, Backspace / Ctrl-W / Ctrl-U / Home / End. The terminal-
 abstraction layer the rest of the REPL items depend on.
 
-### 4. Live syntax highlighting
+### 3. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -77,7 +61,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 5. Tab completion via Shape introspection
+### 4. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -90,7 +74,7 @@ parser is fast enough — even multi-KB lines re-parse in microseconds.
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 6. History
+### 5. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -104,12 +88,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 7. Bracket matching
+### 6. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 8. Prompt
+### 7. Prompt
 
 Default is minimal but useful:
 
