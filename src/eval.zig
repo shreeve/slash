@@ -622,9 +622,14 @@ fn runExternalSingle(
         .action = action,
     }) catch |err| {
         for (heredoc_fds.items) |fd| exec.closeFd(fd);
+        const msg = std.fmt.allocPrint(
+            ctx.scratch,
+            "spawn `{s}` failed: {s}",
+            .{ argv[0], @errorName(err) },
+        ) catch "spawn failed";
         try diag.emit(sink, diag.make(
             .exec, .@"error", "EX0001",
-            @errorName(err), .{ .name = "<eval>", .text = "" }, c.span,
+            msg, .{ .name = "<eval>", .text = "" }, c.span,
         ));
         return makeFailedOutcome(session, argv[0], .{ .exited = 127 });
     };
@@ -986,9 +991,14 @@ fn spawnCommandNoWait(
         .pgid = 0,
         .action = action,
     }) catch |err| {
+        const msg = std.fmt.allocPrint(
+            ctx.scratch,
+            "spawn `{s}` failed: {s}",
+            .{ exe_text, @errorName(err) },
+        ) catch "spawn failed";
         try diag.emit(sink, diag.make(
             .exec, .@"error", "EX0001",
-            @errorName(err), .{ .name = "<eval>", .text = "" }, c.span,
+            msg, .{ .name = "<eval>", .text = "" }, c.span,
         ));
         return error.SpawnFailed;
     };

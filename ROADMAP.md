@@ -13,40 +13,19 @@ whichever order makes sense.
 
 ---
 
-## Tier 3 — robustness
-
-
-### 1. Diagnostic infrastructure actually used
-
-We built `diag.Sink` / `ListSink` / codes per PLAN §16. Almost nothing
-emits structured diagnostics. Every `slash: parse error` print today
-should be a `Diagnostic` with code `SH0001`, span, and helpful note.
-
-The REPL's red squiggles (live error preview) are downstream of this.
-
-Specific call sites needing structured diagnostics:
-- `shape.parse` — promote raw `ParserError` to `SH0001..SH0099` codes
-  with span and one-line message
-- `program.lower` — currently silent on validation; add `LW00xx` codes
-- `eval` — currently uses `EV00xx` ad-hoc; standardize the table
-- `exec.spawn` — `EX00xx` for fork/exec/redirect failures with the
-  failing path
-
----
-
 ## REPL — world-class polish
 
 The cooked-mode REPL with multi-line continuation and `~/.slashrc`
 sourcing is in. The remaining items upgrade the experience to what a
 modern shell user expects.
 
-### 2. Raw-mode line editor
+### 1. Raw-mode line editor
 
 `tcgetattr` / `tcsetattr` for raw mode, ANSI escape sequences, cursor
 movement, Backspace / Ctrl-W / Ctrl-U / Home / End. The terminal-
 abstraction layer the rest of the REPL items depend on.
 
-### 3. Live syntax highlighting
+### 2. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -61,7 +40,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 4. Tab completion via Shape introspection
+### 3. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -74,7 +53,7 @@ parser is fast enough — even multi-KB lines re-parse in microseconds.
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 5. History
+### 4. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -88,12 +67,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 6. Bracket matching
+### 5. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 7. Prompt
+### 6. Prompt
 
 Default is minimal but useful:
 

@@ -6,6 +6,39 @@
 //!
 //! See PLAN.md §16 for the full contract, §16.5 for the per-phase policy,
 //! and §16.3 for the error-code convention (SH/LW/EV/EX/JB prefixes).
+//!
+//! ## Code table
+//!
+//! Codes are stable identifiers; tests may match on them. Adding a new
+//! code is fine; renumbering an existing one breaks downstream tooling
+//! and is forbidden once it ships.
+//!
+//! ### `SHxxxx` — shape (lex / parse / Sexp → Shape)
+//!
+//! - `SH0001` — parse error (unexpected token at primary span)
+//! - `SH0100` — shape converter rejected a sexp the parser produced
+//!              (internal grammar/converter mismatch)
+//!
+//! ### `LWxxxx` — lower (Shape → Program)
+//!
+//! - `LW0001` — a `Word` shape appeared in a `Program` position
+//!
+//! ### `EVxxxx` — eval (expansion, builtin dispatch, control-flow)
+//!
+//! - `EV0001` — command name expanded to zero or empty fields
+//! - `EV0010` — pipeline stage must be a command
+//! - `EV0011` — detached body must be a command or pipeline
+//!
+//! ### `EXxxxx` — exec (fork / execve / redirect plumbing)
+//!
+//! - `EX0001` — execve failed (path / permission / generic)
+//! - `EX0002` — fork failed
+//! - `EX0003` — redirect failed (open / dup2 in shell context)
+//!
+//! ### `JBxxxx` — job (table / wait / job-control bookkeeping)
+//!
+//! No JB codes are in use yet; the prefix is reserved for the future
+//! foreground-takeover and signal-delivery diagnostics.
 
 const std = @import("std");
 
