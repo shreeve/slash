@@ -46,19 +46,7 @@ See the dedicated **Heredoc spec** section below. Both literal
 expansion machinery for the interpolating form is the same one already
 in place for `"$x"` inside double-quoted strings.
 
-### 3. List-valued command-substitution capture
-
-PLAN §7 Rule 29 says `$(...)` is scalar by design, and that list capture
-should be a **distinct surface form**. Pick that surface and ship it.
-Strong candidates:
-
-- `xs = @(/bin/ls)` — `@(...)` captures into a list, splitting on newlines
-- `xs = [$(/bin/ls)]` — wrap a scalar capture in a list literal that
-  splits on newlines
-
-Without one of these, users can't iterate cleanly over command output.
-
-### 4. Comment handling inside compound forms
+### 3. Comment handling inside compound forms
 
 The wrapper drops comments at the lexer boundary. Need explicit tests
 that comments work:
@@ -72,7 +60,7 @@ that comments work:
 
 ## Tier 3 — robustness
 
-### 5. Memory ownership audit and tightening
+### 4. Memory ownership audit and tightening
 
 Concrete model needs locking down:
 
@@ -88,7 +76,7 @@ session arena (PLAN §6.8).
 Stress test: 10,000 commands in a row, no leaks, no fragmentation. Easy
 to build now, hard to retrofit later.
 
-### 6. Signal handling at the REPL boundary
+### 5. Signal handling at the REPL boundary
 
 PLAN §18-§19 documents the model. The implementation:
 
@@ -100,7 +88,7 @@ PLAN §18-§19 documents the model. The implementation:
 - Foreground-job's process group receives terminal-generated signals;
   shell does not forward `SIGINT` itself.
 
-### 7. Job-control builtins
+### 6. Job-control builtins
 
 `jobs`, `wait`. Detached jobs already register in the table. Just
 expose:
@@ -114,7 +102,7 @@ expose:
 `fg`/`bg` need terminal handoff via `tcsetpgrp` (PLAN §11
 must-get-right #4) and SIGCONT plumbing — separate, larger commit.
 
-### 8. Diagnostic infrastructure actually used
+### 7. Diagnostic infrastructure actually used
 
 We built `diag.Sink` / `ListSink` / codes per PLAN §16. Almost nothing
 emits structured diagnostics. Every `slash: parse error` print today
@@ -130,7 +118,7 @@ Specific call sites needing structured diagnostics:
 - `exec.spawn` — `EX00xx` for fork/exec/redirect failures with the
   failing path
 
-### 9. CLOEXEC discipline audit
+### 8. CLOEXEC discipline audit
 
 Pipes get FD_CLOEXEC. What about other fds opened by the shell? Verify
 no fd leaks into spawned children when:
@@ -144,7 +132,7 @@ no fd leaks into spawned children when:
 
 ## Tier 4 — quality of execution
 
-### 10. Comprehensive test suite
+### 9. Comprehensive test suite
 
 Need:
 
@@ -162,7 +150,7 @@ Need:
   (PLAN §17.8) — and **only** for those; intentional deltas don't get a
   diff case
 
-### 11. UTF-8 awareness
+### 10. UTF-8 awareness
 
 Today the lexer is ASCII. A user typing `let café = 5` or piping Chinese
 filenames hits errors. We need at minimum:
@@ -175,7 +163,7 @@ filenames hits errors. We need at minimum:
 Stretch: render multi-byte characters in REPL highlighting without
 collapsing the cursor.
 
-### 12. `cd` polish
+### 11. `cd` polish
 
 - `cd -` — toggle to `$OLDPWD`
 - `cd` with no arg goes to `$HOME` (already works), but verify `~` and
@@ -184,7 +172,7 @@ collapsing the cursor.
   decide logical-vs-physical and document
 - `$PWD` and `$OLDPWD` updates in **every** path that changes cwd
 
-### 13. `cmd` user-defined commands (positional only)
+### 12. `cmd` user-defined commands (positional only)
 
 PLAN §3 mentions, §7 Rule 26 commits to "session-scoped unless created
 inside a subshell". Implementation:
@@ -208,7 +196,7 @@ cmd greet {
 }
 ```
 
-### 14. Process substitution `<(...)` / `>(...)`
+### 13. Process substitution `<(...)` / `>(...)`
 
 PLAN §6.2 documents. Implementation:
 - Lexer adds `proc_sub_in` (`<(`) and `proc_sub_out` (`>(`) tokens
@@ -217,7 +205,7 @@ PLAN §6.2 documents. Implementation:
   (BSD/macOS) bindings, threads the path into the parent's argv
 - Job-owned cleanup on every termination path (PLAN §7 Rule 25)
 
-### 15. Configuration loading
+### 14. Configuration loading
 
 `~/.slashrc` is sourced at interactive shell startup. That's the entire
 mechanism. No `~/.slash/config` file format, no `set` runtime config
@@ -227,13 +215,13 @@ builtin. Users configure by writing Slash code in `.slashrc`.
 - `.slashrc` is run before the first prompt; non-interactive shells (`-c`,
   scripts) do not source it
 
-### 16. `read` builtin
+### 15. `read` builtin
 
 `read NAME` consumes a line from stdin into a variable. `read NAME1
 NAME2 ...` consumes a line and splits on whitespace into the named
 variables. Required for any script that takes interactive input.
 
-### 17. `shift` builtin
+### 16. `shift` builtin
 
 `shift` shifts positional parameters down by one (`$2` becomes `$1`,
 etc.); `$#` decrements. `shift N` shifts by N. Required for the
@@ -248,13 +236,13 @@ while test $# -gt 0 {
 }
 ```
 
-### 18. `exec` builtin
+### 17. `exec` builtin
 
 `exec CMD ARGS...` replaces the shell process with the named command (no
 fork). `exec` with redirects and no command applies the redirects to the
 shell itself permanently.
 
-### 19. `type` and `command` builtins
+### 18. `type` and `command` builtins
 
 - `type NAME` — describes how `NAME` resolves: builtin, `cmd`
   definition, alias (none yet), or external (with PATH location)
@@ -263,7 +251,7 @@ shell itself permanently.
 
 Introspection. ~30 lines each.
 
-### 20. `trap` builtin
+### 19. `trap` builtin
 
 `trap 'CMD' SIGNAL...` registers a Slash source string to run when the
 named signal is received. `trap '' SIGNAL` ignores the signal. `trap -`
@@ -450,10 +438,10 @@ pattern-matching tokens for highlighting, completion, or error preview —
 we're rendering the parse tree. It can never lie.
 
 This work depends on Tier 1 #1 (recoverable parse errors with partial
-Shape on incomplete input) and benefits from Tier 3 #8 (real
+Shape on incomplete input) and benefits from Tier 3 #7 (real
 diagnostics).
 
-### 21. Live syntax highlighting
+### 20. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -468,7 +456,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 22. Multi-line continuation
+### 21. Multi-line continuation
 
 If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
 heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
@@ -484,7 +472,7 @@ if test -d /tmp {
 We know exactly when they're inside the block (open `{` on stack) and
 when the statement is complete (matched `}` and shape is well-formed).
 
-### 23. Tab completion via Shape introspection
+### 22. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -497,7 +485,7 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 24. History
+### 23. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -510,12 +498,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 25. Bracket matching
+### 24. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 26. Prompt
+### 25. Prompt
 
 Default is minimal but useful:
 
@@ -533,7 +521,7 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 27. Implementation foundation
+### 26. Implementation foundation
 
 The REPL is one new module — `src/repl.zig`, ~600-800 lines.
 Dependencies:

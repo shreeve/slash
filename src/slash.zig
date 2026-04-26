@@ -49,6 +49,7 @@ pub const Tag = enum(u8) {
     @"var",
     var_braced,
     cmd_subst,
+    list_capture,
     scalar,
     list,
     words,
@@ -246,6 +247,26 @@ pub const Lexer = struct {
                 }
             }
 
+            // List-capture fusion: a bare `@` immediately followed by `(`
+            // has to become a single `at_paren` token. The grammar says
+            // so, but the auto-generated lexer dispatches LETTER-class
+            // bytes (`@` is one) into `scanIdent` before reaching the
+            // operator switch, so `@(` arrives here as an `ident` of
+            // length 1 trailed by an `lparen`. Recover.
+            if (tok.cat == .ident and tok.len == 1 and
+                self.base.source[tok.pos] == '@' and
+                tok.pos + 1 < self.base.source.len and
+                self.base.source[tok.pos + 1] == '(')
+            {
+                self.base.pos = tok.pos + 2;
+                self.base.paren += 1;
+                var t = tok;
+                t.cat = .at_paren;
+                t.len = 2;
+                self.last_cat = .at_paren;
+                return t;
+            }
+
             // Track bracket depth for indent suspension. The base lexer
             // already tracks `paren` and `brace` (from grammar `{paren++}`
             // actions); we add `bracket` here as a wrapper-side field.
@@ -377,6 +398,17 @@ pub const Lexer = struct {
         return nl;
     }
 };
+
+/// Continuation bytes of the bare-word class (matching the grammar's
+/// ident rule: `[A-Za-z_./\-+~@%!*?:,^][A-Za-z0-9_./\-+~@%!*?:,^]*`).
+fn isBareWordContinue(c: u8) bool {
+    return switch (c) {
+        'A'...'Z', 'a'...'z', '0'...'9',
+        '_', '.', '/', '-', '+', '~', '@', '%', '!', '*', '?', ':', ',', '^',
+        => true,
+        else => false,
+    };
+}
 
 /// True if `source[pos..]` begins with the keyword `else` followed by a
 /// non-identifier byte (so `elseif` doesn't match). Free helper because

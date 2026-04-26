@@ -27,8 +27,13 @@ pub const Word = struct {
         /// `default` is the lowered Word evaluated only when the named
         /// variable resolves to an unset or empty value (PLAN §12).
         var_braced: VarBraced,
-        /// Command substitution capturing the program's stdout.
+        /// Command substitution capturing the program's stdout as one
+        /// scalar field (PLAN §7 Rule 29).
         cmd_subst: *const program_mod.Program,
+        /// List capture (`@(...)`): the program's stdout splits on `\n`
+        /// and each non-empty field becomes one argv entry. The
+        /// distinct surface form keeps `$(...)` honest as a scalar form.
+        list_capture: *const program_mod.Program,
         /// Glob pattern from an unquoted bare word containing `*`/`?`/`[...]`.
         glob: []const u8,
     };
@@ -74,6 +79,10 @@ fn lowerPart(
         .cmd_subst => |c| blk: {
             const inner = try program_mod.lower(c.body.*, ctx, null);
             break :blk Word.Part{ .cmd_subst = inner };
+        },
+        .list_capture => |c| blk: {
+            const inner = try program_mod.lower(c.body.*, ctx, null);
+            break :blk Word.Part{ .list_capture = inner };
         },
         .glob => |g| Word.Part{ .glob = try ctx.alloc.dupe(u8, g.pattern) },
     };

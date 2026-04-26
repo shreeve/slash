@@ -474,6 +474,7 @@ fn dumpWordParts(word: Word, depth: u32, w: *Writer) WriteError!void {
                 }
             },
             .cmd_subst => try w.writeAll("cmd_subst\n"),
+            .list_capture => try w.writeAll("list_capture\n"),
             .glob => |pat| try w.print("glob {s}\n", .{pat}),
         }
     }

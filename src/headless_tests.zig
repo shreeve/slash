@@ -507,6 +507,43 @@ const cases: []const Case = &.{
         .source = "true; true; true",
         .expect = .{ .exit_code = 0 },
     },
+
+    // ---- @(...) list capture (PLAN §7 Rule 29) ---------------------------
+    //
+    // `@(...)` is the list form of command substitution: stdout splits
+    // on newlines, each non-empty field becomes one argv entry. `$(...)`
+    // stays scalar; nothing about either form's behavior is overloaded.
+
+    .{
+        .name = "list-capture: assigns as list, iterates",
+        .source = "xs=@(/usr/bin/printf 'a\\nb\\nc\\n'); for x in $xs { echo $x }",
+        .expect = .{ .exit_code = 0, .stdout = "a\nb\nc\n" },
+    },
+    .{
+        .name = "list-capture: splices directly into for items",
+        .source = "for n in @(/usr/bin/printf '1\\n2\\n3\\n') { echo n=$n }",
+        .expect = .{ .exit_code = 0, .stdout = "n=1\nn=2\nn=3\n" },
+    },
+    .{
+        .name = "list-capture: scalar position joins with space",
+        .source = "echo \"got: @(/usr/bin/printf 'a\\nb\\nc\\n')\"",
+        .expect = .{ .exit_code = 0, .stdout = "got: a b c\n" },
+    },
+    .{
+        .name = "list-capture: empty output yields no fields",
+        .source = "for x in @(/usr/bin/true) { echo iter }; echo done",
+        .expect = .{ .exit_code = 0, .stdout = "done\n" },
+    },
+    .{
+        .name = "list-capture: single-line output is one field",
+        .source = "for x in @(/bin/echo single) { echo got=$x }",
+        .expect = .{ .exit_code = 0, .stdout = "got=single\n" },
+    },
+    .{
+        .name = "list-capture: bare @user is still an ident (no fusion w/o paren)",
+        .source = "echo @user",
+        .expect = .{ .exit_code = 0, .stdout = "@user\n" },
+    },
 };
 
 // =============================================================================

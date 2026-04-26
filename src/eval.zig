@@ -690,6 +690,22 @@ fn applyAssign(
 ) !void {
     switch (b.value) {
         .scalar => |w| {
+            // A bare `@(cmd)` on the RHS of an assignment captures as a
+            // list, not a space-joined scalar. The whole point of `@(...)`
+            // is to produce N fields, so honoring that here keeps the
+            // result usable with `for x in $xs` and friends.
+            if (w.parts.len == 1) {
+                switch (w.parts[0]) {
+                    .list_capture => |inner| {
+                        const captured = try captureProgramStdout(inner, session, scratch);
+                        const fields = try splitNewlineFields(scratch, captured);
+                        defer scratch.free(fields);
+                        try session.vars.setList(b.name, fields, false);
+                        return;
+                    },
+                    else => {},
+                }
+            }
             const val = try expandWordToScalar(w, session, scratch, null);
             try session.vars.setScalar(b.name, val, false);
         },
@@ -848,6 +864,19 @@ fn appendPartScalar(
             const captured = try captureProgramStdout(inner, session, scratch);
             try buf.appendSlice(scratch, captured);
         },
+        .list_capture => |inner| {
+            // In a scalar position, splice the list with single spaces.
+            // The argv path handles the splicing case directly.
+            const captured = try captureProgramStdout(inner, session, scratch);
+            const fields = splitNewlineFields(scratch, captured) catch &[_][]const u8{};
+            defer scratch.free(fields);
+            var first = true;
+            for (fields) |f| {
+                if (!first) try buf.append(scratch, ' ');
+                try buf.appendSlice(scratch, f);
+                first = false;
+            }
+        },
         .glob => |pat| try buf.appendSlice(scratch, pat),
     }
 }
@@ -881,6 +910,17 @@ fn expandWordToArgv(
                     return;
                 }
                 // Undefined variable expands to empty string. Don't add.
+                return;
+            },
+            .list_capture => |inner| {
+                // `@(cmd)` as a single-part word splices its captured
+                // stdout as N argv entries (one per non-empty newline-
+                // separated field). PLAN §7 Rule 29 keeps the scalar
+                // `$(...)` form distinct from this list capture.
+                const captured = try captureProgramStdout(inner, session, scratch);
+                const fields = try splitNewlineFields(scratch, captured);
+                defer scratch.free(fields);
+                for (fields) |f| try out.append(scratch, try scratch.dupe(u8, f));
                 return;
             },
             else => {},
@@ -1263,6 +1303,31 @@ fn captureProgramStdout(
     var end: usize = buf.items.len;
     while (end > 0 and (buf.items[end - 1] == '\n' or buf.items[end - 1] == '\r')) end -= 1;
     return scratch.dupe(u8, buf.items[0..end]);
+}
+
+/// Split a captured-stdout buffer into newline-delimited fields. Used by
+/// `@(...)` list capture: trailing `\r` is stripped per field, empty
+/// trailing fields are discarded so a normal Unix tool's `text\n` output
+/// produces one field rather than ["text", ""]. Empty interior lines are
+/// preserved as empty fields.
+fn splitNewlineFields(scratch: Allocator, text: []const u8) ![][]const u8 {
+    var fields = std.ArrayListUnmanaged([]const u8).empty;
+    defer fields.deinit(scratch);
+    var i: usize = 0;
+    while (i < text.len) {
+        const start = i;
+        while (i < text.len and text[i] != '\n') : (i += 1) {}
+        var end = i;
+        if (end > start and text[end - 1] == '\r') end -= 1;
+        try fields.append(scratch, text[start..end]);
+        if (i < text.len) i += 1;
+    }
+    // Drop a single trailing empty field — a tool that finishes its
+    // output with `\n` shouldn't manifest an extra empty argv element.
+    if (fields.items.len > 0 and fields.items[fields.items.len - 1].len == 0) {
+        _ = fields.pop();
+    }
+    return fields.toOwnedSlice(scratch);
 }
 
 // =============================================================================

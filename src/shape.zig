@@ -61,6 +61,14 @@ pub const CmdSubstPart = struct {
     span: Span,
 };
 
+pub const ListCapturePart = struct {
+    /// The captured sequence inside `@( ... )`. Stdout splits on
+    /// newlines (the empty trailing newline is dropped) and each
+    /// resulting field becomes one argv element at expansion time.
+    body: *const Shape,
+    span: Span,
+};
+
 pub const GlobPart = struct {
     /// The pattern as written (e.g. `*.txt`). Recovered from a bare
     /// text part containing unquoted glob metacharacters during Word
@@ -74,6 +82,7 @@ pub const WordPartShape = union(enum) {
     variable: VariablePart,
     var_braced: VarBracedPart,
     cmd_subst: CmdSubstPart,
+    list_capture: ListCapturePart,
     glob: GlobPart,
 };
 
@@ -931,6 +940,7 @@ fn convertWordOrAtomToWord(
         .@"var" => try convertVariableAtom(alloc, source, items, sink),
         .var_braced => try convertVarBracedAtom(alloc, source, items, sink),
         .cmd_subst => try convertCmdSubstAtom(alloc, source, items, sink),
+        .list_capture => try convertListCaptureAtom(alloc, source, items, sink),
         else => {
             try emitBadShape(source, sexp, sink, "expected word_atom variant");
             return error.InvalidShape;
@@ -1035,6 +1045,69 @@ fn splitDoubleQuoted(
             };
             try text_buf.append(alloc, decoded);
             i += 2;
+            continue;
+        }
+
+        // List capture inside a dq string: `@(...)`.
+        if (c == '@' and i + 1 < body.len and body[i + 1] == '(') {
+            var depth: u32 = 1;
+            var j = i + 2;
+            while (j < body.len) {
+                const ch = body[j];
+                if (ch == '"') {
+                    j += 1;
+                    while (j < body.len and body[j] != '"') {
+                        if (body[j] == '\\' and j + 1 < body.len) j += 1;
+                        j += 1;
+                    }
+                    if (j < body.len) j += 1;
+                    continue;
+                }
+                if (ch == '\'') {
+                    j += 1;
+                    while (j < body.len and body[j] != '\'') j += 1;
+                    if (j < body.len) j += 1;
+                    continue;
+                }
+                if (ch == '(') depth += 1;
+                if (ch == ')') {
+                    depth -= 1;
+                    if (depth == 0) break;
+                }
+                j += 1;
+            }
+            if (j < body.len and depth == 0) {
+                try flushTextRun(alloc, &parts, &text_buf, body_start, text_run_start, i);
+
+                const inner_bytes = body[i + 2 .. j];
+                const inner_source = Source{ .name = source.name, .text = inner_bytes };
+                var p = parser.Parser.init(alloc, inner_bytes);
+                defer p.deinit();
+                const inner_sexp = p.parseProgram() catch {
+                    try emitBadShape(source, .nil, sink, "parse error in `@(...)` inside double-quoted string");
+                    try text_buf.append(alloc, '@');
+                    i += 1;
+                    continue;
+                };
+                const inner_shape = try convertShape(alloc, inner_source, inner_sexp, sink);
+                const body_ptr = try alloc.create(Shape);
+                body_ptr.* = inner_shape;
+
+                const part_span = Span{
+                    .start = body_start + @as(u32, @intCast(i)),
+                    .end = body_start + @as(u32, @intCast(j + 1)),
+                };
+                try parts.append(alloc, .{ .list_capture = .{
+                    .body = body_ptr,
+                    .span = part_span,
+                } });
+                i = j + 1;
+                text_run_start = i;
+                continue;
+            }
+            // No matching close-paren — treat the `@` as literal text.
+            try text_buf.append(alloc, '@');
+            i += 1;
             continue;
         }
 
@@ -1295,6 +1368,26 @@ fn convertCmdSubstAtom(
     return .{ .parts = parts, .span = span };
 }
 
+fn convertListCaptureAtom(
+    alloc: Allocator,
+    source: Source,
+    items: []const parser.Sexp,
+    sink: ?Sink,
+) anyerror!WordShape {
+    if (items.len != 2) {
+        try emitBadShape(source, items[0], sink, "list_capture expects one body");
+        return error.InvalidShape;
+    }
+    const body = try convertShape(alloc, source, items[1], sink);
+    const body_span = body.span();
+    const body_ptr = try alloc.create(Shape);
+    body_ptr.* = body;
+    const span = body_span;
+    const parts = try alloc.alloc(WordPartShape, 1);
+    parts[0] = .{ .list_capture = .{ .body = body_ptr, .span = span } };
+    return .{ .parts = parts, .span = span };
+}
+
 // ---- redirects --------------------------------------------------------------
 
 fn convertRedirect(
@@ -1375,7 +1468,7 @@ fn convertRedirect(
 
 fn isWordAtomTag(tag: slash.Tag) bool {
     return switch (tag) {
-        .word, .@"var", .var_braced, .cmd_subst => true,
+        .word, .@"var", .var_braced, .cmd_subst, .list_capture => true,
         else => false,
     };
 }
@@ -1515,6 +1608,7 @@ fn dumpPartInline(part: WordPartShape, w: *Writer) WriteError!void {
         .variable => |v| try w.print("  var {s}\n", .{v.name}),
         .var_braced => |v| try w.print("  var_braced {s}\n", .{v.body}),
         .cmd_subst => try w.writeAll("  cmd_subst <body>\n"),
+        .list_capture => try w.writeAll("  list_capture <body>\n"),
         .glob => |g| try w.print("  glob {s}\n", .{g.pattern}),
     }
 }
@@ -1558,6 +1652,7 @@ fn dumpWordParts(ws: WordShape, depth: u32, w: *Writer) WriteError!void {
             .variable => |v| try w.print("var {s}\n", .{v.name}),
             .var_braced => |v| try w.print("var_braced {s}\n", .{v.body}),
             .cmd_subst => try w.writeAll("cmd_subst\n"),
+            .list_capture => try w.writeAll("list_capture\n"),
             .glob => |g| try w.print("glob {s}\n", .{g.pattern}),
         }
     }

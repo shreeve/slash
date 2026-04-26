@@ -32,6 +32,7 @@ tokens
     variable        # $name, $0..$9, $?, $$, $#, $@, $!
     var_braced      # ${...}
     dollar_paren    # $( opens a command substitution
+    at_paren        # @( opens a list capture (newline-split scalar)
 
     # Grouping
     lparen          # (
@@ -125,6 +126,7 @@ tokens
 '$' '*'                                         → variable
 '$' '$'                                         → variable
 "$("                                            → dollar_paren, {paren++}
+"@("                                            → at_paren, {paren++}
 
 # Comments
 '#' [^\n]*                                      → comment
@@ -252,6 +254,7 @@ leading_word    = IDENT                                 → (word 1)
                 | VARIABLE                              → (var 1)
                 | VAR_BRACED                            → (var_braced 1)
                 | DOLLAR_PAREN sequence RPAREN          → (cmd_subst 2)
+                | AT_PAREN     sequence RPAREN          → (list_capture 2)
 
 word_atom       = leading_word
                 | NAME_EQ                               → (word 1)
