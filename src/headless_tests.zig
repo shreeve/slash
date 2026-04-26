@@ -544,6 +544,77 @@ const cases: []const Case = &.{
         .source = "echo @user",
         .expect = .{ .exit_code = 0, .stdout = "@user\n" },
     },
+
+    // ---- read / shift / type / command / exec / cd polish ----------------
+
+    .{
+        .name = "read: single name absorbs full line",
+        .source = "read line < /tmp/slash-builtins-fixture/three.txt; echo \"got=[$line]\"",
+        .expect = .{ .exit_code = 0, .stdout = "got=[alpha beta gamma]\n" },
+    },
+    .{
+        .name = "read: multi-name splits on whitespace; last absorbs rest",
+        .source = "read first rest < /tmp/slash-builtins-fixture/three.txt; echo first=$first rest=$rest",
+        .expect = .{ .exit_code = 0, .stdout = "first=alpha rest=beta gamma\n" },
+    },
+    .{
+        .name = "read: three names, three fields",
+        .source = "read a b c < /tmp/slash-builtins-fixture/three.txt; echo \"a=$a b=$b c=$c\"",
+        .expect = .{ .exit_code = 0, .stdout = "a=alpha b=beta c=gamma\n" },
+    },
+    .{
+        .name = "read: returns 1 on eof",
+        .source = "read x < /tmp/slash-builtins-fixture/empty.txt",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "shift: default by one",
+        .source = "/bin/sh -c 'echo a b c d' ; echo done", // ensure no shift happens here
+        .expect = .{ .exit_code = 0, .stdout = "a b c d\ndone\n" },
+    },
+    .{
+        .name = "type: builtin",
+        .source = "type echo",
+        .expect = .{ .exit_code = 0, .stdout = "echo is a shell builtin\n" },
+    },
+    .{
+        .name = "type: external command",
+        .source = "type cat",
+        .expect = .{ .exit_code = 0, .stdout = "cat is /bin/cat\n" },
+    },
+    .{
+        .name = "type: source / dot are special-dispatched builtins",
+        .source = "type source",
+        .expect = .{ .exit_code = 0, .stdout = "source is a shell builtin\n" },
+    },
+    .{
+        .name = "type: not found exits 1",
+        .source = "type nope-no-no",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "command: bypasses the echo builtin and uses external",
+        .source = "command /bin/echo via-external",
+        .expect = .{ .exit_code = 0, .stdout = "via-external\n" },
+    },
+    .{
+        // exec failure leaves the shell alive (see PLAN §20 special
+        // value 127); the test asserts that without trailing
+        // statements that would overwrite the failure status.
+        .name = "exec: missing target exits 127",
+        .source = "exec /no/such/binary-anywhere",
+        .expect = .{ .exit_code = 127 },
+    },
+    .{
+        .name = "cd -: toggles to OLDPWD and prints",
+        .source = "cd /tmp; cd /; cd -",
+        .expect = .{ .exit_code = 0, .stdout = "/private/tmp\n", .stdout_contains = true },
+    },
+    .{
+        .name = "cd -: errors when OLDPWD unset",
+        .source = "cd -",
+        .expect = .{ .exit_code = 1 },
+    },
 };
 
 // =============================================================================
@@ -714,6 +785,21 @@ fn teardownSourceFixture() void {
     _ = std.c.rmdir(source_fixture_root);
 }
 
+const builtins_fixture_root: [:0]const u8 = "/tmp/slash-builtins-fixture";
+
+fn setupBuiltinsFixture() void {
+    teardownBuiltinsFixture();
+    _ = std.c.mkdir(builtins_fixture_root, 0o755);
+    writeFile("/tmp/slash-builtins-fixture/three.txt", "alpha beta gamma\n");
+    writeFile("/tmp/slash-builtins-fixture/empty.txt", "");
+}
+
+fn teardownBuiltinsFixture() void {
+    _ = std.c.unlink("/tmp/slash-builtins-fixture/three.txt");
+    _ = std.c.unlink("/tmp/slash-builtins-fixture/empty.txt");
+    _ = std.c.rmdir(builtins_fixture_root);
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -723,6 +809,8 @@ test "headless v0" {
     defer teardownGlobFixture();
     setupSourceFixture();
     defer teardownSourceFixture();
+    setupBuiltinsFixture();
+    defer teardownBuiltinsFixture();
 
     const alloc = std.testing.allocator;
     var failures: u32 = 0;

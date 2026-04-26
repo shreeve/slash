@@ -153,10 +153,11 @@ fn evalCommand(
 
     // Shell-context builtin path (zero-child Job).
     //
-    // Skip when redirects are present or env-prefixes are present — those
-    // cases need a child to apply redirects/env without leaking into the
-    // parent shell.
-    if (!ctx.in_child_context and c.redirects.len == 0 and c.env.len == 0) {
+    // Env-prefixes still require a forked child so the override doesn't
+    // leak into the parent shell. Redirects, however, can be applied to
+    // the parent fd table around a tightly-scoped builtin call (PLAN §7
+    // Rule 23) — that's how `read NAME < file` keeps the assignment.
+    if (!ctx.in_child_context and c.env.len == 0) {
         // `source` / `.` are special: they re-enter the parse/lower/eval
         // pipeline on a file's contents in shell context. They can't be
         // ordinary builtins because a builtin can't import eval without
@@ -164,8 +165,27 @@ fn evalCommand(
         if (std.mem.eql(u8, exe_text, "source") or std.mem.eql(u8, exe_text, ".")) {
             return try runSourceCommand(argv.items, session, ctx, sink);
         }
+        // `exec` replaces the shell process with the named program — it
+        // necessarily breaks the "builtins never call exec" rule (PLAN
+        // §7 Rule 19), which is why it's special-cased here rather than
+        // sitting in the regular builtin table.
+        if (std.mem.eql(u8, exe_text, "exec")) {
+            return try runExecCommand(c, argv.items, session, ctx, sink);
+        }
+        // `command` skips the builtin lookup so the user can force the
+        // external command of the same name. Other than that, behaves
+        // like any external invocation.
+        if (std.mem.eql(u8, exe_text, "command")) {
+            if (argv.items.len < 2) {
+                return makeFailedOutcome(session, "command", .{ .exited = 0 });
+            }
+            return try runExternalForced(c, argv.items[1..], session, ctx, sink);
+        }
         if (session.builtins.lookup(exe_text)) |b| {
-            return try runShellContextBuiltin(c, b, argv.items, session);
+            if (c.redirects.len == 0) {
+                return try runShellContextBuiltin(c, b, argv.items, session);
+            }
+            return try runShellContextBuiltinWithRedirects(c, b, argv.items, session, ctx, sink);
         }
     }
 
@@ -185,6 +205,210 @@ fn runShellContextBuiltin(
     const result = try b.run(argv, io, .{ .shell = session });
     session.jobs.completeZeroChild(j, result);
     return .{ .job = j, .expression_result = result };
+}
+
+/// Run a shell-context builtin with file/dup redirects applied to the
+/// parent's fd table. Each affected fd is `dup`'d before mutation so we
+/// can restore it after the builtin returns. PLAN §7 Rule 23 carves
+/// this out as the one place the parent shell's fds may be mutated.
+fn runShellContextBuiltinWithRedirects(
+    c: *const Command,
+    b: builtins.Builtin,
+    argv: []const []const u8,
+    session: *Session,
+    ctx: EvalContext,
+    sink: ?Sink,
+) !EvalOutcome {
+    const ops = try buildRedirectOps(ctx.scratch, c.redirects, session);
+
+    const SavedFd = struct { saved_fd: i32, target_fd: i32 };
+    var saved = std.ArrayListUnmanaged(SavedFd).empty;
+    defer saved.deinit(ctx.scratch);
+
+    const restore = struct {
+        fn run(items: []const SavedFd) void {
+            // Restore in reverse order so a redirect that touched the
+            // same target as a later one ends up with the right state.
+            var i: usize = items.len;
+            while (i > 0) {
+                i -= 1;
+                _ = std.c.dup2(items[i].saved_fd, items[i].target_fd);
+                _ = std.c.close(items[i].saved_fd);
+            }
+        }
+    }.run;
+
+    for (ops) |op| {
+        var fd_buf: [2]exec.Fd = undefined;
+        const target_fds = redirectTargetFds(op, &fd_buf);
+        for (target_fds) |target_fd| {
+            const dup_fd = std.c.dup(target_fd);
+            // EBADF means the target wasn't open in the first place; we
+            // skip the save (and rely on the application step to install
+            // the redirect into a fresh slot). Other errors abort with
+            // the prior saves restored.
+            if (dup_fd >= 0) try saved.append(ctx.scratch, .{ .saved_fd = dup_fd, .target_fd = target_fd });
+        }
+        applyRedirInParent(op) catch {
+            try diag.emit(sink, diag.make(
+                .exec, .@"error", "EX0003",
+                "redirect failed", .{ .name = "<eval>", .text = "" }, c.span,
+            ));
+            restore(saved.items);
+            return makeFailedOutcome(session, argv[0], .{ .exited = 1 });
+        };
+    }
+
+    const j = try session.jobs.create(true, false, argv[0]);
+    j.state = .running;
+    const io: builtins.BuiltinIo = .{ .stdin = 0, .stdout = 1, .stderr = 2 };
+    const result = b.run(argv, io, .{ .shell = session }) catch |err| switch (err) {
+        error.BreakLoop, error.ContinueLoop, error.ReturnFromCmd => {
+            restore(saved.items);
+            return err;
+        },
+        else => Result{ .exited = 1 },
+    };
+    restore(saved.items);
+    session.jobs.completeZeroChild(j, result);
+    return .{ .job = j, .expression_result = result };
+}
+
+/// Fds touched by a single redirect — `both_*` modes affect fds 1 AND
+/// 2; everything else is one fd. The caller passes a 2-slot scratch
+/// array; the returned slice points into it.
+fn redirectTargetFds(op: exec.RedirectOp, buf: *[2]exec.Fd) []const exec.Fd {
+    switch (op) {
+        .dup => |d| {
+            buf[0] = d.dst;
+            return buf[0..1];
+        },
+        .close => |fd| {
+            buf[0] = fd;
+            return buf[0..1];
+        },
+        .file => |f| switch (f.mode) {
+            .both_write, .both_append => {
+                buf[0] = 1;
+                buf[1] = 2;
+                return buf[0..2];
+            },
+            else => {
+                buf[0] = f.dst;
+                return buf[0..1];
+            },
+        },
+    }
+}
+
+/// Parent-safe variant of `applyRedirInChild`. Returns errors instead of
+/// `_exit`-ing — the caller restores fds on failure.
+fn applyRedirInParent(op: exec.RedirectOp) !void {
+    switch (op) {
+        .dup => |d| {
+            if (std.c.dup2(d.src, d.dst) < 0) return error.Dup2Failed;
+        },
+        .close => |fd| {
+            _ = std.c.close(fd);
+        },
+        .file => |f| {
+            const flags: std.c.O = switch (f.mode) {
+                .read => .{ .ACCMODE = .RDONLY },
+                .write, .both_write => .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
+                .append, .both_append => .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
+            };
+            const opened = std.c.open(f.path, flags, @as(std.c.mode_t, 0o644));
+            if (opened < 0) return error.OpenFailed;
+            switch (f.mode) {
+                .both_write, .both_append => {
+                    if (std.c.dup2(opened, 1) < 0) {
+                        _ = std.c.close(opened);
+                        return error.Dup2Failed;
+                    }
+                    if (std.c.dup2(opened, 2) < 0) {
+                        _ = std.c.close(opened);
+                        return error.Dup2Failed;
+                    }
+                },
+                else => {
+                    if (std.c.dup2(opened, f.dst) < 0) {
+                        _ = std.c.close(opened);
+                        return error.Dup2Failed;
+                    }
+                },
+            }
+            _ = std.c.close(opened);
+        },
+    }
+}
+
+/// `exec CMD ARGS...` replaces the running shell process with `CMD`.
+/// On success, this function does not return: `execve` overwrites the
+/// process image. On failure (resolution miss, permission denied), it
+/// emits a diagnostic and returns a failed outcome — the shell stays
+/// alive, which is the safer of the two POSIX behaviors.
+///
+/// `exec` with no arguments at all is a no-op success (the redirects-
+/// only form would need to mutate parent fds permanently; that is a
+/// future change deferred behind a clean redirect-application API).
+fn runExecCommand(
+    c: *const Command,
+    argv: []const []const u8,
+    session: *Session,
+    ctx: EvalContext,
+    sink: ?Sink,
+) !EvalOutcome {
+    if (argv.len < 2) {
+        return makeFailedOutcome(session, "exec", .{ .exited = 0 });
+    }
+
+    const exe_text = argv[1];
+    const rest = argv[2..];
+    var spawn_argv = std.ArrayListUnmanaged([]const u8).empty;
+    defer spawn_argv.deinit(ctx.scratch);
+    try spawn_argv.append(ctx.scratch, exe_text);
+    for (rest) |a| try spawn_argv.append(ctx.scratch, a);
+
+    const path_z = try resolvePath(session, ctx.scratch, exe_text);
+    const argv_z = try buildArgvZ(ctx.scratch, spawn_argv.items);
+    const envp = blk: {
+        const built = try buildLocalEnv(&.{}, session, ctx.scratch);
+        break :blk built orelse session.envp;
+    };
+
+    _ = std.c.execve(path_z, argv_z, envp);
+    const errno = std.c.errno(@as(c_int, -1));
+    const reason: []const u8 = switch (errno) {
+        .ACCES => "permission denied",
+        .NOENT => "no such file or directory",
+        else => "exec failed",
+    };
+    var msg_buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "exec: {s}: {s}\n", .{ exe_text, reason }) catch "exec: failed\n";
+    _ = std.c.write(2, msg.ptr, msg.len);
+    try diag.emit(sink, diag.make(
+        .exec, .@"error", "EX0001",
+        reason,
+        .{ .name = "<eval>", .text = "" }, c.span,
+    ));
+    const code: u8 = switch (errno) {
+        .ACCES => 126,
+        .NOENT => 127,
+        else => 127,
+    };
+    return makeFailedOutcome(session, exe_text, .{ .exited = code });
+}
+
+/// `command NAME ARGS...` — run NAME as an external command, bypassing
+/// the builtin lookup. Resolves NAME via the regular PATH search.
+fn runExternalForced(
+    c: *const Command,
+    argv: []const []const u8,
+    session: *Session,
+    ctx: EvalContext,
+    sink: ?Sink,
+) !EvalOutcome {
+    return try runExternalSingle(c, argv, null, session, ctx, sink);
 }
 
 /// Implementation of the `source` / `.` builtin. Reads the named file,

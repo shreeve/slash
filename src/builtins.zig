@@ -81,6 +81,9 @@ pub fn init(alloc: Allocator) !BuiltinSet {
     try set.table.put(alloc, "break", .{ .name = "break", .run = breakFn });
     try set.table.put(alloc, "continue", .{ .name = "continue", .run = continueFn });
     try set.table.put(alloc, "return", .{ .name = "return", .run = returnFn });
+    try set.table.put(alloc, "read", .{ .name = "read", .run = readFn });
+    try set.table.put(alloc, "shift", .{ .name = "shift", .run = shiftFn });
+    try set.table.put(alloc, "type", .{ .name = "type", .run = typeFn });
     return set;
 }
 
@@ -176,23 +179,46 @@ fn exitFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror
 // =============================================================================
 
 fn cdFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
-    const target_arg: []const u8 = if (argv.len >= 2) argv[1] else blk: {
-        // No argument — go to $HOME.
-        switch (ctx) {
-            .shell => |s| {
-                if (s.vars.get("HOME")) |v| switch (v.value) {
-                    .scalar => |home| break :blk home,
-                    else => {},
-                };
-            },
-            .child => {},
-        }
-        const home_env = std.c.getenv("HOME") orelse {
-            _ = writeAllToFd(io.stderr, "cd: HOME not set\n");
-            return .{ .exited = 1 };
-        };
-        break :blk std.mem.span(home_env);
+    const session_opt: ?*session_mod.Session = switch (ctx) {
+        .shell => |s| s,
+        .child => null,
     };
+
+    var print_target = false; // `cd -` echoes the new pwd, like bash
+    var target_arg: []const u8 = "";
+    if (argv.len >= 2) {
+        if (std.mem.eql(u8, argv[1], "-")) {
+            print_target = true;
+            const old = if (session_opt) |s|
+                if (s.vars.get("OLDPWD")) |v| switch (v.value) {
+                    .scalar => |p| p,
+                    else => "",
+                } else ""
+            else "";
+            if (old.len == 0) {
+                _ = writeAllToFd(io.stderr, "cd: OLDPWD not set\n");
+                return .{ .exited = 1 };
+            }
+            target_arg = old;
+        } else {
+            target_arg = argv[1];
+        }
+    } else {
+        // No argument — go to $HOME.
+        if (session_opt) |s| {
+            if (s.vars.get("HOME")) |v| switch (v.value) {
+                .scalar => |home| target_arg = home,
+                else => {},
+            };
+        }
+        if (target_arg.len == 0) {
+            const home_env = std.c.getenv("HOME") orelse {
+                _ = writeAllToFd(io.stderr, "cd: HOME not set\n");
+                return .{ .exited = 1 };
+            };
+            target_arg = std.mem.span(home_env);
+        }
+    }
 
     // Convert to NUL-terminated path. Use a stack buffer.
     var pathbuf: [4096]u8 = undefined;
@@ -212,21 +238,21 @@ fn cdFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
     }
 
     // Update PWD/OLDPWD in shell context.
-    switch (ctx) {
-        .shell => |s| {
-            // Read back canonical cwd.
-            var cwd_buf: [4096]u8 = undefined;
-            if (std.c.getcwd(&cwd_buf, cwd_buf.len)) |got| {
-                const len = std.mem.len(@as([*:0]u8, @ptrCast(got)));
-                const new_pwd = cwd_buf[0..len];
-                if (s.vars.get("PWD")) |old| switch (old.value) {
-                    .scalar => |p| s.vars.setScalar("OLDPWD", p, true) catch {},
-                    else => {},
-                };
-                s.vars.setScalar("PWD", new_pwd, true) catch {};
+    if (session_opt) |s| {
+        var cwd_buf: [4096]u8 = undefined;
+        if (std.c.getcwd(&cwd_buf, cwd_buf.len)) |got| {
+            const len = std.mem.len(@as([*:0]u8, @ptrCast(got)));
+            const new_pwd = cwd_buf[0..len];
+            if (s.vars.get("PWD")) |old| switch (old.value) {
+                .scalar => |p| s.vars.setScalar("OLDPWD", p, true) catch {},
+                else => {},
+            };
+            s.vars.setScalar("PWD", new_pwd, true) catch {};
+            if (print_target) {
+                _ = writeAllToFd(io.stdout, new_pwd);
+                _ = writeAllToFd(io.stdout, "\n");
             }
-        },
-        .child => {},
+        }
     }
     return .{ .exited = 0 };
 }
@@ -457,4 +483,243 @@ fn returnFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerr
     // session if needed.
     _ = argv;
     return error.ReturnFromCmd;
+}
+
+// =============================================================================
+// read
+// =============================================================================
+//
+// `read NAME ...` consumes one line from stdin. With one name, the entire
+// trimmed line is bound to that variable. With multiple names, the line
+// is split on whitespace into N fields; the last name absorbs the
+// remainder so multi-word values work without surprises:
+//
+//   read first rest    line: "alpha beta gamma"
+//   first=alpha  rest="beta gamma"
+//
+// Returns 1 at end-of-file (no bytes read) so the typical loop pattern
+// `while read line { ... }` terminates cleanly.
+
+fn readFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    if (argv.len < 2) {
+        _ = writeAllToFd(io.stderr, "read: variable name required\n");
+        return .{ .exited = 2 };
+    }
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+
+    // Read until newline or EOF, one byte at a time. Reading more would
+    // require an unread buffer — we don't own stdin's underlying buffer.
+    var line_buf = std.ArrayListUnmanaged(u8).empty;
+    defer line_buf.deinit(session.alloc);
+
+    var saw_any = false;
+    while (true) {
+        var byte: [1]u8 = undefined;
+        const n = std.c.read(io.stdin, &byte, 1);
+        if (n < 0) {
+            const e = std.c.errno(@as(c_int, -1));
+            if (e == .INTR) continue;
+            return .{ .exited = 1 };
+        }
+        if (n == 0) break; // EOF
+        saw_any = true;
+        if (byte[0] == '\n') break;
+        try line_buf.append(session.alloc, byte[0]);
+    }
+
+    if (!saw_any) return .{ .exited = 1 };
+
+    const names = argv[1..];
+    if (names.len == 1) {
+        try session.vars.setScalar(names[0], line_buf.items, false);
+        return .{ .exited = 0 };
+    }
+
+    // Multiple names: split on whitespace, last name absorbs the rest.
+    var i: usize = 0;
+    var name_idx: usize = 0;
+    const text = line_buf.items;
+
+    while (name_idx + 1 < names.len) : (name_idx += 1) {
+        while (i < text.len and isReadWs(text[i])) : (i += 1) {}
+        const start = i;
+        while (i < text.len and !isReadWs(text[i])) : (i += 1) {}
+        try session.vars.setScalar(names[name_idx], text[start..i], false);
+    }
+
+    while (i < text.len and isReadWs(text[i])) : (i += 1) {}
+    var end = text.len;
+    while (end > i and isReadWs(text[end - 1])) end -= 1;
+    try session.vars.setScalar(names[names.len - 1], text[i..end], false);
+    return .{ .exited = 0 };
+}
+
+fn isReadWs(c: u8) bool {
+    return c == ' ' or c == '\t';
+}
+
+// =============================================================================
+// shift
+// =============================================================================
+//
+// `shift [N]` shifts positional parameters down by N (default 1). After
+// `shift`, the old `$2` becomes `$1`, the old `$3` becomes `$2`, etc.;
+// `$#` decrements; `$@` reflects the new tail. Shifting past the end is
+// an error (status 1). Used in argv-loop patterns.
+
+fn shiftFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+
+    var n: usize = 1;
+    if (argv.len >= 2) {
+        n = std.fmt.parseInt(usize, argv[1], 10) catch {
+            _ = writeAllToFd(io.stderr, "shift: numeric argument required\n");
+            return .{ .exited = 2 };
+        };
+    }
+
+    const cur = readPositionalCount(session);
+    if (n > cur) {
+        _ = writeAllToFd(io.stderr, "shift: count exceeds $#\n");
+        return .{ .exited = 1 };
+    }
+
+    // Read all current positionals into a heap-allocated list before
+    // mutating, so we don't trip over our own renumbering.
+    var current = std.ArrayListUnmanaged([]const u8).empty;
+    defer {
+        for (current.items) |s| session.alloc.free(s);
+        current.deinit(session.alloc);
+    }
+    var idx: usize = 1;
+    while (idx <= cur) : (idx += 1) {
+        var keybuf: [16]u8 = undefined;
+        const key = std.fmt.bufPrint(&keybuf, "{d}", .{idx}) catch continue;
+        if (session.vars.get(key)) |v| switch (v.value) {
+            .scalar => |s| try current.append(session.alloc, try session.alloc.dupe(u8, s)),
+            else => try current.append(session.alloc, try session.alloc.dupe(u8, "")),
+        };
+    }
+
+    // Unset the old slots first to avoid stale indices when count shrinks.
+    idx = 1;
+    while (idx <= cur) : (idx += 1) {
+        var keybuf: [16]u8 = undefined;
+        const key = std.fmt.bufPrint(&keybuf, "{d}", .{idx}) catch continue;
+        session.vars.unset(key);
+    }
+
+    const remaining = current.items[n..];
+    for (remaining, 0..) |val, i| {
+        var keybuf: [16]u8 = undefined;
+        const key = std.fmt.bufPrint(&keybuf, "{d}", .{i + 1}) catch continue;
+        try session.vars.setScalar(key, val, false);
+    }
+
+    var countbuf: [16]u8 = undefined;
+    const count = std.fmt.bufPrint(&countbuf, "{d}", .{remaining.len}) catch unreachable;
+    try session.vars.setScalar("#", count, false);
+    if (remaining.len > 0) {
+        try session.vars.setList("@", remaining, false);
+    } else {
+        session.vars.unset("@");
+    }
+    return .{ .exited = 0 };
+}
+
+fn readPositionalCount(session: *session_mod.Session) usize {
+    if (session.vars.get("#")) |v| switch (v.value) {
+        .scalar => |s| return std.fmt.parseInt(usize, s, 10) catch 0,
+        else => return 0,
+    };
+    return 0;
+}
+
+// =============================================================================
+// type
+// =============================================================================
+//
+// Describes how `NAME` would resolve. Order matches eval dispatch:
+// special-cased keywords (`source`, `.`, `exec`, `command`) → builtins
+// → `cmd` definitions (when they exist) → `$PATH` lookup.
+
+fn typeFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    if (argv.len < 2) {
+        _ = writeAllToFd(io.stderr, "type: name required\n");
+        return .{ .exited = 2 };
+    }
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+    var any_unknown = false;
+    for (argv[1..]) |name| {
+        if (isSpecialDispatchName(name)) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s} is a shell builtin\n", .{name}) catch continue;
+            _ = writeAllToFd(io.stdout, msg);
+            continue;
+        }
+        if (session.builtins.lookup(name) != null) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s} is a shell builtin\n", .{name}) catch continue;
+            _ = writeAllToFd(io.stdout, msg);
+            continue;
+        }
+        if (try findInPath(session, name)) |path| {
+            defer session.alloc.free(path);
+            var buf: [4096]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s} is {s}\n", .{ name, path }) catch continue;
+            _ = writeAllToFd(io.stdout, msg);
+            continue;
+        }
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "type: {s}: not found\n", .{name}) catch continue;
+        _ = writeAllToFd(io.stderr, msg);
+        any_unknown = true;
+    }
+    return .{ .exited = if (any_unknown) 1 else 0 };
+}
+
+fn isSpecialDispatchName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "source") or
+        std.mem.eql(u8, name, ".") or
+        std.mem.eql(u8, name, "exec") or
+        std.mem.eql(u8, name, "command");
+}
+
+/// Walk `$PATH` once; returns the first executable match as a session-
+/// allocated string. Bypasses the eval-side cache because `type` is rare
+/// and the cache stores resolved paths only on actual exec dispatch.
+fn findInPath(session: *session_mod.Session, name: []const u8) !?[]u8 {
+    if (std.mem.indexOfScalar(u8, name, '/') != null) {
+        if (accessExecutable(name))
+            return try session.alloc.dupe(u8, name);
+        return null;
+    }
+    const path_env = std.c.getenv("PATH") orelse return null;
+    const path_str = std.mem.span(path_env);
+    var it = std.mem.splitScalar(u8, path_str, ':');
+    while (it.next()) |dir| {
+        if (dir.len == 0) continue;
+        const candidate = try std.fmt.allocPrint(session.alloc, "{s}/{s}", .{ dir, name });
+        if (accessExecutable(candidate)) return candidate;
+        session.alloc.free(candidate);
+    }
+    return null;
+}
+
+fn accessExecutable(path: []const u8) bool {
+    var pathbuf: [4096]u8 = undefined;
+    if (path.len >= pathbuf.len) return false;
+    @memcpy(pathbuf[0..path.len], path);
+    pathbuf[path.len] = 0;
+    const path_z: [*:0]const u8 = @ptrCast(&pathbuf);
+    return std.c.access(path_z, std.c.X_OK) == 0;
 }

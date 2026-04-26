@@ -163,16 +163,8 @@ filenames hits errors. We need at minimum:
 Stretch: render multi-byte characters in REPL highlighting without
 collapsing the cursor.
 
-### 11. `cd` polish
 
-- `cd -` — toggle to `$OLDPWD`
-- `cd` with no arg goes to `$HOME` (already works), but verify `~` and
-  `~user` expansion in any path argument
-- Path canonicalization (`..` collapse, symlink resolution policy) —
-  decide logical-vs-physical and document
-- `$PWD` and `$OLDPWD` updates in **every** path that changes cwd
-
-### 12. `cmd` user-defined commands (positional only)
+### 11. `cmd` user-defined commands (positional only)
 
 PLAN §3 mentions, §7 Rule 26 commits to "session-scoped unless created
 inside a subshell". Implementation:
@@ -196,7 +188,7 @@ cmd greet {
 }
 ```
 
-### 13. Process substitution `<(...)` / `>(...)`
+### 12. Process substitution `<(...)` / `>(...)`
 
 PLAN §6.2 documents. Implementation:
 - Lexer adds `proc_sub_in` (`<(`) and `proc_sub_out` (`>(`) tokens
@@ -205,7 +197,7 @@ PLAN §6.2 documents. Implementation:
   (BSD/macOS) bindings, threads the path into the parent's argv
 - Job-owned cleanup on every termination path (PLAN §7 Rule 25)
 
-### 14. Configuration loading
+### 13. Configuration loading
 
 `~/.slashrc` is sourced at interactive shell startup. That's the entire
 mechanism. No `~/.slash/config` file format, no `set` runtime config
@@ -215,43 +207,11 @@ builtin. Users configure by writing Slash code in `.slashrc`.
 - `.slashrc` is run before the first prompt; non-interactive shells (`-c`,
   scripts) do not source it
 
-### 15. `read` builtin
 
-`read NAME` consumes a line from stdin into a variable. `read NAME1
-NAME2 ...` consumes a line and splits on whitespace into the named
-variables. Required for any script that takes interactive input.
 
-### 16. `shift` builtin
 
-`shift` shifts positional parameters down by one (`$2` becomes `$1`,
-etc.); `$#` decrements. `shift N` shifts by N. Required for the
-common arg-parsing pattern:
 
-```
-while test $# -gt 0 {
-  case $1 in
-    --flag) flag=true; shift ;;
-    *) break ;;
-  }
-}
-```
-
-### 17. `exec` builtin
-
-`exec CMD ARGS...` replaces the shell process with the named command (no
-fork). `exec` with redirects and no command applies the redirects to the
-shell itself permanently.
-
-### 18. `type` and `command` builtins
-
-- `type NAME` — describes how `NAME` resolves: builtin, `cmd`
-  definition, alias (none yet), or external (with PATH location)
-- `command NAME ARGS...` — runs `NAME` as an external command,
-  bypassing builtins and `cmd` definitions
-
-Introspection. ~30 lines each.
-
-### 19. `trap` builtin
+### 14. `trap` builtin
 
 `trap 'CMD' SIGNAL...` registers a Slash source string to run when the
 named signal is received. `trap '' SIGNAL` ignores the signal. `trap -`
@@ -441,7 +401,7 @@ This work depends on Tier 1 #1 (recoverable parse errors with partial
 Shape on incomplete input) and benefits from Tier 3 #7 (real
 diagnostics).
 
-### 20. Live syntax highlighting
+### 15. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -456,7 +416,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 21. Multi-line continuation
+### 16. Multi-line continuation
 
 If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
 heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
@@ -472,7 +432,7 @@ if test -d /tmp {
 We know exactly when they're inside the block (open `{` on stack) and
 when the statement is complete (matched `}` and shape is well-formed).
 
-### 22. Tab completion via Shape introspection
+### 17. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -485,7 +445,7 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 23. History
+### 18. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -498,12 +458,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 24. Bracket matching
+### 19. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 25. Prompt
+### 20. Prompt
 
 Default is minimal but useful:
 
@@ -521,7 +481,7 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 26. Implementation foundation
+### 21. Implementation foundation
 
 The REPL is one new module — `src/repl.zig`, ~600-800 lines.
 Dependencies:
