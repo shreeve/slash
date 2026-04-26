@@ -31,20 +31,8 @@ session arena (PLAN §6.8).
 Stress test: 10,000 commands in a row, no leaks, no fragmentation. Easy
 to build now, hard to retrofit later.
 
-### 2. Signal handling at the REPL boundary
 
-PLAN §18-§19 documents the model. The implementation:
-
-- Parent shell ignores `SIGINT` while reading input.
-- Children reset to default before `exec` (already done).
-- `Ctrl-C` cancels the line being edited, emits a fresh prompt (REPL).
-- `Ctrl-Z` doesn't crash anything; for now, ignored (full job-control later).
-- `SIGCHLD` reaping at safe points (already done in `service`).
-- Foreground-job's process group receives terminal-generated signals;
-  shell does not forward `SIGINT` itself.
-
-
-### 3. Diagnostic infrastructure actually used
+### 2. Diagnostic infrastructure actually used
 
 We built `diag.Sink` / `ListSink` / codes per PLAN §16. Almost nothing
 emits structured diagnostics. Every `slash: parse error` print today
@@ -60,7 +48,7 @@ Specific call sites needing structured diagnostics:
 - `exec.spawn` — `EX00xx` for fork/exec/redirect failures with the
   failing path
 
-### 4. CLOEXEC discipline audit
+### 3. CLOEXEC discipline audit
 
 Pipes get FD_CLOEXEC. What about other fds opened by the shell? Verify
 no fd leaks into spawned children when:
@@ -74,7 +62,7 @@ no fd leaks into spawned children when:
 
 ## Tier 4 — quality of execution
 
-### 5. Comprehensive test suite
+### 4. Comprehensive test suite
 
 Need:
 
@@ -100,13 +88,13 @@ The cooked-mode REPL with multi-line continuation and `~/.slashrc`
 sourcing is in. The remaining items upgrade the experience to what a
 modern shell user expects.
 
-### 6. Raw-mode line editor
+### 5. Raw-mode line editor
 
 `tcgetattr` / `tcsetattr` for raw mode, ANSI escape sequences, cursor
 movement, Backspace / Ctrl-W / Ctrl-U / Home / End. The terminal-
 abstraction layer the rest of the REPL items depend on.
 
-### 7. Live syntax highlighting
+### 6. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -121,7 +109,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 8. Tab completion via Shape introspection
+### 7. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -134,7 +122,7 @@ parser is fast enough — even multi-KB lines re-parse in microseconds.
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 9. History
+### 8. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -148,12 +136,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 10. Bracket matching
+### 9. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 11. Prompt
+### 10. Prompt
 
 Default is minimal but useful:
 

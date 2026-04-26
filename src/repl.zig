@@ -49,7 +49,13 @@ pub fn run(
         const n = std.c.read(0, &read_buf, read_buf.len);
         if (n < 0) {
             const e = std.c.errno(@as(c_int, -1));
-            if (e == .INTR) continue;
+            if (e == .INTR) {
+                // Ctrl-C: drop any in-flight buffer and emit a fresh
+                // prompt on the next iteration.
+                pending.clearRetainingCapacity();
+                _ = std.c.write(1, "\n", 1);
+                continue;
+            }
             return 1;
         }
         if (n == 0) {
@@ -162,19 +168,35 @@ fn renderDiagnostics(items: []const diag.Diagnostic) void {
     }
 }
 
-/// At the prompt the parent shell ignores `SIGINT`/`SIGTSTP`/etc. so
-/// stray Ctrl-C / Ctrl-Z presses don't kill or suspend slash itself —
-/// the foreground job's process group still receives the signal via
-/// the controlling terminal. Children reset to defaults before exec
-/// already (see `exec.resetSignalDefaults`).
+/// At the prompt the parent shell catches `SIGINT` so Ctrl-C
+/// interrupts the pending `read` (we'll see EINTR and clear the
+/// in-flight buffer) without actually killing the shell. `SIGTSTP`
+/// / `SIGTTIN` / `SIGTTOU` stay ignored so a stray Ctrl-Z doesn't
+/// suspend slash. Children reset to defaults before exec already
+/// (see `exec.resetSignalDefaults`).
 fn installInteractiveSignalHandlers() void {
-    var sa: std.posix.Sigaction = .{
+    var ignore: std.posix.Sigaction = .{
         .handler = .{ .handler = std.c.SIG.IGN },
         .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
-    const ignored = [_]std.c.SIG{ .INT, .QUIT, .TSTP, .TTIN, .TTOU };
-    for (ignored) |sig| std.posix.sigaction(sig, &sa, null);
+    const ignored = [_]std.c.SIG{ .QUIT, .TSTP, .TTIN, .TTOU };
+    for (ignored) |sig| std.posix.sigaction(sig, &ignore, null);
+
+    // SIGINT: install a no-op handler so the kernel delivers the
+    // signal (interrupts blocking reads) without the default action
+    // killing the shell. `SA.RESTART` is left off — we WANT EINTR.
+    var int_action: std.posix.Sigaction = .{
+        .handler = .{ .handler = sigintNoop },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.INT, &int_action, null);
+}
+
+fn sigintNoop(_: std.c.SIG) callconv(.c) void {
+    // Intentionally empty. Presence is what causes the kernel to
+    // surface SIGINT as EINTR for the in-flight `read`.
 }
 
 /// Source `~/.slashrc` if it exists. The body runs in shell context,
