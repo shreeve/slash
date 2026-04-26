@@ -4,8 +4,9 @@ This file lists every concrete unit of work that stands between Slash today
 and Slash 1.0. As items ship, **delete them from this file**. When the
 file is empty, Slash 1.0 ships.
 
-Items are grouped by tier, but tiers are advisory — within a tier, ship in
-whichever order makes sense.
+Items are flat bullets — no numbering, ship in whichever order makes
+sense. As items ship, **delete the bullet** in the same commit; the
+ROADMAP shrinks until empty.
 
 > **The test that decides whether anything joins this list:**
 > Does this improve `Command` clarity, `Pipeline` correctness, `Program`
@@ -19,27 +20,17 @@ The cooked-mode REPL with multi-line continuation and `~/.slashrc`
 sourcing is in. The remaining items upgrade the experience to what a
 modern shell user expects.
 
+- **Live syntax highlighting.** Re-parse on each keystroke. Walk the
+  Shape, emit ANSI escape sequences per node type: builtins / keywords
+  in bold cyan, strings in green (with `$var` inside double-quoted in
+  yellow), variables in yellow, pipes / redirects in dim white, syntax
+  errors in red underline with caret, comments in dim gray. The DuckDB
+  CLI insight: highlight from the parse tree, not regex. Our parser is
+  fast enough — even multi-KB lines re-parse in microseconds.
 
-### 1. Live syntax highlighting
-
-Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
-per node type:
-
-- builtins / keywords: bold cyan
-- strings: green (with `$var` inside double-quoted in yellow)
-- variables: yellow
-- pipes / redirects: dim white
-- syntax errors: red underline with caret
-- comments: dim gray
-
-The DuckDB CLI insight: highlight from the parse tree, not regex. Our
-parser is fast enough — even multi-KB lines re-parse in microseconds.
-
-
-### 2. Bracket matching
-
-When the cursor sits on `}`, dim the matching `{` for 200ms (or until
-cursor moves). Use the Shape spans — no character-counting needed.
+- **Bracket matching.** When the cursor sits on `}`, dim the matching
+  `{` for 200ms (or until cursor moves). Use the Shape spans — no
+  character-counting needed.
 
 
 ## Done means done
