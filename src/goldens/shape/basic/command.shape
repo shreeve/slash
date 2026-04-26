@@ -1,6 +1,0 @@
-sequence
-  item
-    command
-      exe bare echo
-      arg bare hello
-      arg bare world

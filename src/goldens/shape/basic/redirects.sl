@@ -1,1 +1,0 @@
-grep foo < in.txt > out.txt 2>&1

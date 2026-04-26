@@ -1,8 +1,0 @@
-sequence
-  item
-    command
-      exe bare grep
-      arg bare foo
-      redir read target=bare in.txt
-      redir write target=bare out.txt
-      redir dup_out fd=2>&1
