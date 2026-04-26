@@ -1,17 +1,13 @@
-//! Slash — Word layer.
+//! Word — the lowered semantic word.
 //!
-//! A `Word` is the lowered semantic word. `Shape` preserves source-faithful
-//! bytes (with outer quotes, undecoded escapes); `Word` canonicalizes.
-//!
-//! Phase 1: words have exactly one text part. No variables, no command
-//! substitution, no process substitution, no globs. The only work this
-//! module does is strip quote delimiters and decode escapes so the Program
-//! layer can carry a clean argv template.
-//!
-//! See PLAN.md §3.2, §6.3, §7 Rules 3–9 (argv/expansion/globbing contract).
+//! Shape preserves source-faithful bytes (with outer quotes, undecoded
+//! escapes); Word canonicalizes. A word is an ordered list of typed parts:
+//! text, variable references, command substitutions, and globs. Final
+//! argv strings are produced at evaluation time by expanding each part.
 
 const std = @import("std");
 const shape_mod = @import("shape.zig");
+const program_mod = @import("program.zig");
 const diag = @import("diagnostics.zig");
 
 pub const Allocator = std.mem.Allocator;
@@ -22,40 +18,59 @@ pub const Word = struct {
     span: Span,
 
     pub const Part = union(enum) {
-        /// Canonicalized text — outer quotes stripped, supported escapes
-        /// decoded. Phase 1 is always a single text part.
+        /// Canonicalized literal bytes — outer quotes stripped, supported
+        /// escapes decoded.
         text: []const u8,
+        /// Variable reference by bare name (`$name`, or `0..9`/`@`/`#`/`?`/`$`/`!`/`*`).
+        variable: []const u8,
+        /// Braced variable reference body — interior of `${...}`.
+        var_braced: []const u8,
+        /// Command substitution capturing the program's stdout.
+        cmd_subst: *const program_mod.Program,
+        /// Glob pattern from an unquoted bare word containing `*`/`?`/`[...]`.
+        glob: []const u8,
     };
 };
 
-/// Lower a `WordShape` into a canonicalized `Word`. The returned `Word.Part`
-/// bytes are allocated from `alloc` when escape decoding or quote stripping
-/// produces bytes that differ from the source slice. In all other cases the
-/// slice aliases the original source (no copy).
-pub fn lowerWord(shape: shape_mod.WordShape, alloc: Allocator) !Word {
-    // Phase 1: exactly one text part per word (enforced by shape layer).
-    std.debug.assert(shape.parts.len == 1);
-    const part = shape.parts[0].text;
-
-    const canonical: []const u8 = switch (part.flavor) {
-        .bare => part.bytes,
-        .single_quoted => try decodeSingle(alloc, part.bytes),
-        .double_quoted => try decodeDouble(alloc, part.bytes),
-    };
-
-    const parts = try alloc.alloc(Word.Part, 1);
-    parts[0] = .{ .text = canonical };
-    return .{ .parts = parts, .span = shape.span };
+pub fn lowerWord(
+    word_shape: shape_mod.WordShape,
+    ctx: *const program_mod.LowerContext,
+) !Word {
+    var parts = try ctx.alloc.alloc(Word.Part, word_shape.parts.len);
+    for (word_shape.parts, 0..) |part, i| {
+        parts[i] = try lowerPart(part, ctx);
+    }
+    return .{ .parts = parts, .span = word_shape.span };
 }
 
-/// Strip outer single-quote delimiters and collapse `''` → `'`.
-/// Expects `bytes` to start with `'` and end with `'`.
+fn lowerPart(
+    part: shape_mod.WordPartShape,
+    ctx: *const program_mod.LowerContext,
+) !Word.Part {
+    return switch (part) {
+        .text => |t| Word.Part{ .text = try canonicalizeText(t.bytes, t.flavor, ctx.alloc) },
+        .variable => |v| Word.Part{ .variable = try ctx.alloc.dupe(u8, v.name) },
+        .var_braced => |v| Word.Part{ .var_braced = try ctx.alloc.dupe(u8, v.body) },
+        .cmd_subst => |c| blk: {
+            const inner = try program_mod.lower(c.body.*, ctx, null);
+            break :blk Word.Part{ .cmd_subst = inner };
+        },
+        .glob => |g| Word.Part{ .glob = try ctx.alloc.dupe(u8, g.pattern) },
+    };
+}
+
+fn canonicalizeText(bytes: []const u8, flavor: shape_mod.Flavor, alloc: Allocator) ![]const u8 {
+    return switch (flavor) {
+        .bare => alloc.dupe(u8, bytes),
+        .single_quoted => decodeSingle(alloc, bytes),
+        .double_quoted => decodeDouble(alloc, bytes),
+    };
+}
+
 fn decodeSingle(alloc: Allocator, bytes: []const u8) ![]u8 {
     std.debug.assert(bytes.len >= 2 and bytes[0] == '\'' and bytes[bytes.len - 1] == '\'');
     const inner = bytes[1 .. bytes.len - 1];
-    // Fast path: no doubled quotes → aliasing dupe.
     if (std.mem.indexOfScalar(u8, inner, '\'') == null) return alloc.dupe(u8, inner);
-
     var out = try alloc.alloc(u8, inner.len);
     var w: usize = 0;
     var i: usize = 0;
@@ -68,15 +83,10 @@ fn decodeSingle(alloc: Allocator, bytes: []const u8) ![]u8 {
     return alloc.realloc(out, w);
 }
 
-/// Strip outer double-quote delimiters and decode recognized backslash
-/// escapes. Phase 1 scope for escapes: `\"`, `\\`, `\n`, `\t`, `\r`, `\$`,
-/// `\0`. Unrecognized `\x` sequences are preserved verbatim (both bytes).
-/// Expects `bytes` to start with `"` and end with `"`.
 fn decodeDouble(alloc: Allocator, bytes: []const u8) ![]u8 {
     std.debug.assert(bytes.len >= 2 and bytes[0] == '"' and bytes[bytes.len - 1] == '"');
     const inner = bytes[1 .. bytes.len - 1];
     if (std.mem.indexOfScalar(u8, inner, '\\') == null) return alloc.dupe(u8, inner);
-
     var out = try alloc.alloc(u8, inner.len);
     var w: usize = 0;
     var i: usize = 0;
@@ -93,7 +103,6 @@ fn decodeDouble(alloc: Allocator, bytes: []const u8) ![]u8 {
                 '$' => '$',
                 '0' => 0,
                 else => {
-                    // Unknown escape: keep both bytes verbatim.
                     out[w] = c;
                     w += 1;
                     out[w] = n;
@@ -112,52 +121,4 @@ fn decodeDouble(alloc: Allocator, bytes: []const u8) ![]u8 {
         i += 1;
     }
     return alloc.realloc(out, w);
-}
-
-// =============================================================================
-// Tests
-// =============================================================================
-
-test "bare word aliases source bytes" {
-    const alloc = std.testing.allocator;
-    const span = Span{ .start = 0, .end = 3 };
-    const bytes = "abc";
-    const parts = try alloc.alloc(shape_mod.WordPartShape, 1);
-    defer alloc.free(parts);
-    parts[0] = .{ .text = .{ .bytes = bytes, .flavor = .bare, .span = span } };
-    const ws = shape_mod.WordShape{ .parts = parts, .span = span };
-
-    const w = try lowerWord(ws, alloc);
-    defer alloc.free(w.parts);
-    try std.testing.expectEqualStrings("abc", w.parts[0].text);
-}
-
-test "single-quoted strips delimiters and collapses doubled quotes" {
-    const alloc = std.testing.allocator;
-    const span = Span{ .start = 0, .end = 8 };
-    const bytes = "'it''s'";
-    const parts = try alloc.alloc(shape_mod.WordPartShape, 1);
-    defer alloc.free(parts);
-    parts[0] = .{ .text = .{ .bytes = bytes, .flavor = .single_quoted, .span = span } };
-    const ws = shape_mod.WordShape{ .parts = parts, .span = span };
-
-    const w = try lowerWord(ws, alloc);
-    defer alloc.free(w.parts);
-    defer alloc.free(w.parts[0].text);
-    try std.testing.expectEqualStrings("it's", w.parts[0].text);
-}
-
-test "double-quoted decodes basic escapes" {
-    const alloc = std.testing.allocator;
-    const span = Span{ .start = 0, .end = 14 };
-    const bytes = "\"a\\n\\tb\\\"c\"";
-    const parts = try alloc.alloc(shape_mod.WordPartShape, 1);
-    defer alloc.free(parts);
-    parts[0] = .{ .text = .{ .bytes = bytes, .flavor = .double_quoted, .span = span } };
-    const ws = shape_mod.WordShape{ .parts = parts, .span = span };
-
-    const w = try lowerWord(ws, alloc);
-    defer alloc.free(w.parts);
-    defer alloc.free(w.parts[0].text);
-    try std.testing.expectEqualStrings("a\n\tb\"c", w.parts[0].text);
 }

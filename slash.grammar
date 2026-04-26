@@ -1,68 +1,77 @@
 # ==============================================================================
-# slash.grammar — Phase 1 surface
+# slash.grammar — Slash shell lexer and parser
 # ==============================================================================
 #
-# Lexer and parser for the Phase 1 subset of Slash. See PLAN.md §10.
+# Generate with: /Users/shreeve/Data/Code/nexus/bin/nexus slash.grammar src/parser.zig
 #
-# Generate: /Users/shreeve/Data/Code/nexus/bin/nexus slash.grammar src/parser.zig
-#
-# Phase 1 scope (commitments kept; everything else is deferred to later phases):
-#   - simple commands, bare and quoted words
-#   - pipelines with `|`
-#   - sequences with `;`, `&&`, `||`
-#   - subshells with `(...)` and optional trailing redirects
-#   - detached execution with trailing `&`
-#   - redirects: `<`, `>`, `>>`, `n<`, `n>`, `n>>`, `n>&m`, `n<&m`, `&>`, `&>>`
-#
-# Out of Phase 1 (rejected by parser, delivered in Phases 3+):
-#   heredocs, process substitution, variables, control forms,
-#   user-defined `cmd`, env-prefix assignments, line continuation,
-#   word concatenation across fragments, glob as a syntactic category.
+# The lexer wrapper in src/slash.zig adds three responsibilities on top of
+# this grammar's declarative rules: comment trivia is dropped, `IDENT '='`
+# (no whitespace between, not followed by another `=`) fuses into a single
+# `NAME_EQ` token, and indentation changes emit virtual `INDENT`/`OUTDENT`
+# tokens that share the `block_form` production with brace blocks.
 # ==============================================================================
 
 @lexer
+
+state
+    paren   = 0
+    brace   = 0
+    bracket = 0
 
 # ------------------------------------------------------------------------------
 # Token types
 # ------------------------------------------------------------------------------
 
 tokens
-    # literals — Nexus recognizes `ident`, `integer`, `string_sq`, `string_dq`
-    # as well-known token names and generates matchRules dispatch for each.
-    ident           # bare word (letters, digits, shell-safe punctuation)
-    integer         # purely-numeric run (subset of ident, but needed so that
-                    # fd-prefixed redirect rules can peel a leading number)
-    string_sq       # 'single quoted'
-    string_dq       # "double quoted"
+    ident
+    integer
+    string_sq
+    string_dq
 
-    # grouping
+    # Variables
+    variable        # $name, $0..$9, $?, $$, $#, $@, $!
+    var_braced      # ${...}
+    dollar_paren    # $( opens a command substitution
+
+    # Grouping
     lparen          # (
     rparen          # )
+    lbrace          # {
+    rbrace          # }
+    lbracket        # [
+    rbracket        # ]
 
-    # sequence separators
-    semi            # ; or newline (run of newlines collapses to one)
+    # Sequence separators
+    semi            # ; or newline
     and_and         # &&
     or_or           # ||
-    amp             # & (backgrounding)
+    amp             # &
 
-    # pipes
+    # Pipes
     pipe            # |
 
-    # redirects — default fds
+    # Redirects — default fds
     lt              # <
     gt              # >
     gt_gt           # >>
     amp_gt          # &>
     amp_gt_gt       # &>>
 
-    # redirects — explicit fd prefix (N>>file deferred to Phase 3)
+    # Redirects — explicit fd prefix
     fd_lt           # N<
     fd_gt           # N>
     fd_dup_out      # N>&M
     fd_dup_in       # N<&M
 
-    # trivia / sentinel — `comment` is a well-known Nexus name that triggers
-    # a dedicated scanner; Nexus handles it as trivia in the prefix scanner.
+    # Assignment
+    assign          # =       (loose form, e.g. inside ${var = default})
+    name_eq         # NAME=   (tight form, fused by lexer wrapper)
+
+    # Indentation (emitted by lexer wrapper)
+    indent
+    outdent
+
+    # Trivia / sentinel
     comment
     err
     eof
@@ -70,10 +79,6 @@ tokens
 # ------------------------------------------------------------------------------
 # Lexer rules
 # ------------------------------------------------------------------------------
-#
-# Order matters. Rules declared earlier take precedence when patterns overlap.
-# The fd-prefixed redirect compound patterns MUST appear before the word rule
-# so that e.g. `2>` lexes as fd_gt instead of getting absorbed into `word`.
 
 # Multi-char fixed operators (longest first)
 "&&"                                            → and_and
@@ -82,10 +87,7 @@ tokens
 "&>"                                            → amp_gt
 ">>"                                            → gt_gt
 
-# fd-prefixed compound operators. Nexus recognizes `[0-9]+` followed by
-# single-char operator literals as a post-scanNumber peek and generates the
-# appropriate lexer dispatch; using `'>'`/`'<'`/`'&'` here (not `">"`/`"<"`)
-# matches that recognition path. N>>file is deliberately deferred.
+# fd-prefixed compound operators
 [0-9]+ '>' '&' [0-9]+                           → fd_dup_out
 [0-9]+ '<' '&' [0-9]+                           → fd_dup_in
 [0-9]+ '>'                                      → fd_gt
@@ -97,39 +99,51 @@ tokens
 "|"                                             → pipe
 ";"                                             → semi
 "&"                                             → amp
-"("                                             → lparen
-")"                                             → rparen
+"="                                             → assign
+"("                                             → lparen, {paren++}
+")"                                             → rparen, {paren--}
+"{"                                             → lbrace, {brace++}
+"}"                                             → rbrace, {brace--}
+"["                                             → lbracket, {bracket++}
+"]"                                             → rbracket, {bracket--}
 
 # String literals
 "'" ([^'\n] | "''")* "'"                        → string_sq
 '"' ([^"\\\n] | "\\" .)* '"'                    → string_dq
 
-# Comments — the well-known `comment` token triggers Nexus's dedicated
-# comment scanner. Nexus skips comment tokens in the prefix scanner, so they
-# never reach the parser. The trailing newline is NOT consumed, so it still
-# separates sequences.
+# Variables. `$(...)` opens a command substitution; the matching `)` is the
+# regular `rparen` token (paren counter balances). `${...}` is one token; the
+# interior is parsed at Shape time. `$name`, `$0..$9`, and the special
+# parameters `$@`/`$#`/`$?`/`$$`/`$!`/`$*` are single tokens.
+'$' '{' [^}\n]+ '}'                             → var_braced
+'$' [A-Za-z_] [A-Za-z0-9_]*                     → variable
+'$' [0-9]                                       → variable
+'$' '?'                                         → variable
+'$' '#'                                         → variable
+'$' '!'                                         → variable
+'$' '@'                                         → variable
+'$' '*'                                         → variable
+'$' '$'                                         → variable
+"$("                                            → dollar_paren, {paren++}
+
+# Comments
 '#' [^\n]*                                      → comment
 
-# Newlines are sequence separators (equivalent to `;` at this layer)
+# Newlines (the wrapper inspects these to maybe emit INDENT/OUTDENT)
 "\r\n"                                          → semi
 '\n'                                            → semi
 '\r'                                            → semi
 
-# Pure integer (must come before `ident` so fd-prefix redirect rules, which
-# are already above, are the only things that can prefix-consume a digit run).
-# Any purely-numeric token is valid as a shell word; the parser accepts it
-# alongside identifiers.
+# Pure integer (must come before `ident`)
 [0-9]+                                          → integer
 
-# Bare word — a positive ASCII class of shell-safe characters, leading with
-# non-digit. Nexus tracks preceding horizontal whitespace count in `Token.pre`,
-# so no explicit whitespace rule is needed. Non-ASCII bytes, backslash-escape
-# inside bare words, and adjacent-fragment concatenation (foo"bar") are
-# deliberately deferred to Phase 3 — use quoted strings for anything outside
-# this class.
-[A-Za-z_./\-+=~@%!*?:,^$][A-Za-z0-9_./\-+=~@%!*?:,^$]*  → ident
+# Bare word. `=`, `$`, `(`, `)`, `{`, `}`, `[`, `]` are NOT in the bare-word
+# class — they're meaningful operators or delimiters. Word concatenation
+# `pre$x.bar` is recovered by the Shape converter from `Token.pre == 0`
+# adjacency between consecutive word_atoms.
+[A-Za-z_./\-+~@%!*?:,^][A-Za-z0-9_./\-+~@%!*?:,^]*  → ident
 
-# Fallback — unrecognized byte
+# Fallback
 .                                               → err
 
 
@@ -138,25 +152,22 @@ tokens
 @lang      = "slash"
 @conflicts = 0
 
+@as ident = [keyword!]
+
 # ------------------------------------------------------------------------------
 # Top level
 # ------------------------------------------------------------------------------
 
 program!        = sequence                              → 1
 
-# A sequence is a first item plus zero or more tails. Each tail encodes:
-#   - the kind of separator that preceded it: `;`/newline, `&&`, `||`, `&`
-#   - the item that follows, or `_` if the separator is terminal (trailing)
-#
-# `&` is encoded as `(seq_bg <item-or-nil>)`. shape.zig interprets `seq_bg`
-# by wrapping the PRECEDING item as detached and, if the bound element is
-# non-nil, appending it as the next item (with default `;` semantics). This
-# keeps the grammar LR(1)-clean without needing action-level rewriting of
-# previously-reduced items. See PLAN.md §7 Rule 14.
-
 sequence        = sequence_item sequence_tail*          → (sequence 1 ...2)
 
-sequence_item   = pipeline                              → 1
+sequence_item   = pipeline
+                | conditional
+                | while_loop
+                | for_loop
+                | block_stmt
+                | assigns
 
 sequence_tail   = SEMI    sequence_item                 → (seq_always 2)
                 | SEMI                                  → (seq_always _)
@@ -178,14 +189,17 @@ stage           = simple_command
                 | subshell
 
 # ------------------------------------------------------------------------------
-# Subshells
+# Subshells and blocks
 # ------------------------------------------------------------------------------
 #
-# A subshell may carry redirects on its body. PLAN.md §7 Rule 23 normalizes
-# compound-command redirects through subshells; here we preserve them in the
-# Shape for the lowerer to carry forward.
+# `( ... )` is a SUBSHELL — forks a child process; state mutations don't
+# escape. `{ ... }` is a BLOCK — runs in current shell context; state
+# mutations DO escape unless the block is part of a pipeline or detached.
+# Compound redirects on a redirected block are normalized through subshell
+# at lowering.
 
 subshell        = LPAREN sequence RPAREN redirect_list? → (subshell 2 4)
+block_stmt      = LBRACE sequence RBRACE redirect_list? → (block 2 4)
 
 redirect_list   = redirect+                             → (redirects ...1)
 
@@ -193,29 +207,89 @@ redirect_list   = redirect+                             → (redirects ...1)
 # Simple commands
 # ------------------------------------------------------------------------------
 #
-# A simple command requires at least one word (the exe). A redirect-only form
-# like `> file` is intentionally rejected in Phase 1.
+# A simple command may carry zero or more `NAME=value` env-prefix bindings
+# before the exe. With env-prefixes and no exe (just bindings), the form is
+# a standalone assignment statement — `assigns`.
 
-simple_command  = word_atom part*                       → (command 1 ...2)
+simple_command  = leading_word part*                    → (command _ 1 ...2)
+                | env_prefix_list leading_word part*    → (command 1 2 ...3)
+
+env_prefix_list = assign_prefix+                        → (env_binds ...1)
+
+# Standalone assignments — one or more NAME=value pairs with no command body.
+assigns         = assign_prefix+                        → (assigns ...1)
+
+# `assign_prefix` uses the tight `NAME=` form (fused by the lexer wrapper
+# from `IDENT` + `=` adjacency). Loose `name = value` parses as a command
+# `name` with args `=` and `value`; the shell rejects it as "command not
+# found", which is the unambiguous behavior.
+assign_prefix   = NAME_EQ assign_value                  → (env_bind 1 2)
+
+# Right-hand side of an assignment. Either a single word_atom (scalar) or
+# a bracketed list literal.
+assign_value    = word_atom                             → (scalar 1)
+                | LBRACKET word_atoms_opt RBRACKET      → (list ...2)
+
+word_atoms_opt  = word_atom*                            → (...1)
 
 part            = word_atom
                 | redirect
 
-word_atom       = IDENT                                 → (word 1)
+# ------------------------------------------------------------------------------
+# Word atoms
+# ------------------------------------------------------------------------------
+#
+# `leading_word` excludes NAME_EQ — a NAME_EQ at the start of a command
+# slot is unambiguously the start of an env-prefix or standalone assignment.
+# `word_atom` is the general form (includes NAME_EQ as a literal word) and
+# is used in argument positions, for-loop items, list literals, and
+# redirect targets.
+
+leading_word    = IDENT                                 → (word 1)
                 | INTEGER                               → (word 1)
                 | STRING_SQ                             → (word 1)
                 | STRING_DQ                             → (word 1)
+                | VARIABLE                              → (var 1)
+                | VAR_BRACED                            → (var_braced 1)
+                | DOLLAR_PAREN sequence RPAREN          → (cmd_subst 2)
+
+word_atom       = leading_word
+                | NAME_EQ                               → (word 1)
+                | ASSIGN                                → (word 1)
+
+# ------------------------------------------------------------------------------
+# Conditionals
+# ------------------------------------------------------------------------------
+
+conditional     = IF cond_chain block_form              → (if 2 3 _)
+                | IF cond_chain block_form else_part    → (if 2 3 4)
+
+cond_chain      = pipeline                              → 1
+                | cond_chain AND_AND pipeline           → (cond_and 1 3)
+                | cond_chain OR_OR pipeline             → (cond_or 1 3)
+
+else_part       = ELSE block_form                       → (else 2)
+                | ELSE conditional                      → (elif 2)
+
+# `block_form` is shared by all control-flow bodies. Brace and indent forms
+# both produce a `body`-tagged Sexp wrapping the inner sequence — the Shape
+# converter doesn't distinguish them.
+block_form      = LBRACE sequence RBRACE                → (body 2)
+                | INDENT sequence OUTDENT               → (body 2)
+
+# ------------------------------------------------------------------------------
+# Loops
+# ------------------------------------------------------------------------------
+
+while_loop      = WHILE cond_chain block_form           → (while 2 3)
+
+for_loop        = FOR IDENT IN word_atoms block_form    → (for 2 4 5)
+
+word_atoms      = word_atom+                            → (words ...1)
 
 # ------------------------------------------------------------------------------
 # Redirects
 # ------------------------------------------------------------------------------
-#
-# Each redirect kind uses its own head tag. shape.zig dispatches on the tag.
-# The `_fd` suffix indicates an explicit numeric fd prefix (e.g. `2>`) whose
-# original text can be recovered by slicing Source.text at the token's
-# .src.pos/.len. Forms without the suffix use the default fd for the op.
-# Dup forms (`N>&M`, `N<&M`) are single-token and carry both fds in their
-# source text.
 
 redirect        = LT          word_atom                 → (redir_read 2)
                 | FD_LT       word_atom                 → (redir_read_fd 1 2)
@@ -226,4 +300,3 @@ redirect        = LT          word_atom                 → (redir_read 2)
                 | AMP_GT_GT   word_atom                 → (redir_both_append 2)
                 | FD_DUP_OUT                            → (redir_dup_out 1)
                 | FD_DUP_IN                             → (redir_dup_in 1)
-

@@ -61,16 +61,28 @@ pub fn build(b: *std.Build) void {
     });
     test_mod.addOptions("build_options", options);
 
+    // Tests need libc for std.c symbols (fork/waitpid/pipe/dup2/...).
+    // Zig 0.16 removed the corresponding wrappers from std.posix, so the
+    // runtime modules link against libc directly.
+    test_mod.linkSystemLibrary("c", .{});
+
     const tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(tests);
     test_step.dependOn(&run_tests.step);
 
-    // Golden snapshot tests live in src/goldens.zig and are auto-discovered
-    // via main.zig's top-level `test { _ = @import("goldens.zig"); }` block.
-    // `test-shape` and `test-program` are named aliases for the same run.
+    // The main executable also needs libc.
+    main_mod.linkSystemLibrary("c", .{});
+
+    // Named aliases for the layered test suites (PLAN §17.2). All run
+    // through the same test binary in v0 since modules cross-reference
+    // each other via @import; we keep separate step names so future work
+    // can split them.
     const test_shape_step = b.step("test-shape", "Run Shape golden snapshot tests");
     test_shape_step.dependOn(&run_tests.step);
 
     const test_program_step = b.step("test-program", "Run Program golden snapshot tests");
     test_program_step.dependOn(&run_tests.step);
+
+    const test_headless_step = b.step("test-headless", "Run headless integration tests");
+    test_headless_step.dependOn(&run_tests.step);
 }

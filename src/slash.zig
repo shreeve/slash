@@ -1,131 +1,391 @@
-//! Slash — language module for the generated parser.
+//! Slash language module — Tag enum, keyword promotion, lexer wrapper.
 //!
-//! This file is the small hand-written counterpart to `src/parser.zig` (which
-//! Nexus generates from `slash.grammar`). It exposes:
+//! The lexer wrapper around the generated `BaseLexer` adds three responsibilities
+//! that would clutter the grammar if done declaratively:
 //!
-//!   - `Tag` — the enum of semantic node types referenced by grammar actions.
-//!     Every s-expression head used on the right-hand side of a Nexus action
-//!     must be declared here, and nothing else.
+//!   1. Comment trivia is dropped at the lexer boundary so the parser never
+//!      sees it.
 //!
-//!   - `keywordAs` — Phase 1 has no context-sensitive keywords (no `if`,
-//!     `while`, `for`, `cmd`), so this unconditionally returns `null`. The
-//!     grammar has no `@as` directive so this is never actually called at
-//!     runtime; it exists for the Nexus contract and forward compatibility.
+//!   2. `IDENT '='` (no whitespace between, and no second `=` immediately
+//!      after) fuses into a single `NAME_EQ` token. This is what makes
+//!      env-prefix `FOO=bar cmd` and standalone assignment `x=5` work
+//!      without LR(1) ambiguity. Loose `x = 5` parses as a command (`x`
+//!      with args `=` and `5`); the shell rejects it with a clear "command
+//!      not found".
 //!
-//!   - `Lexer` — a trivial pass-through wrapper around `BaseLexer`. Phase 1
-//!     needs no context-sensitive lexing (no heredocs, no indentation, no
-//!     regex literals), but the generated parser always accesses state
-//!     through `self.lexer.base`, so a wrapper is required even when it
-//!     adds no logic. Phases 3+ will extend this wrapper as features land.
+//!   3. Indentation tracks a stack of column levels and emits virtual
+//!      `INDENT`/`OUTDENT` tokens at level changes. Spaces only — a tab
+//!      in indentation is a hard error. The stack is suspended inside
+//!      `(`, `{`, and `[` so multi-line bracketed forms aren't disrupted.
+//!      Brace blocks `{ ... }` and indented blocks share one `block_form`
+//!      production in the grammar, so `if cmd { body }` and
+//!      `if cmd\n  body` produce the same Shape.
 
 const std = @import("std");
 const parser = @import("parser.zig");
+pub const Token = parser.Token;
+pub const TokenCat = parser.TokenCat;
+const BaseLexer = parser.BaseLexer;
 
-/// Semantic node tags for Slash s-expressions.
-///
-/// Grouped by role. Keep this list tight: every entry must have a use site
-/// in `slash.grammar`. See PLAN.md §6.2 for the Shape variants these map
-/// onto in the next lowering step.
+// =============================================================================
+// Tag enum — every s-expression head emitted by the parser
+// =============================================================================
+
 pub const Tag = enum(u8) {
-    // ------------------------------------------------------------------
-    // Compound nodes — produced by parser actions
-    // ------------------------------------------------------------------
-
-    /// Top-level list of items with interleaved tails.
+    // ---- Compound ----
     sequence,
-
-    /// Sequence tail — unconditional continuation (separator `;` or newline).
-    /// Bound element is either the next item or `_` when the separator was
-    /// trailing with nothing after it.
     seq_always,
-
-    /// Sequence tail — continue only on zero exit (`&&`).
     seq_and,
-
-    /// Sequence tail — continue only on non-zero / signaled exit (`||`).
     seq_or,
-
-    /// Sequence tail — background marker (`&`). shape.zig wraps the
-    /// PRECEDING item as detached and then treats the bound element, if
-    /// present, as a normal next item with `;` semantics.
     seq_bg,
-
-    /// Multi-stage pipeline (pipefail per PLAN §7 Rule 11).
     pipeline,
-
-    /// Single-process command: `(command exe arg* redirect*)`.
     command,
-
-    /// Subshell body with optional trailing redirects.
     subshell,
-
-    /// Wrapper around a non-empty list of redirects attached to a compound
-    /// form (currently only subshell in Phase 1).
+    block,
     redirects,
 
-    /// Atomic word. Phase 1 words are one source token; the single child is
-    /// a `.src` reference into the original source whose category determines
-    /// whether it was bare, single-, or double-quoted.
+    // ---- Words ----
     word,
+    @"var",
+    var_braced,
+    cmd_subst,
+    scalar,
+    list,
+    words,
 
-    // ------------------------------------------------------------------
-    // Redirects — one tag per kind, dispatched by shape.zig.
-    //
-    // The `_fd` suffix indicates an explicit numeric fd prefix; the raw
-    // token text (e.g. "2>", "3<") can be recovered by slicing the source
-    // at the .src.pos / .src.len of the first child.
-    // ------------------------------------------------------------------
+    // ---- Assignment / env-prefix ----
+    env_binds,
+    env_bind,
+    assigns,
 
-    redir_read,          // <  target
-    redir_read_fd,       // N< target
-    redir_write,         // >  target
-    redir_write_fd,      // N> target
-    redir_append,        // >> target   (N>> deferred to Phase 3)
-    redir_both,          // &>  target  (stdout + stderr, truncate)
-    redir_both_append,   // &>> target  (stdout + stderr, append)
-    redir_dup_out,       // N>&M
-    redir_dup_in,        // N<&M
+    // ---- Control flow ----
+    @"if",
+    @"else",
+    elif,
+    body,
+    cond_and,
+    cond_or,
+    @"while",
+    @"for",
+
+    // ---- Redirects ----
+    redir_read,
+    redir_read_fd,
+    redir_write,
+    redir_write_fd,
+    redir_append,
+    redir_both,
+    redir_both_append,
+    redir_dup_out,
+    redir_dup_in,
 };
 
-/// Keyword promotion hook. Nexus calls this when the parser encounters an
-/// `ident` token in a state where the grammar's `@as ident = [...]` chain
-/// would consult the lang module. Phase 1 has no `@as` directive, so this
-/// function is never reached at runtime; the stub is kept for the Nexus
-/// contract so that adding keyword-style features later is a local edit.
-pub fn keywordAs(text: []const u8, symbol: u16) ?u16 {
-    _ = text;
-    _ = symbol;
-    return null;
+// =============================================================================
+// Keyword promotion
+// =============================================================================
+//
+// `@as ident = [keyword]` in the grammar invokes `keywordAs` for every IDENT
+// lookahead. The returned `KeywordId` is mapped by the generated parser to
+// the actual symbol id; if that symbol is legal in the current state, the
+// IDENT is promoted to the keyword token and shifted.
+
+pub const KeywordId = enum(u16) {
+    IF,
+    ELSE,
+    WHILE,
+    FOR,
+    IN,
+};
+
+const keyword_map = std.StaticStringMap(KeywordId).initComptime(.{
+    .{ "if", .IF },
+    .{ "else", .ELSE },
+    .{ "while", .WHILE },
+    .{ "for", .FOR },
+    .{ "in", .IN },
+});
+
+pub fn keywordAs(text: []const u8) ?KeywordId {
+    return keyword_map.get(text);
 }
 
-/// Pass-through lexer wrapper. The generated parser always accesses state via
-/// `self.lexer.base`, so even a minimal wrapper requires a `base` field. No
-/// shell-specific logic happens here in Phase 1; context-sensitive behavior
-/// (heredocs, indentation, regex reclassification) will be added in later
-/// phases as those features enter the grammar.
+// =============================================================================
+// Lexer wrapper
+// =============================================================================
+
 pub const Lexer = struct {
-    base: parser.BaseLexer,
+    base: BaseLexer,
+
+    // Indentation tracking
+    indent_level: u32 = 0,
+    indent_stack: [64]u32 = [_]u32{0} ** 64,
+    indent_depth: u8 = 0,
+    pending_outdents: u8 = 0,
+    queued: ?Token = null,
+    last_cat: TokenCat = .eof,
 
     pub fn init(source: []const u8) Lexer {
-        return .{ .base = parser.BaseLexer.init(source) };
+        return .{ .base = BaseLexer.init(source) };
     }
 
-    pub fn text(self: *const Lexer, tok: parser.Token) []const u8 {
+    pub fn text(self: *const Lexer, tok: Token) []const u8 {
         return self.base.text(tok);
     }
 
     pub fn reset(self: *Lexer) void {
         self.base.reset();
+        self.indent_level = 0;
+        self.indent_depth = 0;
+        self.pending_outdents = 0;
+        self.queued = null;
+        self.last_cat = .eof;
     }
 
-    /// Drop `comment` tokens at the lexer boundary so they never reach the
-    /// parser. Phase 1 treats comments as pure trivia. When later phases
-    /// need comments for round-trippable formatting they should be surfaced
-    /// through `Parsed.trivia` (see PLAN.md §6.1), not by re-emitting them.
-    pub fn next(self: *Lexer) parser.Token {
+    pub fn next(self: *Lexer) Token {
+        // Drain any queued virtual tokens first.
+        if (self.queued) |q| {
+            self.queued = null;
+            self.last_cat = q.cat;
+            return q;
+        }
+        if (self.pending_outdents > 0) {
+            self.pending_outdents -= 1;
+            const t = Token{
+                .cat = .outdent,
+                .pre = 0,
+                .pos = @intCast(self.base.pos),
+                .len = 0,
+            };
+            self.last_cat = .outdent;
+            return t;
+        }
+
         while (true) {
             const tok = self.base.next();
-            if (tok.cat != .comment) return tok;
+
+            // Drop comment trivia.
+            if (tok.cat == .comment) continue;
+
+            // Newlines: maybe become INDENT, OUTDENT(s), or stay as semi.
+            if (tok.cat == .semi and self.isNewlineToken(tok)) {
+                if (self.handleNewline(tok)) |result| {
+                    // Suppress a leading-of-block SEMI: `{`/`INDENT` followed
+                    // by a newline shouldn't manifest as a stray sequence
+                    // separator before the first body statement.
+                    if (result.cat == .semi and isBlockOpener(self.last_cat)) {
+                        continue;
+                    }
+                    self.last_cat = result.cat;
+                    return result;
+                }
+                continue;
+            }
+
+            // Drop SEMIs immediately following SEMIs (collapses a run of
+            // newlines into a single statement separator).
+            if (tok.cat == .semi and self.last_cat == .semi) continue;
+
+            // EOF: flush any open indentation as OUTDENTs.
+            if (tok.cat == .eof) {
+                if (self.indent_depth > 0) {
+                    self.pending_outdents = self.indent_depth - 1;
+                    self.indent_depth = 0;
+                    self.indent_level = 0;
+                    self.queued = tok;
+                    self.last_cat = .outdent;
+                    return Token{
+                        .cat = .outdent,
+                        .pre = 0,
+                        .pos = tok.pos,
+                        .len = 0,
+                    };
+                }
+                self.last_cat = .eof;
+                return tok;
+            }
+
+            // NAME_EQ fusion: IDENT immediately followed by `=` (no whitespace
+            // between) and not followed by another `=`. Fuse into one
+            // NAME_EQ token whose source slice covers `name=`. The Shape
+            // converter strips the trailing `=` to recover the bare name.
+            if (tok.cat == .ident) {
+                const after = tok.pos + tok.len;
+                if (after < self.base.source.len and
+                    self.base.source[after] == '=' and
+                    (after + 1 >= self.base.source.len or
+                        self.base.source[after + 1] != '='))
+                {
+                    self.base.pos = after + 1;
+                    var fused = tok;
+                    fused.cat = .name_eq;
+                    fused.len += 1;
+                    self.last_cat = .name_eq;
+                    return fused;
+                }
+            }
+
+            // Special-parameter variables: `$?`, `$$`, `$#`, `$@`, `$!`, `$*`.
+            // The base lexer's auto-generated `$...` handling covers `${name}`,
+            // `$alpha+`, and `$digit`, but doesn't cover the special params.
+            // Fuse them in the wrapper from the err+`$` shape.
+            if (tok.cat == .err and tok.len == 1 and
+                tok.pos < self.base.source.len and
+                self.base.source[tok.pos] == '$' and
+                tok.pos + 1 < self.base.source.len)
+            {
+                const next_ch = self.base.source[tok.pos + 1];
+                if (next_ch == '?' or next_ch == '#' or next_ch == '@' or
+                    next_ch == '!' or next_ch == '*' or next_ch == '$')
+                {
+                    self.base.pos = tok.pos + 2;
+                    var t = tok;
+                    t.cat = .variable;
+                    t.len = 2;
+                    self.last_cat = .variable;
+                    return t;
+                }
+            }
+
+            // Track bracket depth for indent suspension. The base lexer
+            // already tracks `paren` and `brace` (from grammar `{paren++}`
+            // actions); we add `bracket` here as a wrapper-side field.
+            self.last_cat = tok.cat;
+            return tok;
         }
     }
+
+    fn isNewlineToken(self: *const Lexer, tok: Token) bool {
+        if (tok.len == 0) return false;
+        const ch = self.base.source[tok.pos];
+        return ch == '\n' or ch == '\r';
+    }
+
+    /// True for tokens that introduce a block body and should swallow an
+    /// immediately-following newline so the body parses cleanly.
+    fn isBlockOpener(cat: TokenCat) bool {
+        return switch (cat) {
+            .lbrace, .lparen, .lbracket, .indent, .eof => true,
+            else => false,
+        };
+    }
+
+    /// Process a newline token. Returns:
+    ///   - the original semi token (level unchanged)
+    ///   - an INDENT token (level increased)
+    ///   - an OUTDENT token, queueing more if multiple levels closed
+    ///   - null to swallow (blank line; another newline will follow)
+    fn handleNewline(self: *Lexer, nl: Token) ?Token {
+        // Indentation is suspended inside (), {}, [] groupings.
+        if (self.base.paren > 0 or self.base.brace > 0) return nl;
+
+        // Skip blank/comment-only lines: scan past them and look at the
+        // first content line's indent.
+        var ws: u32 = 0;
+        var p = self.base.pos;
+        while (true) {
+            ws = 0;
+            while (p + ws < self.base.source.len) {
+                const ch = self.base.source[p + ws];
+                if (ch == ' ') {
+                    ws += 1;
+                } else if (ch == '\t') {
+                    // Tabs in indentation are an error.
+                    return Token{
+                        .cat = .err,
+                        .pre = 0,
+                        .pos = @intCast(p + ws),
+                        .len = 1,
+                    };
+                } else break;
+            }
+            if (p + ws >= self.base.source.len) {
+                ws = 0;
+                break; // EOF after whitespace
+            }
+            const next_ch = self.base.source[p + ws];
+            if (next_ch == '\n' or next_ch == '\r') {
+                // blank line; advance past and try again
+                p = p + ws + 1;
+                continue;
+            }
+            if (next_ch == '#') {
+                // comment-only line; advance past comment + newline
+                var q = p + ws;
+                while (q < self.base.source.len and self.base.source[q] != '\n')
+                    q += 1;
+                if (q < self.base.source.len) q += 1;
+                p = q;
+                continue;
+            }
+            break;
+        }
+
+        const at_eof = p + ws >= self.base.source.len;
+
+        if (!at_eof and ws > self.indent_level) {
+            // Indent in: push current level, set new level, emit INDENT.
+            if (self.indent_depth >= 63) return nl;
+            self.indent_stack[self.indent_depth] = self.indent_level;
+            self.indent_depth += 1;
+            self.indent_level = ws;
+            // Suppress the original newline; INDENT acts as the boundary.
+            return Token{
+                .cat = .indent,
+                .pre = 0,
+                .pos = nl.pos,
+                .len = 0,
+            };
+        }
+
+        if (ws < self.indent_level) {
+            // Indent out: pop levels until we match. Emit OUTDENT(s),
+            // followed by the original newline UNLESS the next non-
+            // whitespace identifier is `else` — in that case the newline
+            // is suppressed so the conditional flows naturally.
+            var count: u8 = 0;
+            var lvl = self.indent_level;
+            while (lvl > ws) {
+                if (self.indent_depth == 0) break;
+                self.indent_depth -= 1;
+                lvl = self.indent_stack[self.indent_depth];
+                count += 1;
+            }
+            if (lvl != ws and !at_eof) {
+                return Token{
+                    .cat = .err,
+                    .pre = 0,
+                    .pos = nl.pos,
+                    .len = 0,
+                };
+            }
+            self.indent_level = ws;
+            if (count > 0) {
+                if (!sourceStartsWithElse(self.base.source, p + ws)) {
+                    self.queued = nl;
+                }
+                self.pending_outdents = count - 1;
+                return Token{
+                    .cat = .outdent,
+                    .pre = 0,
+                    .pos = nl.pos,
+                    .len = 0,
+                };
+            }
+        }
+
+        // Same level — original newline acts as statement separator.
+        return nl;
+    }
 };
+
+/// True if `source[pos..]` begins with the keyword `else` followed by a
+/// non-identifier byte (so `elseif` doesn't match). Free helper because
+/// it's pure source inspection with no Lexer state.
+fn sourceStartsWithElse(source: []const u8, pos: usize) bool {
+    if (pos + 4 > source.len) return false;
+    if (!std.mem.eql(u8, source[pos .. pos + 4], "else")) return false;
+    if (pos + 4 == source.len) return true;
+    const next = source[pos + 4];
+    return next == ' ' or next == '\t' or next == '\n' or
+        next == '\r' or next == '{' or next == '#';
+}

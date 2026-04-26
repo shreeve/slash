@@ -672,7 +672,7 @@ These are the rules Slash commits to. When in doubt, this list wins.
 8. **Quoted variable expansion preserves field boundaries.** Quoting prevents globbing and preserves scalar/list elements as literal argv entries.
 9. **Globbing applies only to unquoted literal/glob parts of a word.** If no match, the pattern is left literal (no silent deletion).
 10. **PATH lookup happens only for external commands after `exe` is expanded.** Builtins and user-defined `cmd` resolve before PATH.
-11. **`pipefail = on` is the default.** Pipeline result is the first non-zero/signaled stage, else zero. Phase 1 hardcodes the session default; no surface syntax toggles it yet.
+11. **`pipefail = on` is the default.** Pipeline result is the first non-zero/signaled stage, else zero.
 12. **A `Sequence` evaluates left-to-right.** `;` always continues; `&&` continues only on zero exit; `||` continues only on non-zero or signaled result.
 13. **A `Subshell` runs in a child shell process.** Changes to vars, cwd, defs, and shell state do not escape.
 14. **A `Detached` program starts a background job immediately and returns success once launched.** Its eventual result lives in the job table, not in the caller's synchronous result. `Detached` applies to the whole lowered program node; when that node is a `Pipeline`, the entire pipeline becomes one background job with one process group and N pids. The `Job` is inserted into the job table *before* `run` returns success, so no spawned job is ever unreachable from the table.

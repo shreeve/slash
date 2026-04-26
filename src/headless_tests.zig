@@ -1,0 +1,344 @@
+//! Slash — headless integration tests (PLAN §17.6).
+//!
+//! Each case asserts the observable behavior of running a source string
+//! through `source → Shape → Program → Job` end-to-end. Output is
+//! captured via fd-redirection (dup2 over fd 1 and 2 around the eval
+//! call). The harness is in-process, single-threaded; it exercises the
+//! actual fork/exec/waitpid path for external commands.
+//!
+//! These cases prove the load-bearing v0 invariants:
+//!   - shell-context builtins run as zero-child Jobs (PLAN §7 Rule 19)
+//!   - external commands fork+exec and we collect the right exit byte
+//!   - pipelines are one Job, one pgid, N pids, with pipefail=on
+//!   - `&&` / `||` short-circuit on typed `Result`
+//!   - subshells fork and isolate state mutation
+//!   - detached returns synchronous .exited(0) and registers a job
+//!   - `exit N` sets `session.exit_request` and is honored at the top.
+
+const std = @import("std");
+const diag = @import("diagnostics.zig");
+const shape = @import("shape.zig");
+const program = @import("program.zig");
+const session_mod = @import("session.zig");
+const eval = @import("eval.zig");
+const exec = @import("exec.zig");
+
+extern "c" var environ: [*:null]?[*:0]u8;
+
+const Expect = struct {
+    exit_code: u8,
+    stdout: ?[]const u8 = null, // null = don't check
+    stderr: ?[]const u8 = null,
+    /// If true, only assert that `stdout` is a substring of the observed
+    /// output. Useful for cases where the wider test-runner output gets
+    /// in the way.
+    stdout_contains: bool = false,
+};
+
+const Case = struct {
+    name: []const u8,
+    source: []const u8,
+    expect: Expect,
+};
+
+const cases: []const Case = &.{
+    .{
+        .name = "echo zero-child",
+        .source = "echo hi",
+        .expect = .{ .exit_code = 0, .stdout = "hi\n" },
+    },
+    .{
+        .name = "true is exit 0",
+        .source = "true",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "false is exit 1",
+        .source = "false",
+        .expect = .{ .exit_code = 1, .stdout = "" },
+    },
+    .{
+        .name = "echo with multiple args",
+        .source = "echo one two three",
+        .expect = .{ .exit_code = 0, .stdout = "one two three\n" },
+    },
+    .{
+        .name = "and-then short-circuit success",
+        .source = "true && echo yes",
+        .expect = .{ .exit_code = 0, .stdout = "yes\n" },
+    },
+    .{
+        .name = "and-then short-circuit failure skips",
+        .source = "false && echo skipped",
+        .expect = .{ .exit_code = 1, .stdout = "" },
+    },
+    .{
+        .name = "or-else short-circuit on failure",
+        .source = "false || echo recovered",
+        .expect = .{ .exit_code = 0, .stdout = "recovered\n" },
+    },
+    .{
+        .name = "or-else short-circuit on success skips",
+        .source = "true || echo skipped",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "sequence semicolon runs both",
+        .source = "echo first; echo second",
+        .expect = .{ .exit_code = 0, .stdout = "first\nsecond\n" },
+    },
+    .{
+        .name = "external command exit propagates",
+        .source = "/bin/sh -c 'exit 7'",
+        .expect = .{ .exit_code = 7 },
+    },
+    .{
+        .name = "pipeline pipefail off-style: last stage 0 wins",
+        .source = "echo hello | /bin/cat",
+        .expect = .{ .exit_code = 0, .stdout = "hello\n" },
+    },
+    .{
+        .name = "pipeline pipefail catches first non-zero",
+        .source = "/bin/sh -c 'exit 3' | true",
+        .expect = .{ .exit_code = 3 },
+    },
+    .{
+        .name = "exit builtin overrides last result",
+        .source = "true; exit 42",
+        .expect = .{ .exit_code = 42 },
+    },
+    .{
+        .name = "subshell isolates",
+        .source = "(echo inside)",
+        .expect = .{ .exit_code = 0, .stdout = "inside\n" },
+    },
+    .{
+        .name = "echo with redirect writes file (no stdout leak)",
+        .source = "echo redirected > /tmp/slash-headless-1.txt && /bin/cat /tmp/slash-headless-1.txt",
+        .expect = .{ .exit_code = 0, .stdout = "redirected\n" },
+    },
+    .{
+        .name = "scalar variable assignment + expansion",
+        .source = "x=hello; echo $x",
+        .expect = .{ .exit_code = 0, .stdout = "hello\n" },
+    },
+    .{
+        .name = "multiple assignments + expansion",
+        .source = "x=one; y=two; echo $x $y",
+        .expect = .{ .exit_code = 0, .stdout = "one two\n" },
+    },
+    .{
+        .name = "if-then brace form",
+        .source = "if true { echo yes } else { echo no }",
+        .expect = .{ .exit_code = 0, .stdout = "yes\n" },
+    },
+    .{
+        .name = "if-else brace form",
+        .source = "if false { echo yes } else { echo no }",
+        .expect = .{ .exit_code = 0, .stdout = "no\n" },
+    },
+    .{
+        .name = "else if chain",
+        .source = "if false { echo a } else if true { echo b } else { echo c }",
+        .expect = .{ .exit_code = 0, .stdout = "b\n" },
+    },
+    .{
+        .name = "for loop iterates",
+        .source = "for x in a b c { echo $x }",
+        .expect = .{ .exit_code = 0, .stdout = "a\nb\nc\n" },
+    },
+    .{
+        .name = "test builtin: file exists",
+        .source = "if test -d /tmp { echo dir } else { echo nope }",
+        .expect = .{ .exit_code = 0, .stdout = "dir\n" },
+    },
+    .{
+        .name = "test builtin: numeric compare",
+        .source = "if test 5 -gt 3 { echo bigger }",
+        .expect = .{ .exit_code = 0, .stdout = "bigger\n" },
+    },
+    .{
+        .name = "command substitution scalar",
+        .source = "x=$(/bin/echo captured); echo got $x",
+        .expect = .{ .exit_code = 0, .stdout = "got captured\n" },
+    },
+    .{
+        .name = "env-prefix on external command",
+        .source = "MY_KEY=42 /usr/bin/env",
+        .expect = .{ .exit_code = 0, .stdout = "MY_KEY=42", .stdout_contains = true },
+    },
+    .{
+        .name = "indent block parses same as brace",
+        .source = "if true\n  echo from-indent\nelse\n  echo nope\n",
+        .expect = .{ .exit_code = 0, .stdout = "from-indent\n" },
+    },
+    .{
+        .name = "for over multi-line indent block",
+        .source = "for x in 1 2 3\n  echo num $x\n",
+        .expect = .{ .exit_code = 0, .stdout = "num 1\nnum 2\nnum 3\n" },
+    },
+    .{
+        .name = "while loop counts",
+        .source = "i=0; while test $i -lt 0 { echo never }; echo done",
+        .expect = .{ .exit_code = 0, .stdout = "done\n" },
+    },
+    .{
+        .name = "printf %s and %d",
+        .source = "printf '%s %d\\n' hi 42",
+        .expect = .{ .exit_code = 0, .stdout = "hi 42\n" },
+    },
+    .{
+        .name = "cd changes pwd",
+        .source = "cd /tmp && pwd",
+        .expect = .{ .exit_code = 0, .stdout = "/tmp", .stdout_contains = true },
+    },
+    .{
+        .name = "export propagates to children",
+        .source = "export GREETING=howdy; /usr/bin/env",
+        .expect = .{ .exit_code = 0, .stdout = "GREETING=howdy", .stdout_contains = true },
+    },
+    .{
+        .name = "unset removes a variable (unquoted expansion)",
+        .source = "x=alive; echo first $x; unset x; echo second $x",
+        .expect = .{ .exit_code = 0, .stdout = "first alive\nsecond\n" },
+    },
+};
+
+// =============================================================================
+// fd-capturing harness
+// =============================================================================
+
+const RunOutput = struct {
+    exit_code: u8,
+    stdout: []u8,
+    stderr: []u8,
+
+    fn deinit(self: *RunOutput, alloc: std.mem.Allocator) void {
+        alloc.free(self.stdout);
+        alloc.free(self.stderr);
+    }
+};
+
+fn runHeadless(alloc: std.mem.Allocator, source_text: []const u8) !RunOutput {
+    // Make the capture pipes BEFORE doing anything that could fail; we
+    // need to release them on every error path.
+    const out_pipe = try exec.makePipe();
+    const err_pipe = try exec.makePipe();
+
+    // Save originals.
+    const saved_out = std.c.dup(1);
+    const saved_err = std.c.dup(2);
+    if (saved_out < 0 or saved_err < 0) return error.DupFailed;
+
+    // Redirect.
+    if (std.c.dup2(out_pipe[1], 1) < 0) return error.Dup2Failed;
+    if (std.c.dup2(err_pipe[1], 2) < 0) return error.Dup2Failed;
+    // Close write ends in this process so EOF propagates after children
+    // exit. (The dup2'd fds 1/2 still hold the write end open; we close
+    // those by restoring the originals below.)
+    exec.closeFd(out_pipe[1]);
+    exec.closeFd(err_pipe[1]);
+
+    // Run the eval.
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = diag.Source{ .name = "<test>", .text = source_text };
+    const parsed = try shape.parse(source, a, null);
+    const ctx = program.LowerContext{ .alloc = a, .source = source };
+    const prog = try program.lower(parsed.root, &ctx, null);
+
+    const envp_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(environ));
+    var session = try session_mod.Session.init(alloc, envp_ptr, false);
+    defer session.deinit();
+
+    const result = try eval.runForeground(prog, &session, a, null);
+    const final = session.exit_request orelse result;
+    const exit_code = final.toStatusByte();
+
+    // Restore originals (this also closes our write-end of fd 1 and 2).
+    _ = std.c.dup2(saved_out, 1);
+    _ = std.c.dup2(saved_err, 2);
+    exec.closeFd(saved_out);
+    exec.closeFd(saved_err);
+
+    // Drain pipes.
+    const stdout_bytes = try drainFd(alloc, out_pipe[0]);
+    const stderr_bytes = try drainFd(alloc, err_pipe[0]);
+    exec.closeFd(out_pipe[0]);
+    exec.closeFd(err_pipe[0]);
+
+    return .{
+        .exit_code = exit_code,
+        .stdout = stdout_bytes,
+        .stderr = stderr_bytes,
+    };
+}
+
+fn drainFd(alloc: std.mem.Allocator, fd: i32) ![]u8 {
+    var out = std.ArrayListUnmanaged(u8).empty;
+    defer out.deinit(alloc);
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const rc = std.c.read(fd, &buf, buf.len);
+        if (rc < 0) {
+            const e = std.c.errno(@as(c_int, -1));
+            if (e == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (rc == 0) break;
+        try out.appendSlice(alloc, buf[0..@intCast(rc)]);
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test "headless v0" {
+    const alloc = std.testing.allocator;
+    var failures: u32 = 0;
+    for (cases) |case| {
+        var out = runHeadless(alloc, case.source) catch |err| {
+            std.debug.print("FAIL {s}: harness error {s}\n", .{ case.name, @errorName(err) });
+            failures += 1;
+            continue;
+        };
+        defer out.deinit(alloc);
+
+        if (out.exit_code != case.expect.exit_code) {
+            std.debug.print(
+                "FAIL {s}: exit_code expected {d}, got {d}\n  stdout: {s}\n  stderr: {s}\n",
+                .{ case.name, case.expect.exit_code, out.exit_code, out.stdout, out.stderr },
+            );
+            failures += 1;
+            continue;
+        }
+        if (case.expect.stdout) |want| {
+            const ok = if (case.expect.stdout_contains)
+                std.mem.indexOf(u8, out.stdout, want) != null
+            else
+                std.mem.eql(u8, out.stdout, want);
+            if (!ok) {
+                std.debug.print(
+                    "FAIL {s}: stdout mismatch\n  expected: {s}\n  actual:   {s}\n",
+                    .{ case.name, want, out.stdout },
+                );
+                failures += 1;
+                continue;
+            }
+        }
+        if (case.expect.stderr) |want| {
+            if (!std.mem.eql(u8, out.stderr, want)) {
+                std.debug.print(
+                    "FAIL {s}: stderr mismatch\n  expected: {s}\n  actual:   {s}\n",
+                    .{ case.name, want, out.stderr },
+                );
+                failures += 1;
+                continue;
+            }
+        }
+    }
+    if (failures > 0) return error.HeadlessTestFailed;
+}

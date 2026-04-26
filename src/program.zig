@@ -1,19 +1,9 @@
-//! Slash — Program layer.
+//! Program — the lowered, immutable executable semantics of a Shape.
 //!
-//! A `Program` is the lowered executable semantics of a `Shape`. It is
-//! IMMUTABLE after lowering (see PLAN.md §7 Rule 2) and contains no
-//! syntactic sugar, no unresolved redirect syntax, and no ambiguous
-//! execution structure (§7 Rule 31).
-//!
-//! Phase 1 variants only: `command`, `pipeline`, `sequence`, `subshell`,
-//! `detached`. Control forms (`If`, `While`, `For`, `Define`) and
-//! behavioral wrappers (`Retry`, `Timeout`, `Within`, `WithEnv`, `Parallel`)
-//! are kernel forms that exist in the type system per PLAN §7 Rule 28 but
-//! no surface syntax emits them yet.
-//!
-//! Sequences use connector-to-next encoding (PLAN §6.5) — each `SequenceItem`
-//! carries `next_op` rather than `op_before`. This matches the grammar's
-//! tail accumulator flow and keeps `seq_bg` lowering clean.
+//! Program contains no syntactic sugar, no unresolved redirects, and no
+//! ambiguous execution structure. Lowering normalizes compound-command
+//! redirects and resolves block forms (brace and indent) into a single
+//! Block kernel form. Program is the universe the evaluator operates on.
 
 const std = @import("std");
 const shape_mod = @import("shape.zig");
@@ -27,7 +17,7 @@ pub const Sink = diag.Sink;
 pub const Word = word_mod.Word;
 
 // =============================================================================
-// Redirect — semantic
+// Redirect
 // =============================================================================
 
 pub const RedirectOp = enum {
@@ -41,26 +31,29 @@ pub const RedirectOp = enum {
 
 pub const Redirect = struct {
     op: RedirectOp,
-    /// Resolved source fd for this redirect (what end of the child's fd
-    /// table gets pointed somewhere else). `null` means "the default for
-    /// this op": 0 for read, 1 for write/append, both 1+2 for `both*`.
+    /// Source fd whose entry in the child's fd table gets pointed somewhere
+    /// else. `null` means "default for this op" (0 for read, 1 for write/
+    /// append, both 1 and 2 for `both*`).
     from_fd: ?u8,
-    /// For dup forms, the destination fd that the source fd is dup'd to.
-    /// For file-target forms, this is `null`; `target` carries the path.
+    /// For dup forms, the destination fd. For file-target forms, `null`
+    /// (the path lives in `target`).
     to_fd: ?u8,
-    /// File target for `read`, `write`, `append`, `both_write`, `both_append`.
-    /// `null` for `dup`.
     target: ?Word,
     span: Span,
 };
 
 // =============================================================================
-// Command / Pipeline / Sequence
+// Bindings, command, sequence, pipeline
 // =============================================================================
+
+pub const AssignValue = union(enum) {
+    scalar: Word,
+    list: []const Word,
+};
 
 pub const EnvBind = struct {
     name: []const u8,
-    value: Word,
+    value: AssignValue,
 };
 
 pub const Command = struct {
@@ -74,7 +67,6 @@ pub const Command = struct {
 
 pub const Pipeline = struct {
     stages: []const *const Program,
-    /// PLAN §7 Rule 11 default. No surface syntax toggles this in Phase 1.
     pipefail: bool = true,
     span: Span,
 };
@@ -83,13 +75,39 @@ pub const SequenceOp = enum { always, and_then, or_else };
 
 pub const SequenceItem = struct {
     program: *const Program,
-    /// `null` on the final item; all earlier items have a connector to the
-    /// next one. Matches the grammar's tail accumulator flow.
     next_op: ?SequenceOp,
 };
 
 pub const Sequence = struct {
     items: []const SequenceItem,
+    span: Span,
+};
+
+pub const Assigns = struct {
+    binds: []const EnvBind,
+    span: Span,
+};
+
+pub const Conditional = struct {
+    cond: *const Program,
+    then_body: *const Program,
+    else_body: ?*const Program,
+    redirects: []const Redirect = &.{},
+    span: Span,
+};
+
+pub const While = struct {
+    cond: *const Program,
+    body: *const Program,
+    redirects: []const Redirect = &.{},
+    span: Span,
+};
+
+pub const For = struct {
+    binding: []const u8,
+    items: []const Word,
+    body: *const Program,
+    redirects: []const Redirect = &.{},
     span: Span,
 };
 
@@ -106,10 +124,24 @@ pub const Program = union(enum) {
         redirects: []const Redirect,
         span: Span,
     },
+    /// `{ ... }` — runs in the current shell context. The child sequence
+    /// can mutate Session state. Compound redirects on a redirected block
+    /// are normalized into a subshell at lowering, so this form never
+    /// carries redirects directly when reached at runtime — but the field
+    /// stays for symmetry and for forms that don't need normalization.
+    block: struct {
+        body: *const Program,
+        redirects: []const Redirect,
+        span: Span,
+    },
     detached: struct {
         body: *const Program,
         span: Span,
     },
+    assigns: Assigns,
+    conditional: Conditional,
+    @"while": While,
+    @"for": For,
 
     pub fn span(self: Program) Span {
         return switch (self) {
@@ -117,7 +149,12 @@ pub const Program = union(enum) {
             .pipeline => |p| p.span,
             .sequence => |s| s.span,
             .subshell => |s| s.span,
+            .block => |b| b.span,
             .detached => |d| d.span,
+            .assigns => |a| a.span,
+            .conditional => |c| c.span,
+            .@"while" => |w| w.span,
+            .@"for" => |f| f.span,
         };
     }
 };
@@ -129,9 +166,6 @@ pub const Program = union(enum) {
 pub const Features = struct {
     process_subst: bool = false,
     heredoc: bool = false,
-    definitions: bool = false,
-    conditionals: bool = false,
-    loops: bool = false,
 };
 
 pub const LowerContext = struct {
@@ -154,13 +188,18 @@ fn lowerShape(shape: shape_mod.Shape, ctx: *const LowerContext, sink: ?Sink) any
         .pipeline => |p| try lowerPipeline(p, ctx, sink),
         .command => |c| try lowerCommand(c, ctx, sink),
         .subshell => |s| try lowerSubshell(s, ctx, sink),
+        .block => |b| try lowerBlock(b, ctx, sink),
         .detached => |d| try lowerDetached(d, ctx, sink),
+        .assigns => |a| try lowerAssigns(a, ctx, sink),
+        .conditional => |c| try lowerConditional(c, ctx, sink),
+        .@"while" => |w| try lowerWhile(w, ctx, sink),
+        .@"for" => |f| try lowerFor(f, ctx, sink),
         .word => {
             try diag.emit(sink, diag.make(
                 .lower,
                 .@"error",
                 "LW0001",
-                "a word cannot appear as a Program in Phase 1",
+                "a word cannot appear as a Program",
                 ctx.source,
                 shape.span(),
             ));
@@ -197,15 +236,17 @@ fn lowerPipeline(p: shape_mod.PipelineShape, ctx: *const LowerContext, sink: ?Si
 
 fn lowerCommand(c: shape_mod.CommandShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
     _ = sink;
-    const exe = try word_mod.lowerWord(c.exe, ctx.alloc);
+    const exe = try word_mod.lowerWord(c.exe, ctx);
     var args = try ctx.alloc.alloc(Word, c.args.len);
-    for (c.args, 0..) |a, i| args[i] = try word_mod.lowerWord(a, ctx.alloc);
+    for (c.args, 0..) |a, i| args[i] = try word_mod.lowerWord(a, ctx);
     var reds = try ctx.alloc.alloc(Redirect, c.redirects.len);
     for (c.redirects, 0..) |r, i| reds[i] = try lowerRedirect(r, ctx);
+    var env = try ctx.alloc.alloc(EnvBind, c.env.len);
+    for (c.env, 0..) |b, i| env[i] = try lowerEnvBind(b, ctx);
     return put(ctx.alloc, .{ .command = .{
         .exe = exe,
         .args = args,
-        .env = &.{},
+        .env = env,
         .cwd = null,
         .redirects = reds,
         .span = c.span,
@@ -216,16 +257,86 @@ fn lowerSubshell(s: shape_mod.SubshellShape, ctx: *const LowerContext, sink: ?Si
     const body = try lowerShape(s.body.*, ctx, sink);
     var reds = try ctx.alloc.alloc(Redirect, s.redirects.len);
     for (s.redirects, 0..) |r, i| reds[i] = try lowerRedirect(r, ctx);
-    return put(ctx.alloc, .{ .subshell = .{
-        .body = body,
-        .redirects = reds,
-        .span = s.span,
-    } });
+    return put(ctx.alloc, .{ .subshell = .{ .body = body, .redirects = reds, .span = s.span } });
+}
+
+fn lowerBlock(b: shape_mod.BlockShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
+    const body = try lowerShape(b.body.*, ctx, sink);
+    if (b.redirects.len == 0) {
+        return put(ctx.alloc, .{ .block = .{
+            .body = body,
+            .redirects = &.{},
+            .span = b.span,
+        } });
+    }
+    // A redirected block is normalized into a subshell so the redirects
+    // attach to a forked-child fd table rather than the parent shell's.
+    var reds = try ctx.alloc.alloc(Redirect, b.redirects.len);
+    for (b.redirects, 0..) |r, i| reds[i] = try lowerRedirect(r, ctx);
+    return put(ctx.alloc, .{ .subshell = .{ .body = body, .redirects = reds, .span = b.span } });
 }
 
 fn lowerDetached(d: shape_mod.DetachedShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
     const body = try lowerShape(d.body.*, ctx, sink);
     return put(ctx.alloc, .{ .detached = .{ .body = body, .span = d.span } });
+}
+
+fn lowerAssigns(a: shape_mod.AssignsShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
+    _ = sink;
+    var binds = try ctx.alloc.alloc(EnvBind, a.binds.len);
+    for (a.binds, 0..) |b, i| binds[i] = try lowerEnvBind(b, ctx);
+    return put(ctx.alloc, .{ .assigns = .{ .binds = binds, .span = a.span } });
+}
+
+fn lowerConditional(c: shape_mod.ConditionalShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
+    const cond = try lowerShape(c.cond.*, ctx, sink);
+    const then_body = try lowerShape(c.then_body.*, ctx, sink);
+    var else_body: ?*const Program = null;
+    if (c.else_body) |eb| else_body = try lowerShape(eb.*, ctx, sink);
+    return put(ctx.alloc, .{ .conditional = .{
+        .cond = cond,
+        .then_body = then_body,
+        .else_body = else_body,
+        .redirects = &.{},
+        .span = c.span,
+    } });
+}
+
+fn lowerWhile(w: shape_mod.WhileShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
+    const cond = try lowerShape(w.cond.*, ctx, sink);
+    const body = try lowerShape(w.body.*, ctx, sink);
+    return put(ctx.alloc, .{ .@"while" = .{
+        .cond = cond,
+        .body = body,
+        .redirects = &.{},
+        .span = w.span,
+    } });
+}
+
+fn lowerFor(f: shape_mod.ForShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
+    const body = try lowerShape(f.body.*, ctx, sink);
+    var items = try ctx.alloc.alloc(Word, f.items.len);
+    for (f.items, 0..) |it, i| items[i] = try word_mod.lowerWord(it, ctx);
+    return put(ctx.alloc, .{ .@"for" = .{
+        .binding = try ctx.alloc.dupe(u8, f.binding),
+        .items = items,
+        .body = body,
+        .redirects = &.{},
+        .span = f.span,
+    } });
+}
+
+fn lowerEnvBind(b: shape_mod.EnvBindShape, ctx: *const LowerContext) !EnvBind {
+    const name = try ctx.alloc.dupe(u8, b.name);
+    const value: AssignValue = switch (b.value) {
+        .scalar => |w| AssignValue{ .scalar = try word_mod.lowerWord(w, ctx) },
+        .list => |ws| blk: {
+            var out = try ctx.alloc.alloc(Word, ws.len);
+            for (ws, 0..) |w, i| out[i] = try word_mod.lowerWord(w, ctx);
+            break :blk AssignValue{ .list = out };
+        },
+    };
+    return .{ .name = name, .value = value };
 }
 
 fn lowerRedirect(r: shape_mod.RedirectShape, ctx: *const LowerContext) !Redirect {
@@ -240,20 +351,16 @@ fn lowerRedirect(r: shape_mod.RedirectShape, ctx: *const LowerContext) !Redirect
 
     var from_fd: ?u8 = null;
     var to_fd: ?u8 = null;
-
-    // Decode the fd prefix for any form that carries one.
     if (r.fd_src) |span| {
         const bytes = ctx.source.text[span.start..span.end];
         from_fd = parseLeadingFd(bytes);
-
-        // Dup forms also carry a destination fd encoded in the same token.
         if (r.op == .dup_out or r.op == .dup_in) {
             to_fd = parseTrailingFd(bytes);
         }
     }
 
     var target: ?Word = null;
-    if (r.target) |t| target = try word_mod.lowerWord(t, ctx.alloc);
+    if (r.target) |t| target = try word_mod.lowerWord(t, ctx);
 
     return .{
         .op = op,
@@ -264,8 +371,6 @@ fn lowerRedirect(r: shape_mod.RedirectShape, ctx: *const LowerContext) !Redirect
     };
 }
 
-/// Decode a leading decimal fd prefix (e.g. `"2>"` → `2`, `"10>&1"` → `10`).
-/// Returns `null` if the token does not start with a digit.
 fn parseLeadingFd(bytes: []const u8) ?u8 {
     var i: usize = 0;
     while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') i += 1;
@@ -273,8 +378,6 @@ fn parseLeadingFd(bytes: []const u8) ?u8 {
     return std.fmt.parseInt(u8, bytes[0..i], 10) catch null;
 }
 
-/// Decode a trailing decimal fd from a dup token (e.g. `"2>&1"` → `1`,
-/// `"3<&10"` → `10`). Scans back from the end.
 fn parseTrailingFd(bytes: []const u8) ?u8 {
     if (bytes.len == 0) return null;
     var j: usize = bytes.len;
@@ -283,7 +386,6 @@ fn parseTrailingFd(bytes: []const u8) ?u8 {
     return std.fmt.parseInt(u8, bytes[j..], 10) catch null;
 }
 
-/// Allocate a Program on the arena and return a pointer to it.
 fn put(alloc: Allocator, p: Program) !*const Program {
     const slot = try alloc.create(Program);
     slot.* = p;
@@ -297,9 +399,7 @@ fn put(alloc: Allocator, p: Program) !*const Program {
 const Writer = std.Io.Writer;
 const WriteError = Writer.Error;
 
-pub const DumpOptions = struct {
-    spans: bool = false,
-};
+pub const DumpOptions = struct { spans: bool = false };
 
 pub fn dump(source: Source, program: *const Program, w: *Writer, opts: DumpOptions) WriteError!void {
     try dumpProgram(source, program, 0, w, opts);
@@ -308,26 +408,61 @@ pub fn dump(source: Source, program: *const Program, w: *Writer, opts: DumpOptio
 fn dumpProgram(source: Source, p: *const Program, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
     try indent(w, depth);
     switch (p.*) {
-        .command => |c| try dumpCommand(source, c, depth, w, opts),
+        .command => |c| try dumpCommand(c, depth, w, opts),
         .pipeline => |pl| try dumpPipeline(source, pl, depth, w, opts),
         .sequence => |s| try dumpSequence(source, s, depth, w, opts),
-        .subshell => |sb| try dumpSubshell(source, sb, depth, w, opts),
+        .subshell => |sb| try dumpSubshellLike("subshell", source, sb.body, sb.redirects, sb.span, depth, w, opts),
+        .block => |b| try dumpSubshellLike("block", source, b.body, b.redirects, b.span, depth, w, opts),
         .detached => |d| try dumpDetached(source, d, depth, w, opts),
+        .assigns => |a| try dumpAssigns(a, depth, w, opts),
+        .conditional => |c| try dumpConditional(source, c, depth, w, opts),
+        .@"while" => |x| try dumpWhile(source, x, depth, w, opts),
+        .@"for" => |x| try dumpFor(source, x, depth, w, opts),
     }
 }
 
-fn dumpCommand(source: Source, c: Command, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
-    _ = source;
+fn dumpCommand(c: Command, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
     try w.writeAll("command");
     try maybeSpan(c.span, w, opts);
     try w.writeByte('\n');
+    for (c.env) |bind| {
+        try indent(w, depth + 1);
+        try w.print("env {s}\n", .{bind.name});
+        switch (bind.value) {
+            .scalar => |sc| {
+                try indent(w, depth + 2);
+                try w.writeAll("scalar\n");
+                try dumpWordParts(sc, depth + 3, w);
+            },
+            .list => |ws| {
+                try indent(w, depth + 2);
+                try w.writeAll("list\n");
+                for (ws) |it| try dumpWordParts(it, depth + 3, w);
+            },
+        }
+    }
     try indent(w, depth + 1);
-    try w.print("exe {s}\n", .{c.exe.parts[0].text});
+    try w.writeAll("exe\n");
+    try dumpWordParts(c.exe, depth + 2, w);
     for (c.args) |a| {
         try indent(w, depth + 1);
-        try w.print("arg {s}\n", .{a.parts[0].text});
+        try w.writeAll("arg\n");
+        try dumpWordParts(a, depth + 2, w);
     }
     for (c.redirects) |r| try dumpRedirect(r, depth + 1, w, opts);
+}
+
+fn dumpWordParts(word: Word, depth: u32, w: *Writer) WriteError!void {
+    for (word.parts) |part| {
+        try indent(w, depth);
+        switch (part) {
+            .text => |t| try w.print("text {s}\n", .{t}),
+            .variable => |name| try w.print("var {s}\n", .{name}),
+            .var_braced => |body| try w.print("var_braced {s}\n", .{body}),
+            .cmd_subst => try w.writeAll("cmd_subst\n"),
+            .glob => |pat| try w.print("glob {s}\n", .{pat}),
+        }
+    }
 }
 
 fn dumpPipeline(source: Source, p: Pipeline, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
@@ -353,12 +488,21 @@ fn dumpSequence(source: Source, s: Sequence, depth: u32, w: *Writer, opts: DumpO
     }
 }
 
-fn dumpSubshell(source: Source, s: anytype, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
-    try w.writeAll("subshell");
-    try maybeSpan(s.span, w, opts);
+fn dumpSubshellLike(
+    label: []const u8,
+    source: Source,
+    body: *const Program,
+    reds: []const Redirect,
+    span: Span,
+    depth: u32,
+    w: *Writer,
+    opts: DumpOptions,
+) WriteError!void {
+    try w.writeAll(label);
+    try maybeSpan(span, w, opts);
     try w.writeByte('\n');
-    try dumpProgram(source, s.body, depth + 1, w, opts);
-    for (s.redirects) |r| try dumpRedirect(r, depth + 1, w, opts);
+    try dumpProgram(source, body, depth + 1, w, opts);
+    for (reds) |r| try dumpRedirect(r, depth + 1, w, opts);
 }
 
 fn dumpDetached(source: Source, d: anytype, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
@@ -368,12 +512,81 @@ fn dumpDetached(source: Source, d: anytype, depth: u32, w: *Writer, opts: DumpOp
     try dumpProgram(source, d.body, depth + 1, w, opts);
 }
 
+fn dumpAssigns(a: Assigns, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.writeAll("assigns");
+    try maybeSpan(a.span, w, opts);
+    try w.writeByte('\n');
+    for (a.binds) |b| {
+        try indent(w, depth + 1);
+        try w.print("bind {s}\n", .{b.name});
+        switch (b.value) {
+            .scalar => |sc| {
+                try indent(w, depth + 2);
+                try w.writeAll("scalar\n");
+                try dumpWordParts(sc, depth + 3, w);
+            },
+            .list => |ws| {
+                try indent(w, depth + 2);
+                try w.writeAll("list\n");
+                for (ws) |it| try dumpWordParts(it, depth + 3, w);
+            },
+        }
+    }
+}
+
+fn dumpConditional(source: Source, c: Conditional, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.writeAll("conditional");
+    try maybeSpan(c.span, w, opts);
+    try w.writeByte('\n');
+    try indent(w, depth + 1);
+    try w.writeAll("cond\n");
+    try dumpProgram(source, c.cond, depth + 2, w, opts);
+    try indent(w, depth + 1);
+    try w.writeAll("then\n");
+    try dumpProgram(source, c.then_body, depth + 2, w, opts);
+    if (c.else_body) |eb| {
+        try indent(w, depth + 1);
+        try w.writeAll("else\n");
+        try dumpProgram(source, eb, depth + 2, w, opts);
+    }
+}
+
+fn dumpWhile(source: Source, x: While, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.writeAll("while");
+    try maybeSpan(x.span, w, opts);
+    try w.writeByte('\n');
+    try indent(w, depth + 1);
+    try w.writeAll("cond\n");
+    try dumpProgram(source, x.cond, depth + 2, w, opts);
+    try indent(w, depth + 1);
+    try w.writeAll("body\n");
+    try dumpProgram(source, x.body, depth + 2, w, opts);
+}
+
+fn dumpFor(source: Source, x: For, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.print("for {s}", .{x.binding});
+    try maybeSpan(x.span, w, opts);
+    try w.writeByte('\n');
+    try indent(w, depth + 1);
+    try w.writeAll("items\n");
+    for (x.items) |it| try dumpWordParts(it, depth + 2, w);
+    try indent(w, depth + 1);
+    try w.writeAll("body\n");
+    try dumpProgram(source, x.body, depth + 2, w, opts);
+}
+
 fn dumpRedirect(r: Redirect, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
     try indent(w, depth);
     try w.print("redir {s}", .{@tagName(r.op)});
     if (r.from_fd) |n| try w.print(" from_fd={d}", .{n});
     if (r.to_fd) |n| try w.print(" to_fd={d}", .{n});
-    if (r.target) |t| try w.print(" target={s}", .{t.parts[0].text});
+    if (r.target) |t| {
+        switch (t.parts[0]) {
+            .text => |bytes| try w.print(" target={s}", .{bytes}),
+            .variable => |name| try w.print(" target=$" ++ "{s}", .{name}),
+            else => try w.writeAll(" target=<word>"),
+        }
+    }
     try maybeSpan(r.span, w, opts);
     try w.writeByte('\n');
 }
@@ -385,76 +598,4 @@ fn indent(w: *Writer, depth: u32) WriteError!void {
 
 fn maybeSpan(s: Span, w: *Writer, opts: DumpOptions) WriteError!void {
     if (opts.spans) try w.print(" [{d}..{d})", .{ s.start, s.end });
-}
-
-// =============================================================================
-// Tests
-// =============================================================================
-
-fn lowerFromSource(alloc: Allocator, text: []const u8) !struct { parsed: shape_mod.Parsed, prog: *const Program } {
-    const source = Source{ .name = "<test>", .text = text };
-    const parsed = try shape_mod.parse(source, alloc, null);
-    const ctx = LowerContext{ .alloc = alloc, .source = source };
-    const prog = try lower(parsed.root, &ctx, null);
-    return .{ .parsed = parsed, .prog = prog };
-}
-
-fn dumpToString(alloc: Allocator, source: Source, p: *const Program) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
-    defer out.deinit();
-    try dump(source, p, &out.writer, .{});
-    return alloc.dupe(u8, out.written());
-}
-
-test "lower simple command" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const r = try lowerFromSource(alloc, "echo hi");
-    const got = try dumpToString(alloc, r.parsed.source, r.prog);
-
-    const expected =
-        "sequence\n" ++
-        "  item\n" ++
-        "    command\n" ++
-        "      exe echo\n" ++
-        "      arg hi\n";
-    try std.testing.expectEqualStrings(expected, got);
-}
-
-test "lower pipeline with fd redirects decodes fds" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const r = try lowerFromSource(alloc, "cmd 2> err 3>&2");
-    const got = try dumpToString(alloc, r.parsed.source, r.prog);
-
-    try std.testing.expect(std.mem.indexOf(u8, got, "redir write from_fd=2 target=err") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got, "redir dup from_fd=3 to_fd=2") != null);
-}
-
-test "foo & bar lowers to detached + always" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const r = try lowerFromSource(alloc, "sleep 10 & echo done");
-    const got = try dumpToString(alloc, r.parsed.source, r.prog);
-
-    try std.testing.expect(std.mem.indexOf(u8, got, "item next=always") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got, "detached") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got, "arg done") != null);
-}
-
-test "quoted word canonicalized at Program layer" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const r = try lowerFromSource(alloc, "echo \"hi\\n\"");
-    const got = try dumpToString(alloc, r.parsed.source, r.prog);
-    // The double-quoted escape \n should have been decoded to a real newline.
-    try std.testing.expect(std.mem.indexOf(u8, got, "arg hi\n") != null);
 }
