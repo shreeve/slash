@@ -26,6 +26,8 @@ const session_mod = @import("session.zig");
 const eval = @import("eval.zig");
 const builtins = @import("builtins.zig");
 const exec = @import("exec.zig");
+const parser = @import("parser.zig");
+const slash = @import("slash.zig");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -384,20 +386,28 @@ const LineEditor = struct {
     }
 
     /// Redraw the input line in place: cursor to column 0, write the
-    /// prompt + buffer, clear to end of line, then place the cursor at
-    /// `cursor` columns past the end of the prompt.
+    /// prompt + tokenized-and-colored buffer, clear to end of line,
+    /// then place the cursor at `cursor` printable columns past the
+    /// end of the prompt. ANSI escape sequences are zero-width on
+    /// terminal cells, so the cursor positioning stays in sync with
+    /// the user's typed-byte count.
     fn render(self: *const LineEditor) !void {
-        var out_buf: [4096]u8 = undefined;
+        var out_buf: [16384]u8 = undefined;
         var w = std.Io.Writer.fixed(&out_buf);
-        // CR — move to column 0.
         try w.writeByte('\r');
         try w.writeAll(self.prompt);
-        try w.writeAll(self.buf.items);
+        writeColored(&w, self.buf.items) catch {
+            // If the colored render runs out of buffer (~16 KB worth
+            // of input + escapes), fall back to plain bytes so the
+            // user can still see what they're typing.
+            w = std.Io.Writer.fixed(&out_buf);
+            try w.writeByte('\r');
+            try w.writeAll(self.prompt);
+            try w.writeAll(self.buf.items);
+        };
         // Clear to end of line.
         try w.writeAll("\x1b[K");
-        // Move cursor: CR then move forward (prompt width + cursor).
-        // Width counts bytes here; multibyte glyphs may end up off by
-        // a column with terminal renderers — acceptable for v0.
+        // Move cursor to column (prompt + cursor).
         const total_cols: usize = self.prompt.len + self.cursor;
         try w.writeByte('\r');
         if (total_cols > 0) {
@@ -407,6 +417,176 @@ const LineEditor = struct {
         _ = std.c.write(1, bytes.ptr, bytes.len);
     }
 };
+
+// =============================================================================
+// Syntax highlighting
+// =============================================================================
+//
+// Token-based, driven by the existing `parser.BaseLexer`. ANSI escape
+// sequences are zero-width on the terminal, so we splice them around
+// the user's typed bytes without disturbing the line editor's
+// column-counting math.
+//
+// Color map (matches PLAN §10's expected palette):
+//
+//   bold cyan      keywords (if / else / while / for / cmd / in)
+//   yellow         variables, ${...}, $(...), @(...), integer literals
+//   green          string literals (sq, dq, heredoc bodies)
+//   dim white      pipes, redirects, separators, brackets/braces/parens
+//   dim gray       comments
+//   red underline  unrecognized bytes (lex `err`)
+//   default        identifiers, NAME_EQ, plain `=`
+//
+// Inside double-quoted strings, `$var` / `${...}` / `$(...)` should
+// flip back to yellow inside the green run. The token stream gives us
+// `string_dq` as one chunk; `recolorDoubleQuoted` walks the body and
+// emits per-segment colors so the highlighting is faithful to the
+// dq splitter's interpretation at parse time.
+
+fn writeColored(w: anytype, bytes: []const u8) !void {
+    var lex = parser.BaseLexer.init(bytes);
+    var last_pos: u32 = 0;
+    while (true) {
+        const tok = lex.next();
+        if (tok.cat == .eof) break;
+        if (tok.pos > last_pos and tok.pos <= bytes.len) {
+            try w.writeAll(bytes[last_pos..tok.pos]);
+        }
+        const span = bytes[tok.pos..@min(tok.pos + tok.len, @as(u32, @intCast(bytes.len)))];
+        try writeColoredToken(w, tok, span);
+        last_pos = tok.pos + tok.len;
+        if (last_pos > bytes.len) last_pos = @intCast(bytes.len);
+    }
+    if (last_pos < bytes.len) try w.writeAll(bytes[last_pos..]);
+}
+
+fn writeColoredToken(w: anytype, tok: parser.Token, span: []const u8) !void {
+    const code = colorCodeFor(tok, span);
+    if (tok.cat == .string_dq) {
+        try recolorDoubleQuoted(w, span);
+        return;
+    }
+    if (code.len == 0) {
+        try w.writeAll(span);
+        return;
+    }
+    try w.print("\x1b[{s}m{s}\x1b[0m", .{ code, span });
+}
+
+fn colorCodeFor(tok: parser.Token, span: []const u8) []const u8 {
+    return switch (tok.cat) {
+        .ident => if (slash.keywordAs(span) != null) "1;36" else "",
+        .integer => "33",
+        .string_sq, .string_dq => "32",
+        .variable, .var_braced, .dollar_paren, .at_paren => "33",
+        .heredoc_body => "32",
+        .pipe,
+        .lt,
+        .gt,
+        .gt_gt,
+        .amp_gt,
+        .amp_gt_gt,
+        .fd_lt,
+        .fd_gt,
+        .fd_dup_out,
+        .fd_dup_in,
+        .heredoc_open,
+        .heredoc_open_lit,
+        .proc_sub_in,
+        .proc_sub_out,
+        => "2;37",
+        .lparen, .rparen, .lbrace, .rbrace, .lbracket, .rbracket => "2;37",
+        .semi, .and_and, .or_or, .amp => "2;37",
+        .comment => "2;37",
+        .err => "1;4;31",
+        else => "",
+    };
+}
+
+/// `string_dq` covers the entire `"..."` token. Walk the interior to
+/// recolor `$name`, `${...}`, and `$(...)` segments back to yellow on
+/// top of the green base. Mirrors the splitter in `shape.splitDoubleQuoted`
+/// closely enough that what the user sees matches what gets parsed.
+fn recolorDoubleQuoted(w: anytype, span: []const u8) !void {
+    if (span.len < 2 or span[0] != '"') {
+        try w.print("\x1b[32m{s}\x1b[0m", .{span});
+        return;
+    }
+    // Open quote.
+    try w.writeAll("\x1b[32m\"");
+
+    const body = span[1 .. if (span[span.len - 1] == '"') span.len - 1 else span.len];
+    var i: usize = 0;
+    while (i < body.len) {
+        const c = body[i];
+        if (c == '\\' and i + 1 < body.len) {
+            // Escape sequence — keep green, advance two bytes.
+            try w.writeAll(body[i .. i + 2]);
+            i += 2;
+            continue;
+        }
+        if (c == '$' and i + 1 < body.len) {
+            const n = body[i + 1];
+            if (n == '{') {
+                const close = std.mem.indexOfScalarPos(u8, body, i + 2, '}');
+                const end_idx = if (close) |x| x + 1 else body.len;
+                try w.print("\x1b[0m\x1b[33m{s}\x1b[0m\x1b[32m", .{body[i..end_idx]});
+                i = end_idx;
+                continue;
+            }
+            if (n == '(') {
+                var depth: u32 = 1;
+                var j = i + 2;
+                while (j < body.len) : (j += 1) {
+                    if (body[j] == '(') depth += 1;
+                    if (body[j] == ')') {
+                        depth -= 1;
+                        if (depth == 0) break;
+                    }
+                }
+                const end_idx = if (j < body.len) j + 1 else body.len;
+                try w.print("\x1b[0m\x1b[33m{s}\x1b[0m\x1b[32m", .{body[i..end_idx]});
+                i = end_idx;
+                continue;
+            }
+            if (isVarRefStart(n)) {
+                var j = i + 2;
+                while (j < body.len and isVarRefCont(body[j])) : (j += 1) {}
+                try w.print("\x1b[0m\x1b[33m{s}\x1b[0m\x1b[32m", .{body[i..j]});
+                i = j;
+                continue;
+            }
+            if (isSpecialVarChar(n)) {
+                try w.print("\x1b[0m\x1b[33m{s}\x1b[0m\x1b[32m", .{body[i .. i + 2]});
+                i += 2;
+                continue;
+            }
+        }
+        try w.writeByte(c);
+        i += 1;
+    }
+
+    // Close quote (if present).
+    if (span.len >= 2 and span[span.len - 1] == '"') {
+        try w.writeByte('"');
+    }
+    try w.writeAll("\x1b[0m");
+}
+
+fn isVarRefStart(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c >= 0x80;
+}
+
+fn isVarRefCont(c: u8) bool {
+    return isVarRefStart(c) or (c >= '0' and c <= '9');
+}
+
+fn isSpecialVarChar(c: u8) bool {
+    return switch (c) {
+        '0'...'9', '?', '#', '@', '!', '*', '$' => true,
+        else => false,
+    };
+}
 
 fn isSpace(c: u8) bool {
     return c == ' ' or c == '\t';
@@ -1009,4 +1189,70 @@ fn sourceRcFile(session: *session_mod.Session, alloc: Allocator) !void {
         return;
     };
     _ = eval.runForeground(prog, session, a, null) catch {};
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test "highlight: keywords get bold cyan" {
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeColored(&w, "if true { echo hi }");
+    const out = w.buffered();
+    // `if` (keyword), `true` and `echo` (idents), strings (none here),
+    // braces (dim). Expect at least one bold-cyan and one dim escape.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1;36m") != null); // keyword
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2;37m") != null); // braces
+}
+
+test "highlight: variables and strings" {
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeColored(&w, "x=hello; echo $x 'lit'");
+    const out = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33m") != null); // $x yellow
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[32m") != null); // 'lit' green
+}
+
+test "highlight: dq with embedded $var flips back to yellow" {
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeColored(&w, "echo \"hello $name\"");
+    const out = w.buffered();
+    // Should contain a green→yellow transition for the inner $name.
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[32m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "$name") != null);
+}
+
+test "highlight: comment is dim" {
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try writeColored(&w, "echo a # trailing comment");
+    const out = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "# trailing") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2;37m") != null);
+}
+
+test "highlight: bytes pass through unchanged when stripped of escapes" {
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    const input = "for x in 1 2 3 { echo $x }";
+    try writeColored(&w, input);
+    const out = w.buffered();
+    // Stripping ANSI escapes should give back exactly the input.
+    var stripped: [256]u8 = undefined;
+    var len: usize = 0;
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        if (out[i] == 0x1b) {
+            // Skip until 'm'.
+            while (i < out.len and out[i] != 'm') : (i += 1) {}
+            continue;
+        }
+        stripped[len] = out[i];
+        len += 1;
+    }
+    try std.testing.expectEqualStrings(input, stripped[0..len]);
 }

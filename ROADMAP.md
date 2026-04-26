@@ -20,14 +20,6 @@ The cooked-mode REPL with multi-line continuation and `~/.slashrc`
 sourcing is in. The remaining items upgrade the experience to what a
 modern shell user expects.
 
-- **Live syntax highlighting.** Re-parse on each keystroke. Walk the
-  Shape, emit ANSI escape sequences per node type: builtins / keywords
-  in bold cyan, strings in green (with `$var` inside double-quoted in
-  yellow), variables in yellow, pipes / redirects in dim white, syntax
-  errors in red underline with caret, comments in dim gray. The DuckDB
-  CLI insight: highlight from the parse tree, not regex. Our parser is
-  fast enough — even multi-KB lines re-parse in microseconds.
-
 - **Bracket matching.** When the cursor sits on `}`, dim the matching
   `{` for 200ms (or until cursor moves). Use the Shape spans — no
   character-counting needed.

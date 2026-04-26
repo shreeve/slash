@@ -339,6 +339,25 @@ test "pty: Ctrl-D on an empty buffer exits cleanly" {
     try std.testing.expectEqual(@as(u8, 0), r.status);
 }
 
+test "pty: typed input is syntax-highlighted with ANSI escapes" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // Type a line that exercises a few categories: keyword, ident,
+    // string, variable. The line editor renders each typed byte
+    // through the colorizer, so the PTY master should observe ANSI
+    // escape sequences in the rendered stream.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "if true { echo \"hi\" }\n" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // Bold cyan (keyword) and green (string) escapes both fire.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[1;36m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[32m") != null);
+}
+
 test "pty: prompt renders pwd and `$ ` suffix" {
     if (!ptySupported()) return error.SkipZigTest;
 
