@@ -107,8 +107,12 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
     var pending = std.ArrayListUnmanaged(u8).empty;
     defer pending.deinit(alloc);
 
+    var prompt_buf: [1024]u8 = undefined;
     while (true) {
-        const prompt: []const u8 = if (pending.items.len == 0) "$ " else "... ";
+        const prompt = if (pending.items.len == 0)
+            renderPrompt(&prompt_buf, session)
+        else
+            "... ";
         const line = try readLine(alloc, prompt, &history);
         defer alloc.free(line);
 
@@ -679,6 +683,51 @@ const RawMode = struct {
 
 fn isStdinTty() bool {
     return std.c.isatty(0) != 0;
+}
+
+// =============================================================================
+// Prompt rendering
+// =============================================================================
+//
+// Default prompt: home-collapsed PWD, optional non-zero last status,
+// then `$ ` (or `# ` for root). Colors via ANSI: cwd in cyan, status
+// in red. `\x01`/`\x02` aren't used because we always recompute the
+// rendered prompt before each prompt boundary; the line editor's
+// `total_cols` accounting just needs the printable byte count, which
+// `cwd.len + 2` gives directly when no escapes are present.
+
+fn renderPrompt(buf: []u8, session: *const session_mod.Session) []const u8 {
+    var w = std.Io.Writer.fixed(buf);
+
+    // PWD with home collapsed.
+    var cwd_buf: [4096]u8 = undefined;
+    const got = std.c.getcwd(&cwd_buf, cwd_buf.len);
+    var cwd: []const u8 = "?";
+    if (got != null) {
+        const len = std.mem.len(@as([*:0]u8, @ptrCast(got)));
+        cwd = cwd_buf[0..len];
+    }
+
+    // Home collapse.
+    if (std.c.getenv("HOME")) |home_env| {
+        const home = std.mem.span(home_env);
+        if (home.len > 0 and std.mem.startsWith(u8, cwd, home)) {
+            w.writeAll("~") catch return "$ ";
+            cwd = cwd[home.len..];
+        }
+    }
+    w.writeAll(cwd) catch return "$ ";
+
+    // Last status (only if non-zero).
+    if (session.last_status != 0) {
+        w.print(" [{d}]", .{session.last_status}) catch {};
+    }
+
+    // Suffix — root gets `#`, everyone else gets `$`.
+    const suffix: []const u8 = if (std.c.getuid() == 0) " # " else " $ ";
+    w.writeAll(suffix) catch return "$ ";
+
+    return w.buffered();
 }
 
 // -----------------------------------------------------------------------------

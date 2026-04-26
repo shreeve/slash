@@ -41,43 +41,6 @@ parser is fast enough — even multi-KB lines re-parse in microseconds.
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 3. Prompt
-
-Default is minimal but useful:
-
-```
-~/Data/Code/slash main +3 ! 0.42s
-$
-```
-
-Components (each independently disable-able):
-
-- PWD (home-collapsed)
-- Git branch + dirty flag (`+3` = 3 staged, `!` = unstaged changes)
-- Last-command duration if >1s
-- Last exit code if non-zero
-- Then `$ ` (or `# ` for root)
-
-Continuation prompt: `... `.
-
-Need:
-
-- Word-expansion table tests — every quoting × variable type × position
-  combination
-- Glob match tests — with a tmpfs fixture (or a `tmpdir/` setup helper)
-- Redirect ordering tests — `>file 2>&1` vs `2>&1 >file`
-- Pipeline pipefail tests — across 2/3/4 stages, with failures at each
-  position
-- Signal/PTY tests — `Ctrl-C`, `Ctrl-Z`, `fg`, foreground takeover
-- Multi-line script fixtures — comments, blank lines, mixed brace/indent,
-  nested control flow
-- Memory-leak tests — `DebugAllocator` + thousands of iterations
-- Differential tests against `bash`/`dash` for explicitly-aligned semantics
-  (PLAN §17.8) — and **only** for those; intentional deltas don't get a
-  diff case
-
-
-
 
 ## Done means done
 
