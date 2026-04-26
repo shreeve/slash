@@ -92,23 +92,8 @@ Need:
   (PLAN §17.8) — and **only** for those; intentional deltas don't get a
   diff case
 
-### 6. UTF-8 awareness
 
-Today the lexer is ASCII. A user typing `let café = 5` or piping Chinese
-filenames hits errors. We need at minimum:
-
-- Bare-word class accepts non-ASCII letter bytes (continuation bytes are
-  fine; just don't reject them as `err`)
-- Source positions count code units correctly for diagnostics
-- No truncation of multi-byte characters in error messages or word slices
-
-Stretch: render multi-byte characters in REPL highlighting without
-collapsing the cursor.
-
-
-
-
-### 7. Configuration loading
+### 6. Configuration loading
 
 `~/.slashrc` is sourced at interactive shell startup. That's the entire
 mechanism. No `~/.slash/config` file format, no `set` runtime config
@@ -134,7 +119,7 @@ This work depends on partial-Shape support for incomplete input (REPL
 continuation prompt) and benefits from Tier 3 #3 (real
 diagnostics).
 
-### 8. Live syntax highlighting
+### 7. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -149,7 +134,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 9. Multi-line continuation
+### 8. Multi-line continuation
 
 If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
 heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
@@ -165,7 +150,7 @@ if test -d /tmp {
 We know exactly when they're inside the block (open `{` on stack) and
 when the statement is complete (matched `}` and shape is well-formed).
 
-### 10. Tab completion via Shape introspection
+### 9. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -178,7 +163,7 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 11. History
+### 10. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -191,12 +176,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 12. Bracket matching
+### 11. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 13. Prompt
+### 12. Prompt
 
 Default is minimal but useful:
 
@@ -214,7 +199,7 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 14. Implementation foundation
+### 13. Implementation foundation
 
 The REPL is one new module — `src/repl.zig`, ~600-800 lines.
 Dependencies:

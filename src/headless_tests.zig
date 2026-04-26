@@ -881,6 +881,39 @@ const cases: []const Case = &.{
         .source = "for x in @(/bin/cat <(/usr/bin/printf '1\\n2\\n3\\n')) { echo got=$x }",
         .expect = .{ .exit_code = 0, .stdout = "got=1\ngot=2\ngot=3\n" },
     },
+
+    // ---- UTF-8 awareness -------------------------------------------------
+    //
+    // The lexer's auto-generated LETTER class is ASCII-only; the
+    // wrapper extends ident scans to cover any byte ≥ 0x80, so multi-
+    // byte names and arguments lex as one token. Variable refs
+    // (`$name`, `${name}`) accept UTF-8 in the name too.
+
+    .{
+        .name = "utf8: bare word with multibyte chars echoes through",
+        .source = "echo 你好世界",
+        .expect = .{ .exit_code = 0, .stdout = "你好世界\n" },
+    },
+    .{
+        .name = "utf8: variable name with multibyte chars",
+        .source = "café=hello; echo $café",
+        .expect = .{ .exit_code = 0, .stdout = "hello\n" },
+    },
+    .{
+        .name = "utf8: dq string preserves multibyte text",
+        .source = "echo \"héllo wörld\"",
+        .expect = .{ .exit_code = 0, .stdout = "héllo wörld\n" },
+    },
+    .{
+        .name = "utf8: dq variable reference picks up multibyte name",
+        .source = "naïve=ok; echo \"got: $naïve\"",
+        .expect = .{ .exit_code = 0, .stdout = "got: ok\n" },
+    },
+    .{
+        .name = "utf8: for binding with multibyte name",
+        .source = "for naïve in alpha beta { echo $naïve }",
+        .expect = .{ .exit_code = 0, .stdout = "alpha\nbeta\n" },
+    },
 };
 
 // =============================================================================

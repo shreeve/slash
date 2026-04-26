@@ -322,7 +322,7 @@ fn flushPendingText(
 }
 
 fn isVarStart(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c >= 0x80;
 }
 
 fn isVarCont(c: u8) bool {

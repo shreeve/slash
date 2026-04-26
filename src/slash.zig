@@ -269,24 +269,42 @@ pub const Lexer = struct {
                 return tok;
             }
 
+            // ASCII identifiers can be followed by UTF-8 bytes. Run
+            // this BEFORE NAME_EQ so a name like `café=` fuses as
+            // `name_eq` rather than splitting into `caf` + `é=`.
+            var working = tok;
+            if (working.cat == .ident and working.pos + working.len < self.base.source.len) {
+                const after_ident = working.pos + working.len;
+                if (self.base.source[after_ident] >= 0x80) {
+                    var j = after_ident;
+                    while (j < self.base.source.len and isBareWordContinueOrUtf8(self.base.source[j])) : (j += 1) {}
+                    self.base.pos = j;
+                    working.len = @intCast(j - working.pos);
+                }
+            }
+
             // NAME_EQ fusion: IDENT immediately followed by `=` (no whitespace
             // between) and not followed by another `=`. Fuse into one
             // NAME_EQ token whose source slice covers `name=`. The Shape
             // converter strips the trailing `=` to recover the bare name.
-            if (tok.cat == .ident) {
-                const after = tok.pos + tok.len;
+            if (working.cat == .ident) {
+                const after = working.pos + working.len;
                 if (after < self.base.source.len and
                     self.base.source[after] == '=' and
                     (after + 1 >= self.base.source.len or
                         self.base.source[after + 1] != '='))
                 {
                     self.base.pos = after + 1;
-                    var fused = tok;
+                    var fused = working;
                     fused.cat = .name_eq;
                     fused.len += 1;
                     self.last_cat = .name_eq;
                     return fused;
                 }
+            }
+            if (working.len != tok.len) {
+                self.last_cat = .ident;
+                return working;
             }
 
             // Special-parameter variables: `$?`, `$$`, `$#`, `$@`, `$!`, `$*`.
@@ -329,6 +347,46 @@ pub const Lexer = struct {
                 t.len = 2;
                 self.last_cat = .at_paren;
                 return t;
+            }
+
+            // UTF-8 high-bit bytes lex as `err` from the auto-generated
+            // dispatcher (ASCII-only LETTER class). Recover by scanning
+            // onward as a bare ident — multibyte names like `café` or
+            // Chinese filenames pass through as one word. The Shape
+            // converter and downstream layers only care about byte
+            // contents; column counting is byte-based for now.
+            if (tok.cat == .err and tok.len == 1 and
+                self.base.source[tok.pos] >= 0x80)
+            {
+                var j = tok.pos + 1;
+                while (j < self.base.source.len and isBareWordContinueOrUtf8(self.base.source[j])) : (j += 1) {}
+                self.base.pos = j;
+                var t = tok;
+                t.cat = .ident;
+                t.len = @intCast(j - tok.pos);
+                self.last_cat = .ident;
+                return t;
+            }
+
+            // (UTF-8 ident extension runs above, before NAME_EQ fusion.)
+
+            // Same trick for `$name` references — the auto-generated
+            // variable scan stops at the first non-ASCII byte, so an
+            // identifier like `naïve` is split into `na` (variable)
+            // and `ïve` (extending text run). Extend the variable
+            // token to swallow any trailing UTF-8 bytes that match the
+            // bare-word continuation class.
+            if (tok.cat == .variable and tok.pos + tok.len < self.base.source.len) {
+                const after = tok.pos + tok.len;
+                if (self.base.source[after] >= 0x80) {
+                    var j = after;
+                    while (j < self.base.source.len and isVarNameUtf8Cont(self.base.source[j])) : (j += 1) {}
+                    self.base.pos = j;
+                    var t = tok;
+                    t.len = @intCast(j - tok.pos);
+                    self.last_cat = .variable;
+                    return t;
+                }
             }
 
             // Track bracket depth for indent suspension. The base lexer
@@ -570,6 +628,26 @@ fn isBareWordContinue(c: u8) bool {
         => true,
         else => false,
     };
+}
+
+/// Like `isBareWordContinue` but also admits any byte ≥ 0x80 so a
+/// UTF-8 sequence — start byte plus continuation bytes — flows
+/// through the ident scan as one token. The lexer treats the entire
+/// run as raw bytes; semantic interpretation (case folding, etc.)
+/// would be the next step but isn't needed for v0 correctness.
+fn isBareWordContinueOrUtf8(c: u8) bool {
+    return c >= 0x80 or isBareWordContinue(c);
+}
+
+/// Variable-name continuation: tighter than the bare-word class
+/// because a name like `$x.y` legitimately splits at the dot. Allow
+/// alphanumerics, `_`, and any high-bit byte.
+fn isVarNameUtf8Cont(c: u8) bool {
+    return c >= 0x80 or
+        (c >= 'A' and c <= 'Z') or
+        (c >= 'a' and c <= 'z') or
+        (c >= '0' and c <= '9') or
+        c == '_';
 }
 
 /// True if `source[pos..]` begins with the keyword `else` followed by a
