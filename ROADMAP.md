@@ -19,13 +19,8 @@ The cooked-mode REPL with multi-line continuation and `~/.slashrc`
 sourcing is in. The remaining items upgrade the experience to what a
 modern shell user expects.
 
-### 1. Raw-mode line editor
 
-`tcgetattr` / `tcsetattr` for raw mode, ANSI escape sequences, cursor
-movement, Backspace / Ctrl-W / Ctrl-U / Home / End. The terminal-
-abstraction layer the rest of the REPL items depend on.
-
-### 2. Live syntax highlighting
+### 1. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -40,7 +35,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 3. Tab completion via Shape introspection
+### 2. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -53,26 +48,13 @@ parser is fast enough — even multi-KB lines re-parse in microseconds.
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 4. History
 
-Persistent flat file at `~/.slash/history`. Each entry has rich
-metadata:
-
-- Timestamp (Unix seconds)
-- cwd at execution
-- Exit code
-- Duration
-
-`Up`/`Down` step through. `Ctrl-R` opens a fzf-style overlay with live
-filtering. **Frecency** sort by default (frequency × recency, weighted
-toward recency).
-
-### 5. Bracket matching
+### 3. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 6. Prompt
+### 4. Prompt
 
 Default is minimal but useful:
 
