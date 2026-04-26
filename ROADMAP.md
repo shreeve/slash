@@ -46,21 +46,10 @@ See the dedicated **Heredoc spec** section below. Both literal
 expansion machinery for the interpolating form is the same one already
 in place for `"$x"` inside double-quoted strings.
 
-### 3. Comment handling inside compound forms
-
-The wrapper drops comments at the lexer boundary. Need explicit tests
-that comments work:
-- Inside `{ ... }` bodies
-- After `if` / `while` / `for` keywords on the same line
-- Inside `( ... )` subshells
-- After heredoc bodies
-- On their own lines between sequence items
-
----
 
 ## Tier 3 — robustness
 
-### 4. Memory ownership audit and tightening
+### 3. Memory ownership audit and tightening
 
 Concrete model needs locking down:
 
@@ -76,7 +65,7 @@ session arena (PLAN §6.8).
 Stress test: 10,000 commands in a row, no leaks, no fragmentation. Easy
 to build now, hard to retrofit later.
 
-### 5. Signal handling at the REPL boundary
+### 4. Signal handling at the REPL boundary
 
 PLAN §18-§19 documents the model. The implementation:
 
@@ -89,7 +78,7 @@ PLAN §18-§19 documents the model. The implementation:
   shell does not forward `SIGINT` itself.
 
 
-### 6. Diagnostic infrastructure actually used
+### 5. Diagnostic infrastructure actually used
 
 We built `diag.Sink` / `ListSink` / codes per PLAN §16. Almost nothing
 emits structured diagnostics. Every `slash: parse error` print today
@@ -105,7 +94,7 @@ Specific call sites needing structured diagnostics:
 - `exec.spawn` — `EX00xx` for fork/exec/redirect failures with the
   failing path
 
-### 7. CLOEXEC discipline audit
+### 6. CLOEXEC discipline audit
 
 Pipes get FD_CLOEXEC. What about other fds opened by the shell? Verify
 no fd leaks into spawned children when:
@@ -119,7 +108,7 @@ no fd leaks into spawned children when:
 
 ## Tier 4 — quality of execution
 
-### 8. Comprehensive test suite
+### 7. Comprehensive test suite
 
 Need:
 
@@ -137,7 +126,7 @@ Need:
   (PLAN §17.8) — and **only** for those; intentional deltas don't get a
   diff case
 
-### 9. UTF-8 awareness
+### 8. UTF-8 awareness
 
 Today the lexer is ASCII. A user typing `let café = 5` or piping Chinese
 filenames hits errors. We need at minimum:
@@ -152,7 +141,7 @@ collapsing the cursor.
 
 
 
-### 10. Process substitution `<(...)` / `>(...)`
+### 9. Process substitution `<(...)` / `>(...)`
 
 PLAN §6.2 documents. Implementation:
 - Lexer adds `proc_sub_in` (`<(`) and `proc_sub_out` (`>(`) tokens
@@ -161,7 +150,7 @@ PLAN §6.2 documents. Implementation:
   (BSD/macOS) bindings, threads the path into the parent's argv
 - Job-owned cleanup on every termination path (PLAN §7 Rule 25)
 
-### 11. Configuration loading
+### 10. Configuration loading
 
 `~/.slashrc` is sourced at interactive shell startup. That's the entire
 mechanism. No `~/.slash/config` file format, no `set` runtime config
@@ -175,7 +164,7 @@ builtin. Users configure by writing Slash code in `.slashrc`.
 
 
 
-### 12. `trap` builtin
+### 11. `trap` builtin
 
 `trap 'CMD' SIGNAL...` registers a Slash source string to run when the
 named signal is received. `trap '' SIGNAL` ignores the signal. `trap -`
@@ -362,10 +351,10 @@ pattern-matching tokens for highlighting, completion, or error preview —
 we're rendering the parse tree. It can never lie.
 
 This work depends on Tier 1 #1 (recoverable parse errors with partial
-Shape on incomplete input) and benefits from Tier 3 #6 (real
+Shape on incomplete input) and benefits from Tier 3 #5 (real
 diagnostics).
 
-### 13. Live syntax highlighting
+### 12. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -380,7 +369,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 14. Multi-line continuation
+### 13. Multi-line continuation
 
 If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
 heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
@@ -396,7 +385,7 @@ if test -d /tmp {
 We know exactly when they're inside the block (open `{` on stack) and
 when the statement is complete (matched `}` and shape is well-formed).
 
-### 15. Tab completion via Shape introspection
+### 14. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -409,7 +398,7 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 16. History
+### 15. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -422,12 +411,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 17. Bracket matching
+### 16. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 18. Prompt
+### 17. Prompt
 
 Default is minimal but useful:
 
@@ -445,7 +434,7 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 19. Implementation foundation
+### 18. Implementation foundation
 
 The REPL is one new module — `src/repl.zig`, ~600-800 lines.
 Dependencies:

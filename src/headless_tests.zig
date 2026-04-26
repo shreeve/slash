@@ -697,6 +697,54 @@ const cases: []const Case = &.{
         .source = "true; jobs",
         .expect = .{ .exit_code = 0, .stdout = "" },
     },
+
+    // ---- comment handling inside compound forms -------------------------
+    //
+    // The lexer drops `#...` runs as trivia. These cases lock down the
+    // behavior so the trivia drop never quietly fails inside a compound
+    // body, after a keyword, inside `( ... )`, or as a stand-alone line
+    // between sequence items.
+
+    .{
+        .name = "comments: inside { ... } body",
+        .source = "if true {\n  # in body\n  echo got\n}",
+        .expect = .{ .exit_code = 0, .stdout = "got\n" },
+    },
+    .{
+        .name = "comments: trailing on the keyword's own line",
+        .source = "if true { # on the same line\n  echo k\n}",
+        .expect = .{ .exit_code = 0, .stdout = "k\n" },
+    },
+    .{
+        .name = "comments: inside ( ... ) subshell",
+        .source = "(echo a\n# inside sub\necho b)",
+        .expect = .{ .exit_code = 0, .stdout = "a\nb\n" },
+    },
+    .{
+        .name = "comments: stand-alone line between statements",
+        .source = "echo a\n# stand-alone\necho b",
+        .expect = .{ .exit_code = 0, .stdout = "a\nb\n" },
+    },
+    .{
+        .name = "comments: leading comment before any statement",
+        .source = "# leading\necho hi",
+        .expect = .{ .exit_code = 0, .stdout = "hi\n" },
+    },
+    .{
+        .name = "comments: in for body",
+        .source = "for x in 1 2 {\n  # iter\n  echo $x\n}",
+        .expect = .{ .exit_code = 0, .stdout = "1\n2\n" },
+    },
+    .{
+        .name = "comments: in while body",
+        .source = "i=go; while test $i = go {\n  # one pass\n  echo iter\n  i=stop\n}",
+        .expect = .{ .exit_code = 0, .stdout = "iter\n" },
+    },
+    .{
+        .name = "comments: in cmd body",
+        .source = "cmd f {\n  # private\n  echo body\n}\nf",
+        .expect = .{ .exit_code = 0, .stdout = "body\n" },
+    },
 };
 
 // =============================================================================
@@ -733,6 +781,18 @@ fn runHeadless(alloc: std.mem.Allocator, source_text: []const u8) !RunOutput {
     // those by restoring the originals below.)
     exec.closeFd(out_pipe[1]);
     exec.closeFd(err_pipe[1]);
+
+    // Anything past this point that fails has to restore fds 1/2 and
+    // release the pipe read ends, otherwise a single bad case wedges
+    // the rest of the suite.
+    errdefer {
+        _ = std.c.dup2(saved_out, 1);
+        _ = std.c.dup2(saved_err, 2);
+        exec.closeFd(saved_out);
+        exec.closeFd(saved_err);
+        exec.closeFd(out_pipe[0]);
+        exec.closeFd(err_pipe[0]);
+    }
 
     // Run the eval.
     var arena = std.heap.ArenaAllocator.init(alloc);
