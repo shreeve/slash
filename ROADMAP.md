@@ -13,25 +13,9 @@ whichever order makes sense.
 
 ---
 
-## Tier 1 — script writing breaks without these
-
-These are not optional. Without them, common scripts fail in the first
-ten lines and Slash feels half-built.
-
-
-## Tier 2 — common patterns break
-
-### 1. Heredocs
-
-See the dedicated **Heredoc spec** section below. Both literal
-(`<<'TAG'`) and interpolating (`<<TAG`) forms ship in one piece — the
-expansion machinery for the interpolating form is the same one already
-in place for `"$x"` inside double-quoted strings.
-
-
 ## Tier 3 — robustness
 
-### 2. Memory ownership audit and tightening
+### 1. Memory ownership audit and tightening
 
 Concrete model needs locking down:
 
@@ -47,7 +31,7 @@ session arena (PLAN §6.8).
 Stress test: 10,000 commands in a row, no leaks, no fragmentation. Easy
 to build now, hard to retrofit later.
 
-### 3. Signal handling at the REPL boundary
+### 2. Signal handling at the REPL boundary
 
 PLAN §18-§19 documents the model. The implementation:
 
@@ -60,7 +44,7 @@ PLAN §18-§19 documents the model. The implementation:
   shell does not forward `SIGINT` itself.
 
 
-### 4. Diagnostic infrastructure actually used
+### 3. Diagnostic infrastructure actually used
 
 We built `diag.Sink` / `ListSink` / codes per PLAN §16. Almost nothing
 emits structured diagnostics. Every `slash: parse error` print today
@@ -76,7 +60,7 @@ Specific call sites needing structured diagnostics:
 - `exec.spawn` — `EX00xx` for fork/exec/redirect failures with the
   failing path
 
-### 5. CLOEXEC discipline audit
+### 4. CLOEXEC discipline audit
 
 Pipes get FD_CLOEXEC. What about other fds opened by the shell? Verify
 no fd leaks into spawned children when:
@@ -90,7 +74,7 @@ no fd leaks into spawned children when:
 
 ## Tier 4 — quality of execution
 
-### 6. Comprehensive test suite
+### 5. Comprehensive test suite
 
 Need:
 
@@ -108,7 +92,7 @@ Need:
   (PLAN §17.8) — and **only** for those; intentional deltas don't get a
   diff case
 
-### 7. UTF-8 awareness
+### 6. UTF-8 awareness
 
 Today the lexer is ASCII. A user typing `let café = 5` or piping Chinese
 filenames hits errors. We need at minimum:
@@ -123,7 +107,7 @@ collapsing the cursor.
 
 
 
-### 8. Process substitution `<(...)` / `>(...)`
+### 7. Process substitution `<(...)` / `>(...)`
 
 PLAN §6.2 documents. Implementation:
 - Lexer adds `proc_sub_in` (`<(`) and `proc_sub_out` (`>(`) tokens
@@ -132,7 +116,7 @@ PLAN §6.2 documents. Implementation:
   (BSD/macOS) bindings, threads the path into the parent's argv
 - Job-owned cleanup on every termination path (PLAN §7 Rule 25)
 
-### 9. Configuration loading
+### 8. Configuration loading
 
 `~/.slashrc` is sourced at interactive shell startup. That's the entire
 mechanism. No `~/.slash/config` file format, no `set` runtime config
@@ -146,7 +130,7 @@ builtin. Users configure by writing Slash code in `.slashrc`.
 
 
 
-### 10. `trap` builtin
+### 9. `trap` builtin
 
 `trap 'CMD' SIGNAL...` registers a Slash source string to run when the
 named signal is received. `trap '' SIGNAL` ignores the signal. `trap -`
@@ -162,168 +146,6 @@ Real scripts need this for cleanup paths. Implementation requires:
 
 ---
 
-## Heredoc spec
-
-Slash heredocs use **column-determined dedent** and allow **line
-continuation after the sigil**. Two open sigils:
-
-- `<<TAG` — interpolating (`$var`, `${var}`, `$(...)` expansion)
-- `<<'TAG'` — literal (no expansion, body is exact bytes)
-
-No `<<-TAG` form. Column-based dedent obsoletes it.
-
-The closing line is the first line whose **trimmed** content equals
-`TAG`. The **column where `TAG` starts on the closing line** is the
-dedent margin. Every body line has up to that many columns of leading
-whitespace stripped (capped at the line's actual indentation, so
-under-indented body lines aren't damaged).
-
-```sh
-cat <<EOF
-    hello world
-    indented further
-        more
-    EOF
-```
-
-Closing `EOF` at column 4. Body becomes:
-
-```
-hello world
-indented further
-    more
-```
-
-### Line continuation after the sigil
-
-After `<<TAG` (or `<<'TAG'`), the rest of the line continues exactly as
-it would for any other redirect. `;`, `&&`, `||`, `|`, `&`, and bare
-statement-end all work. The body comes from subsequent lines.
-
-```sh
-echo before; cat <<EOF; echo after
-    hello world
-    EOF
-```
-
-Output:
-
-```
-before
-hello world
-after
-```
-
-Multiple heredocs on one line are queued in order:
-
-```sh
-cat <<A; cat <<B
-    body of A
-    A
-    body of B
-    B
-```
-
-### Implementation outline
-
-**Lexer rules** (`slash.grammar`):
-
-```
-"<<" "'" [A-Za-z_] [A-Za-z0-9_]* "'"   → heredoc_open_lit
-"<<" [A-Za-z_] [A-Za-z0-9_]*           → heredoc_open
-heredoc_body
-```
-
-`heredoc_body` is emitted by the wrapper; no lexer pattern.
-
-**Lexer wrapper** (`slash.zig`):
-
-```zig
-const PendingHeredoc = struct {
-    tag: []const u8,
-    interpolating: bool,
-    dedent_col: u32 = 0,
-};
-
-pending_heredocs: std.ArrayListUnmanaged(PendingHeredoc) = .empty,
-```
-
-Flow:
-1. On `heredoc_open` / `heredoc_open_lit`, parse the tag, push to
-   `pending_heredocs`. Return the open token unchanged.
-2. On a newline token, if `pending_heredocs.len > 0`:
-   - Save the deferred newline.
-   - For each pending heredoc in order:
-     - Scan `base.source` line by line from `base.pos`.
-     - First line whose trimmed content equals `TAG` ends the body and
-       records `dedent_col`.
-     - Otherwise: append (raw, untouched) to a body accumulator.
-   - Cook each body: strip up to `dedent_col` columns of leading
-     whitespace from each line. Join with `\n`.
-   - Emit a `heredoc_body` token whose source span covers the cooked
-     body. Queue subsequent heredoc bodies for sequential return.
-   - After all bodies are emitted, emit the deferred newline.
-
-The wrapper's `next()` must drain queued heredoc bodies before resuming
-normal lexing.
-
-**Grammar**:
-
-```
-redirect = ...
-         | HEREDOC_OPEN     HEREDOC_BODY    → (redir_heredoc 1 2)
-         | HEREDOC_OPEN_LIT HEREDOC_BODY    → (redir_heredoc_lit 1 2)
-```
-
-**Shape**:
-
-```zig
-pub const RedirectOp = enum {
-    read, read_fd, write, write_fd, append,
-    both, both_append, dup_out, dup_in,
-    heredoc, heredoc_literal,
-};
-
-pub const HeredocBody = struct {
-    body: []const u8,       // cooked, dedented bytes
-    interpolating: bool,
-    span: Span,
-};
-```
-
-`RedirectShape.target` becomes a `union { word: WordShape, heredoc: HeredocBody }`.
-
-**Eval**: for each heredoc redirect on a command:
-1. Create a pipe.
-2. Fork a tiny writer process (or write from the parent if the body
-   fits in the kernel pipe buffer).
-3. Dup the read end onto the target fd in the child.
-4. Close both ends in the parent.
-
-Tiny writer is the safe default — no buffer-size assumptions, no parent
-blocking.
-
-For interpolating heredocs, the body needs `$var` / `$(...)` expansion
-at eval time, sharing machinery with `"$x"` inside double-quoted
-strings.
-
-### Edge cases to nail
-
-- **No closing tag found before EOF** — parse error, primary span on the
-  open sigil. Code `SH0021: heredoc opened at <line:col> with tag '<tag>'
-  was never closed`.
-- **Mixed tabs and spaces in body indent** — same hard error as code
-  indentation. Not a place to be permissive.
-- **Body line indented less than the closing tag** — strip what's there,
-  leave the rest.
-- **Empty body** — closing tag immediately after open line: body is the
-  empty string.
-- **Multiple opens, same tag** — each is collected against its own next
-  occurrence.
-- **Closing tag inside a quoted string in the body** — doesn't close.
-  Only trimmed-line-equals-tag counts.
-
----
 
 ## REPL — world class
 
@@ -333,10 +155,10 @@ pattern-matching tokens for highlighting, completion, or error preview —
 we're rendering the parse tree. It can never lie.
 
 This work depends on partial-Shape support for incomplete input (REPL
-continuation prompt) and benefits from Tier 3 #4 (real
+continuation prompt) and benefits from Tier 3 #3 (real
 diagnostics).
 
-### 11. Live syntax highlighting
+### 10. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -351,7 +173,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 12. Multi-line continuation
+### 11. Multi-line continuation
 
 If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
 heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
@@ -367,7 +189,7 @@ if test -d /tmp {
 We know exactly when they're inside the block (open `{` on stack) and
 when the statement is complete (matched `}` and shape is well-formed).
 
-### 13. Tab completion via Shape introspection
+### 12. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -380,7 +202,7 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 14. History
+### 13. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -393,12 +215,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 15. Bracket matching
+### 14. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 16. Prompt
+### 15. Prompt
 
 Default is minimal but useful:
 
@@ -416,7 +238,7 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 17. Implementation foundation
+### 16. Implementation foundation
 
 The REPL is one new module — `src/repl.zig`, ~600-800 lines.
 Dependencies:

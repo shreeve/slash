@@ -745,6 +745,70 @@ const cases: []const Case = &.{
         .source = "cmd f {\n  # private\n  echo body\n}\nf",
         .expect = .{ .exit_code = 0, .stdout = "body\n" },
     },
+
+    // ---- heredocs (PLAN: column-determined dedent) -----------------------
+    //
+    // Two open sigils: `<<TAG` interpolates `$var` / `$(...)`,
+    // `<<'TAG'` is byte-literal. The closing line is the first line
+    // whose trimmed content equals the tag; that line's column at the
+    // tag's first byte sets the dedent margin for body lines. Multiple
+    // heredocs on one logical line are queued in source order.
+
+    .{
+        .name = "heredoc: literal body, single line",
+        .source = "cat <<'EOF'\nhello world\nEOF\n",
+        .expect = .{ .exit_code = 0, .stdout = "hello world\n" },
+    },
+    .{
+        .name = "heredoc: literal preserves $ unchanged",
+        .source = "x=alice\ncat <<'EOF'\nhello $x\nEOF\n",
+        .expect = .{ .exit_code = 0, .stdout = "hello $x\n" },
+    },
+    .{
+        .name = "heredoc: interpolating expands $var",
+        .source = "x=alice\ncat <<EOF\nhello $x\nEOF\n",
+        .expect = .{ .exit_code = 0, .stdout = "hello alice\n" },
+    },
+    .{
+        .name = "heredoc: interpolating expands ${name}",
+        .source = "user=root\ncat <<EOF\npath=/home/${user}\nEOF\n",
+        .expect = .{ .exit_code = 0, .stdout = "path=/home/root\n" },
+    },
+    .{
+        .name = "heredoc: interpolating expands $(cmd)",
+        .source = "cat <<EOF\ngot: $(/bin/echo hi)\nEOF\n",
+        .expect = .{ .exit_code = 0, .stdout = "got: hi\n" },
+    },
+    .{
+        .name = "heredoc: column-determined dedent",
+        .source = "cat <<EOF\n    indented\n    more\n    EOF\n",
+        .expect = .{ .exit_code = 0, .stdout = "indented\nmore\n" },
+    },
+    .{
+        .name = "heredoc: empty body",
+        .source = "cat <<EOF\nEOF\necho done",
+        .expect = .{ .exit_code = 0, .stdout = "done\n" },
+    },
+    .{
+        .name = "heredoc: command after the sigil on the same line",
+        .source = "echo before; cat <<EOF; echo after\nin body\nEOF\n",
+        .expect = .{ .exit_code = 0, .stdout = "before\nin body\nafter\n" },
+    },
+    .{
+        .name = "heredoc: multiple heredocs on one line, queued in order",
+        .source = "cat <<A; cat <<B\nbody of A\nA\nbody of B\nB\n",
+        .expect = .{ .exit_code = 0, .stdout = "body of A\nbody of B\n" },
+    },
+    .{
+        .name = "heredoc: feeds read",
+        .source = "read line <<EOF\nhello\nEOF\necho got=$line",
+        .expect = .{ .exit_code = 0, .stdout = "got=hello\n" },
+    },
+    .{
+        .name = "heredoc: literal escape leaves backslash unchanged",
+        .source = "cat <<'EOF'\na\\nb\nEOF\n",
+        .expect = .{ .exit_code = 0, .stdout = "a\\nb\n" },
+    },
 };
 
 // =============================================================================

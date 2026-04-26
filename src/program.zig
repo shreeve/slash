@@ -27,6 +27,17 @@ pub const RedirectOp = enum {
     both_write,
     both_append,
     dup,
+    /// `<<TAG` / `<<'TAG'`. The cooked body lives in `heredoc_body`;
+    /// `interpolating` distinguishes the two forms at eval time.
+    heredoc,
+};
+
+/// A heredoc redirect's payload after Word lowering. The body has had
+/// column-determined dedent applied and trailing line endings preserved
+/// faithfully to the source. Interpolation happens at eval time.
+pub const HeredocPayload = struct {
+    body: []const u8,
+    interpolating: bool,
 };
 
 pub const Redirect = struct {
@@ -39,6 +50,8 @@ pub const Redirect = struct {
     /// (the path lives in `target`).
     to_fd: ?u8,
     target: ?Word,
+    /// For `heredoc` op only: the cooked body and its interpolation flag.
+    heredoc: ?HeredocPayload = null,
     span: Span,
 };
 
@@ -365,6 +378,7 @@ fn lowerRedirect(r: shape_mod.RedirectShape, ctx: *const LowerContext) !Redirect
         .both => .both_write,
         .both_append => .both_append,
         .dup_out, .dup_in => .dup,
+        .heredoc, .heredoc_lit => .heredoc,
     };
 
     var from_fd: ?u8 = null;
@@ -380,13 +394,50 @@ fn lowerRedirect(r: shape_mod.RedirectShape, ctx: *const LowerContext) !Redirect
     var target: ?Word = null;
     if (r.target) |t| target = try word_mod.lowerWord(t, ctx);
 
+    var heredoc: ?HeredocPayload = null;
+    if (r.heredoc) |hd| {
+        const cooked = try cookHeredocBody(hd.raw, hd.dedent_col, ctx.alloc);
+        heredoc = .{ .body = cooked, .interpolating = hd.interpolating };
+    }
+
     return .{
         .op = op,
         .from_fd = from_fd,
         .to_fd = to_fd,
         .target = target,
+        .heredoc = heredoc,
         .span = r.span,
     };
+}
+
+/// Apply column-determined dedent to the raw body. Each line has up to
+/// `dedent_col - 1` leading spaces stripped, capped at the line's actual
+/// indentation so under-indented lines aren't damaged. Tabs in
+/// indentation are preserved verbatim and count as one column for the
+/// strip; users mixing tabs and spaces is their problem to debug.
+fn cookHeredocBody(raw: []const u8, dedent_col: u32, alloc: Allocator) ![]const u8 {
+    if (dedent_col <= 1) return alloc.dupe(u8, raw);
+    const margin: u32 = dedent_col - 1;
+
+    var out = std.ArrayListUnmanaged(u8).empty;
+    defer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, raw.len);
+
+    var i: usize = 0;
+    while (i < raw.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, raw, i, '\n') orelse raw.len;
+        const line = raw[i..line_end];
+        var strip: u32 = 0;
+        while (strip < margin and strip < line.len and (line[strip] == ' ' or line[strip] == '\t')) : (strip += 1) {}
+        try out.appendSlice(alloc, line[strip..]);
+        if (line_end < raw.len) {
+            try out.append(alloc, '\n');
+            i = line_end + 1;
+        } else {
+            i = line_end;
+        }
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 fn parseLeadingFd(bytes: []const u8) ?u8 {
@@ -548,6 +599,10 @@ fn cloneRedirects(reds: []const Redirect, alloc: Allocator) ![]const Redirect {
         .from_fd = r.from_fd,
         .to_fd = r.to_fd,
         .target = if (r.target) |t| try cloneWord(t, alloc) else null,
+        .heredoc = if (r.heredoc) |hd| HeredocPayload{
+            .body = try alloc.dupe(u8, hd.body),
+            .interpolating = hd.interpolating,
+        } else null,
         .span = r.span,
     };
     return out;

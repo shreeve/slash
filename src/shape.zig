@@ -105,14 +105,32 @@ pub const RedirectOp = enum {
     both_append,
     dup_out,
     dup_in,
+    heredoc,
+    heredoc_lit,
+};
+
+pub const HeredocBody = struct {
+    /// Body bytes still in their on-disk form. Dedent is computed and
+    /// applied at Word lowering time so the source-faithful slice
+    /// stays available for highlighting / completion.
+    raw: []const u8,
+    /// Column at which the closing tag appeared (1-indexed); becomes
+    /// the dedent margin. Body lines have up to `dedent_col - 1`
+    /// leading spaces stripped per line.
+    dedent_col: u32,
+    /// True for `<<TAG` (interpolating); false for `<<'TAG'` (literal).
+    interpolating: bool,
+    span: Span,
 };
 
 pub const RedirectShape = struct {
     op: RedirectOp,
     /// fd-prefix span for `_fd` and `dup_*` ops.
     fd_src: ?Span,
-    /// File target (`null` for dup ops).
+    /// File target (`null` for dup and heredoc ops).
     target: ?WordShape,
+    /// Heredoc body (only for `heredoc` / `heredoc_lit` ops).
+    heredoc: ?HeredocBody,
     span: Span,
 };
 
@@ -1460,6 +1478,8 @@ fn convertRedirect(
         .redir_both_append => .both_append,
         .redir_dup_out => .dup_out,
         .redir_dup_in => .dup_in,
+        .redir_heredoc => .heredoc,
+        .redir_heredoc_lit => .heredoc_lit,
         else => {
             try emitBadShape(source, sexp, sink, "unexpected redirect tag");
             return error.InvalidShape;
@@ -1468,6 +1488,7 @@ fn convertRedirect(
 
     var fd_src: ?Span = null;
     var target: ?WordShape = null;
+    var heredoc: ?HeredocBody = null;
     var start: u32 = std.math.maxInt(u32);
     var end: u32 = 0;
 
@@ -1504,14 +1525,44 @@ fn convertRedirect(
             start = fd.start;
             end = fd.end;
         },
+        .heredoc, .heredoc_lit => {
+            if (payload.len != 2) {
+                try emitBadShape(source, sexp, sink, "heredoc redirect malformed");
+                return error.InvalidShape;
+            }
+            const open_span = try expectSrcSpan(payload[0], source, sink);
+            const body_span = try expectSrcSpan(payload[1], source, sink);
+            heredoc = .{
+                .raw = source.text[body_span.start..body_span.end],
+                .dedent_col = computeHeredocDedentCol(source.text, body_span.end),
+                .interpolating = (op == .heredoc),
+                .span = body_span,
+            };
+            start = open_span.start;
+            end = body_span.end;
+        },
     }
 
     return .{
         .op = op,
         .fd_src = fd_src,
         .target = target,
+        .heredoc = heredoc,
         .span = .{ .start = start, .end = end },
     };
+}
+
+/// Walk past the body to find the closing-tag line and return the
+/// 1-indexed column at which the tag's first non-whitespace byte sits.
+/// The body span ends right before the closing line, so `body_end` is
+/// the start of the closing tag's leading whitespace.
+fn computeHeredocDedentCol(source: []const u8, body_end: u32) u32 {
+    var col: u32 = 1;
+    var i = body_end;
+    while (i < source.len and (source[i] == ' ' or source[i] == '\t')) : (i += 1) {
+        col += 1;
+    }
+    return col;
 }
 
 // =============================================================================
@@ -1527,7 +1578,18 @@ fn isWordAtomTag(tag: slash.Tag) bool {
 
 fn isRedirectTag(tag: slash.Tag) bool {
     return switch (tag) {
-        .redir_read, .redir_read_fd, .redir_write, .redir_write_fd, .redir_append, .redir_both, .redir_both_append, .redir_dup_out, .redir_dup_in => true,
+        .redir_read,
+        .redir_read_fd,
+        .redir_write,
+        .redir_write_fd,
+        .redir_append,
+        .redir_both,
+        .redir_both_append,
+        .redir_dup_out,
+        .redir_dup_in,
+        .redir_heredoc,
+        .redir_heredoc_lit,
+        => true,
         else => false,
     };
 }

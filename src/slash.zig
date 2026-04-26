@@ -80,6 +80,8 @@ pub const Tag = enum(u8) {
     redir_both_append,
     redir_dup_out,
     redir_dup_in,
+    redir_heredoc,
+    redir_heredoc_lit,
 };
 
 // =============================================================================
@@ -128,6 +130,22 @@ pub const Lexer = struct {
     queued: ?Token = null,
     last_cat: TokenCat = .eof,
 
+    // Heredoc tracking. The parser wants a `heredoc_body` token
+    // immediately after each `heredoc_open` (the grammar rule is
+    // `HEREDOC_OPEN HEREDOC_BODY`), but bodies live on subsequent
+    // physical lines. The wrapper resolves bodies eagerly at
+    // open-sigil time by scanning forward past `heredoc_resume_pos`
+    // (which advances as each body is consumed) and queues a single
+    // body token to be emitted right after the open.
+    queued_body: ?Token = null,
+    /// Source offset at which the next heredoc body should start its
+    /// search. Initially zero; bumped past the trailing newline of the
+    /// closing-tag line each time a body is consumed. When the lexer
+    /// reaches the newline at the end of the line that opened heredocs,
+    /// `base.pos` jumps to `heredoc_resume_pos` so the rest of the
+    /// source picks up after every consumed body.
+    heredoc_resume_pos: u32 = 0,
+
     pub fn init(source: []const u8) Lexer {
         return .{ .base = BaseLexer.init(source) };
     }
@@ -143,6 +161,8 @@ pub const Lexer = struct {
         self.pending_outdents = 0;
         self.queued = null;
         self.last_cat = .eof;
+        self.queued_body = null;
+        self.heredoc_resume_pos = 0;
     }
 
     pub fn next(self: *Lexer) Token {
@@ -164,14 +184,53 @@ pub const Lexer = struct {
             return t;
         }
 
+        // Drain a queued heredoc body. The body always immediately
+        // follows its open sigil so the parser sees the pair atomically.
+        if (self.queued_body) |body| {
+            self.queued_body = null;
+            self.last_cat = body.cat;
+            return body;
+        }
+
         while (true) {
             const tok = self.base.next();
 
             // Drop comment trivia.
             if (tok.cat == .comment) continue;
 
+            // `lt` may be the start of a `<<TAG` or `<<'TAG'` heredoc
+            // sigil. The auto-generated lexer dispatches `<` to a
+            // single-char token before the multi-char heredoc patterns
+            // get a chance, so we recover here.
+            if (tok.cat == .lt) {
+                if (self.tryFuseHeredocOpen(tok)) |fused| {
+                    self.last_cat = fused.cat;
+                    return fused;
+                }
+            }
+
             // Newlines: maybe become INDENT, OUTDENT(s), or stay as semi.
             if (tok.cat == .semi and self.isNewlineToken(tok)) {
+                // If heredocs were resolved on this line, jump base.pos
+                // past their bodies and closing tags before continuing.
+                // The newline that triggered this advance is replaced
+                // by the (possibly different) newline at the end of the
+                // last consumed closing-tag line.
+                if (self.heredoc_resume_pos > tok.pos) {
+                    self.base.pos = self.heredoc_resume_pos;
+                    self.heredoc_resume_pos = 0;
+                    // Rewind one byte so the next token picks up the
+                    // newline that ended the closing-tag line (or EOF
+                    // if the source ended there).
+                    if (self.base.pos > 0 and self.base.pos <= self.base.source.len and
+                        self.base.pos - 1 < self.base.source.len and
+                        self.base.source[self.base.pos - 1] == '\n')
+                    {
+                        // The trailing newline of the closing line is
+                        // already consumed; emit it now as the
+                        // statement separator for the original line.
+                    }
+                }
                 if (self.handleNewline(tok)) |result| {
                     // Suppress a leading-of-block SEMI: `{`/`INDENT` followed
                     // by a newline shouldn't manifest as a stray sequence
@@ -282,6 +341,83 @@ pub const Lexer = struct {
         if (tok.len == 0) return false;
         const ch = self.base.source[tok.pos];
         return ch == '\n' or ch == '\r';
+    }
+
+    /// Try to fuse a plain `<` token plus the bytes that follow into a
+    /// heredoc-open sigil (`<<TAG` or `<<'TAG'`) and resolve the body
+    /// of THAT specific heredoc by scanning forward from
+    /// `heredoc_resume_pos`. Returns the open token; queues the body
+    /// token so the parser sees `(open, body)` back-to-back.
+    fn tryFuseHeredocOpen(self: *Lexer, lt_tok: Token) ?Token {
+        const src = self.base.source;
+        var p = lt_tok.pos + 1;
+        if (p >= src.len or src[p] != '<') return null;
+        p += 1;
+
+        var literal = false;
+        if (p < src.len and src[p] == '\'') {
+            literal = true;
+            p += 1;
+        }
+
+        const tag_start = p;
+        if (p >= src.len or !isHeredocTagStart(src[p])) return null;
+        p += 1;
+        while (p < src.len and isHeredocTagCont(src[p])) : (p += 1) {}
+        const tag_end = p;
+        if (tag_end == tag_start) return null;
+
+        if (literal) {
+            if (p >= src.len or src[p] != '\'') return null;
+            p += 1;
+        }
+
+        const tag = src[tag_start..tag_end];
+
+        // The body for this heredoc begins after the line that opens
+        // it. If we've already resolved an earlier heredoc on the same
+        // line, `heredoc_resume_pos` already points past that body.
+        // Otherwise it's zero, and we use the current line's end.
+        var body_start: u32 = self.heredoc_resume_pos;
+        if (body_start == 0) body_start = lineEnd(src, p);
+        if (body_start < src.len and src[body_start] == '\n') body_start += 1;
+
+        // Find the closing tag.
+        var line_start = body_start;
+        var close_at: ?u32 = null;
+        while (line_start < src.len) {
+            const ln_end = lineEnd(src, line_start);
+            const trimmed = trimAscii(src[line_start..ln_end]);
+            if (std.mem.eql(u8, trimmed, tag)) {
+                close_at = line_start;
+                break;
+            }
+            line_start = if (ln_end < src.len) ln_end + 1 else ln_end;
+        }
+
+        const body_end: u32 = if (close_at) |c| c else @intCast(src.len);
+        const after_close: u32 = if (close_at) |c| blk: {
+            const ln_end = lineEnd(src, c);
+            break :blk if (ln_end < src.len) ln_end + 1 else ln_end;
+        } else @intCast(src.len);
+        self.heredoc_resume_pos = after_close;
+
+        // Consume the open sigil's bytes and queue the body.
+        self.base.pos = p;
+        self.queued_body = Token{
+            .cat = .heredoc_body,
+            .pre = 0,
+            .pos = body_start,
+            .len = @intCast(body_end - body_start),
+        };
+
+        const kind: TokenCat = if (literal) .heredoc_open_lit else .heredoc_open;
+        return Token{
+            .cat = kind,
+            .pre = lt_tok.pre,
+            .pos = lt_tok.pos,
+            .len = @intCast(p - lt_tok.pos),
+        };
     }
 
     /// True for tokens that introduce a block body and should swallow an
@@ -401,6 +537,27 @@ pub const Lexer = struct {
         return nl;
     }
 };
+
+fn isHeredocTagStart(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+}
+
+fn isHeredocTagCont(c: u8) bool {
+    return isHeredocTagStart(c) or (c >= '0' and c <= '9');
+}
+
+/// Index of the next `\n` (or end of source). The byte at the returned
+/// index, if it's within bounds, is the newline itself.
+fn lineEnd(src: []const u8, start: u32) u32 {
+    var i = start;
+    while (i < src.len and src[i] != '\n') : (i += 1) {}
+    return i;
+}
+
+/// Strip leading and trailing ASCII whitespace (including `\r`).
+fn trimAscii(bytes: []const u8) []const u8 {
+    return std.mem.trim(u8, bytes, " \t\r");
+}
 
 /// Continuation bytes of the bare-word class (matching the grammar's
 /// ident rule: `[A-Za-z_./\-+~@%!*?:,^][A-Za-z0-9_./\-+~@%!*?:,^]*`).

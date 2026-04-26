@@ -1561,9 +1561,156 @@ fn buildRedirectOps(
                 const dst: exec.Fd = if (r.from_fd) |n| @intCast(n) else 1;
                 try out.append(scratch, .{ .dup = .{ .src = src, .dst = dst } });
             },
+            .heredoc => {
+                const dst: exec.Fd = if (r.from_fd) |n| @intCast(n) else 0;
+                const payload = r.heredoc.?;
+                const expanded = if (payload.interpolating)
+                    try expandHeredocBody(payload.body, session, scratch)
+                else
+                    payload.body;
+                const read_fd = try installHeredocPipe(expanded);
+                try out.append(scratch, .{ .dup = .{ .src = read_fd, .dst = dst } });
+                try out.append(scratch, .{ .close = read_fd });
+            },
         }
     }
     return out.toOwnedSlice(scratch);
+}
+
+/// Expand a heredoc body once at eval time. Variable refs (`$name`,
+/// `${name}`, `$?`/`$@`/etc.) and command substitutions (`$(...)`)
+/// resolve against the live session; literal text passes through.
+/// Quoted-delimiter heredocs (`<<'TAG'`) skip this pass entirely so
+/// their bodies stay byte-perfect.
+fn expandHeredocBody(body: []const u8, session: *Session, scratch: Allocator) ![]const u8 {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(scratch);
+    try buf.ensureTotalCapacity(scratch, body.len);
+
+    var i: usize = 0;
+    while (i < body.len) {
+        const c = body[i];
+        if (c == '\\' and i + 1 < body.len) {
+            const n = body[i + 1];
+            if (n == '$' or n == '\\' or n == '`') {
+                try buf.append(scratch, n);
+                i += 2;
+                continue;
+            }
+            try buf.append(scratch, c);
+            i += 1;
+            continue;
+        }
+        if (c == '$' and i + 1 < body.len) {
+            const n = body[i + 1];
+            if (n == '{') {
+                var j = i + 2;
+                while (j < body.len and body[j] != '}') : (j += 1) {}
+                if (j < body.len) {
+                    const name = std.mem.trim(u8, body[i + 2 .. j], " \t");
+                    if (try lookupSpecialOrVar(name, session, scratch)) |val| {
+                        try buf.appendSlice(scratch, val);
+                        scratch.free(val);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            if (n == '(') {
+                var depth: u32 = 1;
+                var j = i + 2;
+                while (j < body.len) : (j += 1) {
+                    const ch = body[j];
+                    if (ch == '(') depth += 1;
+                    if (ch == ')') {
+                        depth -= 1;
+                        if (depth == 0) break;
+                    }
+                }
+                if (j < body.len and depth == 0) {
+                    const inner_bytes = body[i + 2 .. j];
+                    const inner_source = diag.Source{ .name = "<heredoc>", .text = inner_bytes };
+                    const parsed = shape_mod.parse(inner_source, scratch, null) catch {
+                        try buf.append(scratch, '$');
+                        i += 1;
+                        continue;
+                    };
+                    const low_ctx = program_mod.LowerContext{ .alloc = scratch, .source = inner_source };
+                    const inner_prog = program_mod.lower(parsed.root, &low_ctx, null) catch {
+                        try buf.append(scratch, '$');
+                        i += 1;
+                        continue;
+                    };
+                    const captured = try captureProgramStdout(inner_prog, session, scratch);
+                    try buf.appendSlice(scratch, captured);
+                    i = j + 1;
+                    continue;
+                }
+            }
+            if (isHeredocVarStart(n)) {
+                var j = i + 2;
+                while (j < body.len and isHeredocVarCont(body[j])) : (j += 1) {}
+                const name = body[i + 1 .. j];
+                if (try lookupSpecialOrVar(name, session, scratch)) |val| {
+                    try buf.appendSlice(scratch, val);
+                    scratch.free(val);
+                }
+                i = j;
+                continue;
+            }
+            if (isHeredocSpecialVar(n)) {
+                const name = body[i + 1 .. i + 2];
+                if (try lookupSpecialOrVar(name, session, scratch)) |val| {
+                    try buf.appendSlice(scratch, val);
+                    scratch.free(val);
+                }
+                i += 2;
+                continue;
+            }
+        }
+        try buf.append(scratch, c);
+        i += 1;
+    }
+    return buf.toOwnedSlice(scratch);
+}
+
+fn isHeredocVarStart(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+}
+
+fn isHeredocVarCont(c: u8) bool {
+    return isHeredocVarStart(c) or (c >= '0' and c <= '9');
+}
+
+fn isHeredocSpecialVar(c: u8) bool {
+    return switch (c) {
+        '0'...'9', '?', '#', '@', '!', '*', '$' => true,
+        else => false,
+    };
+}
+
+/// Write the heredoc body into a fresh pipe and return the read end.
+/// The current implementation writes from the parent under the
+/// assumption that the body fits in the kernel pipe buffer (typically
+/// 64 KiB on macOS / 64 KiB+ on Linux). A future change can fork a
+/// tiny writer process for over-buffer-size bodies.
+fn installHeredocPipe(body: []const u8) !exec.Fd {
+    const fds = try exec.makePipe();
+    var written: usize = 0;
+    while (written < body.len) {
+        const n = std.c.write(fds[1], body.ptr + written, body.len - written);
+        if (n < 0) {
+            const e = std.c.errno(@as(c_int, -1));
+            if (e == .INTR) continue;
+            exec.closeFd(fds[0]);
+            exec.closeFd(fds[1]);
+            return error.HeredocWriteFailed;
+        }
+        if (n == 0) break;
+        written += @intCast(n);
+    }
+    exec.closeFd(fds[1]);
+    return fds[0];
 }
 
 fn wordToPathZ(scratch: Allocator, w: Word, session: *Session) ![*:0]const u8 {

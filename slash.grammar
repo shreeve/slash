@@ -64,6 +64,11 @@ tokens
     fd_dup_out      # N>&M
     fd_dup_in       # N<&M
 
+    # Heredocs
+    heredoc_open        # <<TAG     (interpolating)
+    heredoc_open_lit    # <<'TAG'   (literal — no expansion)
+    heredoc_body        # cooked body bytes (emitted by lexer wrapper)
+
     # Assignment
     assign          # =       (loose form, e.g. inside ${var = default})
     name_eq         # NAME=   (tight form, fused by lexer wrapper)
@@ -87,6 +92,10 @@ tokens
 "&>>"                                           → amp_gt_gt
 "&>"                                            → amp_gt
 ">>"                                            → gt_gt
+
+# Heredoc open sigils (longer pattern — matched before single `<`).
+'<' '<' "'" [A-Za-z_] [A-Za-z0-9_]* "'"         → heredoc_open_lit
+'<' '<' [A-Za-z_] [A-Za-z0-9_]*                 → heredoc_open
 
 # fd-prefixed compound operators
 [0-9]+ '>' '&' [0-9]+                           → fd_dup_out
@@ -315,3 +324,5 @@ redirect        = LT          word_atom                 → (redir_read 2)
                 | AMP_GT_GT   word_atom                 → (redir_both_append 2)
                 | FD_DUP_OUT                            → (redir_dup_out 1)
                 | FD_DUP_IN                             → (redir_dup_in 1)
+                | HEREDOC_OPEN     HEREDOC_BODY         → (redir_heredoc 1 2)
+                | HEREDOC_OPEN_LIT HEREDOC_BODY         → (redir_heredoc_lit 1 2)
