@@ -48,7 +48,20 @@ fn lowerPart(
     ctx: *const program_mod.LowerContext,
 ) !Word.Part {
     return switch (part) {
-        .text => |t| Word.Part{ .text = try canonicalizeText(t.bytes, t.flavor, ctx.alloc) },
+        .text => |t| blk: {
+            const out = if (t.cooked)
+                try ctx.alloc.dupe(u8, t.bytes)
+            else
+                try canonicalizeText(t.bytes, t.flavor, ctx.alloc);
+            // Per PLAN §7 Rule 9: globbing applies only to unquoted literal
+            // parts. A bare-flavored text run containing `*` or `?` is
+            // promoted to a `.glob` part so eval-time expansion can apply
+            // filesystem matching. Quoted text (sq/dq) is never globbed.
+            if (t.flavor == .bare and containsGlobMeta(out)) {
+                break :blk Word.Part{ .glob = out };
+            }
+            break :blk Word.Part{ .text = out };
+        },
         .variable => |v| Word.Part{ .variable = try ctx.alloc.dupe(u8, v.name) },
         .var_braced => |v| Word.Part{ .var_braced = try ctx.alloc.dupe(u8, v.body) },
         .cmd_subst => |c| blk: {
@@ -57,6 +70,14 @@ fn lowerPart(
         },
         .glob => |g| Word.Part{ .glob = try ctx.alloc.dupe(u8, g.pattern) },
     };
+}
+
+fn containsGlobMeta(bytes: []const u8) bool {
+    for (bytes) |c| switch (c) {
+        '*', '?' => return true,
+        else => {},
+    };
+    return false;
 }
 
 fn canonicalizeText(bytes: []const u8, flavor: shape_mod.Flavor, alloc: Allocator) ![]const u8 {

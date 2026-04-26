@@ -28,10 +28,15 @@ pub const cover = diag.cover;
 pub const Flavor = enum { bare, single_quoted, double_quoted };
 
 pub const TextPart = struct {
-    /// Raw source slice, INCLUDING outer quotes if quoted.
-    /// Quote stripping and escape decoding happen at Word lowering.
+    /// Source slice. For `cooked = false`, bytes carry the original raw
+    /// form (including outer quotes when quoted) and Word lowering does
+    /// the quote-stripping/escape-decoding. For `cooked = true`, bytes
+    /// are already decoded and Word lowering uses them as-is. The dq
+    /// splitter emits cooked fragments with `flavor = .double_quoted`
+    /// so glob detection still sees them as quoted (no expansion).
     bytes: []const u8,
     flavor: Flavor,
+    cooked: bool = false,
     span: Span,
 };
 
@@ -1178,7 +1183,8 @@ fn splitDoubleQuoted(
     if (parts.items.len == 0) {
         try parts.append(alloc, .{ .text = .{
             .bytes = "",
-            .flavor = .bare,
+            .flavor = .double_quoted,
+            .cooked = true,
             .span = full_span,
         } });
     }
@@ -1202,7 +1208,8 @@ fn flushTextRun(
     };
     try parts.append(alloc, .{ .text = .{
         .bytes = cooked,
-        .flavor = .bare,
+        .flavor = .double_quoted,
+        .cooked = true,
         .span = part_span,
     } });
     text_buf.clearRetainingCapacity();

@@ -335,6 +335,65 @@ const cases: []const Case = &.{
         .source = "for outer in A B { for inner in 1 skip 2 { if test $inner = skip { continue }; echo $outer$inner } }",
         .expect = .{ .exit_code = 0, .stdout = "A1\nA2\nB1\nB2\n" },
     },
+
+    // ---- glob expansion (against a tmpfs fixture) ------------------------
+    //
+    // The harness pre-creates /tmp/slash-glob-fixture before the test run
+    // with a known set of files; these cases cd in and exercise globbing
+    // patterns. Hidden files require an explicit leading `.` in the
+    // pattern, no-match leaves the pattern literal, and quoted strings
+    // never glob.
+
+    .{
+        .name = "glob: simple star expands sorted",
+        .source = "cd /tmp/slash-glob-fixture && echo *.txt",
+        .expect = .{ .exit_code = 0, .stdout = "a.txt b.txt c.txt\n" },
+    },
+    .{
+        .name = "glob: question mark matches one byte",
+        .source = "cd /tmp/slash-glob-fixture && echo ?.txt",
+        .expect = .{ .exit_code = 0, .stdout = "a.txt b.txt c.txt\n" },
+    },
+    .{
+        .name = "glob: no match leaves pattern literal",
+        .source = "cd /tmp/slash-glob-fixture && echo *.nope",
+        .expect = .{ .exit_code = 0, .stdout = "*.nope\n" },
+    },
+    .{
+        .name = "glob: hidden files require explicit dot",
+        .source = "cd /tmp/slash-glob-fixture && echo *",
+        .expect = .{ .exit_code = 0, .stdout = "a.txt b.txt c.txt sub\n" },
+    },
+    .{
+        .name = "glob: explicit leading dot picks up hidden",
+        .source = "cd /tmp/slash-glob-fixture && echo .h*",
+        .expect = .{ .exit_code = 0, .stdout = ".hidden\n" },
+    },
+    .{
+        .name = "glob: quoted pattern is literal (no expansion)",
+        .source = "cd /tmp/slash-glob-fixture && echo '*.txt'",
+        .expect = .{ .exit_code = 0, .stdout = "*.txt\n" },
+    },
+    .{
+        .name = "glob: dq pattern is literal",
+        .source = "cd /tmp/slash-glob-fixture && echo \"*.txt\"",
+        .expect = .{ .exit_code = 0, .stdout = "*.txt\n" },
+    },
+    .{
+        .name = "glob: subdirectory pattern",
+        .source = "cd /tmp/slash-glob-fixture && echo sub/*.md",
+        .expect = .{ .exit_code = 0, .stdout = "sub/x.md sub/y.md\n" },
+    },
+    .{
+        .name = "glob: ** recursive descent",
+        .source = "cd /tmp/slash-glob-fixture && echo **/*.md",
+        .expect = .{ .exit_code = 0, .stdout = "sub/x.md sub/y.md\n" },
+    },
+    .{
+        .name = "glob: for loop iterates over matches",
+        .source = "cd /tmp/slash-glob-fixture && for f in *.txt { echo got $f }",
+        .expect = .{ .exit_code = 0, .stdout = "got a.txt\ngot b.txt\ngot c.txt\n" },
+    },
 };
 
 // =============================================================================
@@ -426,10 +485,62 @@ fn drainFd(alloc: std.mem.Allocator, fd: i32) ![]u8 {
 }
 
 // =============================================================================
+// Filesystem fixture (used by glob cases)
+// =============================================================================
+//
+// `setupGlobFixture` creates a known directory tree at
+// /tmp/slash-glob-fixture/ before the test run and removes it afterwards.
+// Built with raw POSIX so the test harness has no dependency on a Zig
+// `std.Io` instance.
+
+const fixture_root: [:0]const u8 = "/tmp/slash-glob-fixture";
+
+fn setupGlobFixture() void {
+    teardownGlobFixture();
+    _ = std.c.mkdir(fixture_root, 0o755);
+    writeFile("/tmp/slash-glob-fixture/a.txt", "a\n");
+    writeFile("/tmp/slash-glob-fixture/b.txt", "b\n");
+    writeFile("/tmp/slash-glob-fixture/c.txt", "c\n");
+    writeFile("/tmp/slash-glob-fixture/.hidden", "hidden\n");
+    _ = std.c.mkdir("/tmp/slash-glob-fixture/sub", 0o755);
+    writeFile("/tmp/slash-glob-fixture/sub/x.md", "x\n");
+    writeFile("/tmp/slash-glob-fixture/sub/y.md", "y\n");
+}
+
+fn writeFile(path: [:0]const u8, contents: []const u8) void {
+    const flags: std.c.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true };
+    const fd = std.c.open(path.ptr, flags, @as(std.c.mode_t, 0o644));
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+    var off: usize = 0;
+    while (off < contents.len) {
+        const n = std.c.write(fd, contents.ptr + off, contents.len - off);
+        if (n <= 0) break;
+        off += @intCast(n);
+    }
+}
+
+fn teardownGlobFixture() void {
+    // Best-effort recursive removal. Order matters because rmdir requires
+    // an empty directory; we unlink files first.
+    _ = std.c.unlink("/tmp/slash-glob-fixture/a.txt");
+    _ = std.c.unlink("/tmp/slash-glob-fixture/b.txt");
+    _ = std.c.unlink("/tmp/slash-glob-fixture/c.txt");
+    _ = std.c.unlink("/tmp/slash-glob-fixture/.hidden");
+    _ = std.c.unlink("/tmp/slash-glob-fixture/sub/x.md");
+    _ = std.c.unlink("/tmp/slash-glob-fixture/sub/y.md");
+    _ = std.c.rmdir("/tmp/slash-glob-fixture/sub");
+    _ = std.c.rmdir(fixture_root);
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
 test "headless v0" {
+    setupGlobFixture();
+    defer teardownGlobFixture();
+
     const alloc = std.testing.allocator;
     var failures: u32 = 0;
     for (cases) |case| {

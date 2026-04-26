@@ -792,8 +792,31 @@ fn expandWordToArgv(
             else => {},
         }
     }
+
+    // Per PLAN §7 Rule 9: words with at least one unquoted glob part
+    // expand against the filesystem; matches splice as N argv entries
+    // and a no-match leaves the literal pattern as one entry.
+    if (wordHasGlob(word)) {
+        const pattern = try expandWordToScalar(word, session, scratch, null);
+        const matches = try expandGlob(pattern, scratch);
+        if (matches.len == 0) {
+            try out.append(scratch, pattern);
+        } else {
+            for (matches) |m| try out.append(scratch, m);
+        }
+        return;
+    }
+
     const concat = try expandWordToScalar(word, session, scratch, null);
     try out.append(scratch, concat);
+}
+
+fn wordHasGlob(word: Word) bool {
+    for (word.parts) |p| switch (p) {
+        .glob => return true,
+        else => {},
+    };
+    return false;
 }
 
 fn lookupSpecial(name: []const u8, session: *Session, scratch: Allocator) !?[]const u8 {
@@ -1115,4 +1138,240 @@ fn captureProgramStdout(
     var end: usize = buf.items.len;
     while (end > 0 and (buf.items[end - 1] == '\n' or buf.items[end - 1] == '\r')) end -= 1;
     return scratch.dupe(u8, buf.items[0..end]);
+}
+
+// =============================================================================
+// Glob expansion
+// =============================================================================
+//
+// Pattern grammar (PLAN §7 Rule 9):
+//   `*`     — match any sequence of bytes that doesn't include `/`
+//   `?`     — match exactly one non-`/` byte
+//   `**/`   — recursive descent; matches zero or more path components
+//   `/`     — literal path separator
+//   anything else — literal byte match
+//
+// Hidden files (leading `.`) match only when the pattern's component
+// explicitly begins with `.`. Results are returned in lexicographic order;
+// no match leaves the literal pattern unchanged at the call site.
+
+fn expandGlob(pattern: []const u8, scratch: Allocator) ![][]const u8 {
+    if (pattern.len == 0) return &.{};
+
+    var matches = std.ArrayListUnmanaged([]const u8).empty;
+    defer matches.deinit(scratch);
+
+    // Anchor: an absolute pattern starts globbing from "/"; a relative
+    // pattern starts from cwd (encoded as ""). Tilde expansion is not
+    // applied here — that's a separate concern handled by builtins.
+    var start: usize = 0;
+    var anchor: []const u8 = "";
+    if (pattern[0] == '/') {
+        anchor = "/";
+        start = 1;
+    }
+
+    try globWalk(pattern[start..], anchor, scratch, &matches);
+
+    std.mem.sort([]const u8, matches.items, {}, lessThanString);
+    return matches.toOwnedSlice(scratch);
+}
+
+fn lessThanString(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+/// Walk one or more pattern components against `dir`. `pattern` is the
+/// remaining slash-separated components; `dir` is the path matched so far
+/// (empty string means cwd, "/" means root, otherwise absolute or
+/// relative prefix). Matched results are appended to `out`.
+fn globWalk(
+    pattern: []const u8,
+    dir: []const u8,
+    scratch: Allocator,
+    out: *std.ArrayListUnmanaged([]const u8),
+) anyerror!void {
+    if (pattern.len == 0) {
+        // Matched all components — accept the current directory.
+        if (dir.len > 0) try out.append(scratch, try scratch.dupe(u8, dir));
+        return;
+    }
+
+    // Slice off the next component.
+    const slash = std.mem.indexOfScalar(u8, pattern, '/') orelse pattern.len;
+    const head = pattern[0..slash];
+    const rest_after_slash: []const u8 = if (slash < pattern.len) pattern[slash + 1 ..] else "";
+    const has_more = slash < pattern.len;
+
+    // `**` — recursive descent.
+    if (std.mem.eql(u8, head, "**")) {
+        // Zero-descent: match `rest` directly against `dir`.
+        try globWalk(rest_after_slash, dir, scratch, out);
+        // One-or-more: descend into every subdirectory and recurse with
+        // the same `**/rest` pattern.
+        try recursiveDescend(pattern, dir, scratch, out);
+        return;
+    }
+
+    if (componentHasMeta(head)) {
+        try matchComponent(head, dir, has_more, rest_after_slash, scratch, out);
+        return;
+    }
+
+    // Literal component: extend the path; recurse if more components.
+    const child = try joinPath(scratch, dir, head);
+    defer scratch.free(child);
+
+    if (has_more) {
+        // Verify the child is actually a directory before descending.
+        if (!isDirectory(child)) return;
+        try globWalk(rest_after_slash, child, scratch, out);
+        return;
+    }
+
+    if (pathExists(child)) try out.append(scratch, try scratch.dupe(u8, child));
+}
+
+fn matchComponent(
+    head: []const u8,
+    dir: []const u8,
+    has_more: bool,
+    rest: []const u8,
+    scratch: Allocator,
+    out: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    const open_path = if (dir.len == 0) "." else dir;
+    const open_z = try scratch.dupeZ(u8, open_path);
+    defer scratch.free(open_z);
+
+    const dirp = std.c.opendir(open_z) orelse return;
+    defer _ = std.c.closedir(dirp);
+
+    while (true) {
+        const ent = std.c.readdir(dirp) orelse break;
+        const name = direntName(ent);
+        if (name.len == 0) continue;
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+        // Hidden files require an explicit leading `.` in the pattern.
+        if (name[0] == '.' and (head.len == 0 or head[0] != '.')) continue;
+        if (!fnmatchComponent(head, name)) continue;
+
+        const child = try joinPath(scratch, dir, name);
+        if (has_more) {
+            defer scratch.free(child);
+            if (!isDirectory(child)) continue;
+            try globWalk(rest, child, scratch, out);
+        } else {
+            try out.append(scratch, child);
+        }
+    }
+}
+
+fn recursiveDescend(
+    pattern_with_dblstar: []const u8,
+    dir: []const u8,
+    scratch: Allocator,
+    out: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    const open_path = if (dir.len == 0) "." else dir;
+    const open_z = try scratch.dupeZ(u8, open_path);
+    defer scratch.free(open_z);
+
+    const dirp = std.c.opendir(open_z) orelse return;
+    defer _ = std.c.closedir(dirp);
+
+    while (true) {
+        const ent = std.c.readdir(dirp) orelse break;
+        const name = direntName(ent);
+        if (name.len == 0) continue;
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+        // `**` does not enter dotfile-named subtrees.
+        if (name[0] == '.') continue;
+
+        const child = try joinPath(scratch, dir, name);
+        defer scratch.free(child);
+        if (!isDirectory(child)) continue;
+        try globWalk(pattern_with_dblstar, child, scratch, out);
+    }
+}
+
+/// Read a directory entry's name as a slice. Different platforms expose
+/// the field differently — some carry a `namlen`, others NUL-terminate.
+fn direntName(ent: anytype) []const u8 {
+    const T = @TypeOf(ent.*);
+    if (@hasField(T, "namlen")) {
+        const len: usize = ent.namlen;
+        return ent.name[0..len];
+    }
+    const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+    return std.mem.span(name_ptr);
+}
+
+fn componentHasMeta(c: []const u8) bool {
+    for (c) |b| switch (b) {
+        '*', '?' => return true,
+        else => {},
+    };
+    return false;
+}
+
+/// Match a single path component against a single pattern (no `/` in
+/// either). Recursive backtrack on `*`; `?` matches exactly one byte.
+fn fnmatchComponent(pattern: []const u8, name: []const u8) bool {
+    return matchAt(pattern, 0, name, 0);
+}
+
+fn matchAt(p: []const u8, pi: usize, n: []const u8, ni: usize) bool {
+    var i = pi;
+    var j = ni;
+    while (i < p.len) {
+        const pc = p[i];
+        if (pc == '*') {
+            // Collapse runs of `*`.
+            while (i < p.len and p[i] == '*') i += 1;
+            if (i == p.len) return true;
+            var k = j;
+            while (k <= n.len) : (k += 1) {
+                if (matchAt(p, i, n, k)) return true;
+            }
+            return false;
+        }
+        if (j >= n.len) return false;
+        if (pc == '?') {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        if (pc != n[j]) return false;
+        i += 1;
+        j += 1;
+    }
+    return j == n.len;
+}
+
+fn joinPath(scratch: Allocator, dir: []const u8, name: []const u8) ![]u8 {
+    if (dir.len == 0) return scratch.dupe(u8, name);
+    if (std.mem.eql(u8, dir, "/")) return std.fmt.allocPrint(scratch, "/{s}", .{name});
+    return std.fmt.allocPrint(scratch, "{s}/{s}", .{ dir, name });
+}
+
+fn pathExists(path: []const u8) bool {
+    var buf: [4096]u8 = undefined;
+    if (path.len >= buf.len) return false;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    const path_z: [*:0]const u8 = @ptrCast(&buf);
+    var st: std.c.Stat = undefined;
+    return std.c.fstatat(std.c.AT.FDCWD, path_z, &st, 0) == 0;
+}
+
+fn isDirectory(path: []const u8) bool {
+    var buf: [4096]u8 = undefined;
+    if (path.len >= buf.len) return false;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    const path_z: [*:0]const u8 = @ptrCast(&buf);
+    var st: std.c.Stat = undefined;
+    if (std.c.fstatat(std.c.AT.FDCWD, path_z, &st, 0) != 0) return false;
+    return (st.mode & std.c.S.IFMT) == std.c.S.IFDIR;
 }
