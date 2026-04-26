@@ -626,6 +626,7 @@ fn runExternalSingle(
     var pids = [_]exec.Pid{pid};
     try session.jobs.setProcesses(j, pid, &pids);
     try job.service(&session.jobs, .foreground, j);
+    session.drainProcSubs();
     const result: Result = j.result orelse Result{ .exited = 1 };
     return .{ .job = j, .expression_result = result };
 }
@@ -709,6 +710,7 @@ fn evalPipeline(
     const j = try session.jobs.create(true, false, "<pipeline>");
     try session.jobs.setProcesses(j, leader_pgid, pids);
     try job.service(&session.jobs, .foreground, j);
+    session.drainProcSubs();
     const result: Result = j.result orelse Result{ .exited = 1 };
     return .{ .job = j, .expression_result = result };
 }
@@ -1283,6 +1285,12 @@ fn appendPartScalar(
                 try buf.appendSlice(scratch, f);
                 first = false;
             }
+        },
+        .proc_subst => |ps| {
+            // Materialize the substitution: spawn the side child and
+            // write the resulting `/dev/fd/N` path into the buffer.
+            const path = try spawnProcSubst(ps.dir, ps.body, session, scratch);
+            try buf.appendSlice(scratch, path);
         },
         .glob => |pat| try buf.appendSlice(scratch, pat),
     }
@@ -1882,6 +1890,103 @@ fn splitNewlineFields(scratch: Allocator, text: []const u8) ![][]const u8 {
         _ = fields.pop();
     }
     return fields.toOwnedSlice(scratch);
+}
+
+// =============================================================================
+// Process substitution
+// =============================================================================
+//
+// `<(prog)` materializes as `/dev/fd/N` where N is a pipe read fd
+// connected to a forked child whose stdout writes to the corresponding
+// write end. `>(prog)` is the mirror — child reads stdin from a pipe
+// whose write fd we hand back as `/dev/fd/N`.
+//
+// The fd stays open for the parent's lifetime (so the main exec'd
+// child inherits it via fork+exec); the child is reaped opportunistically
+// at the next `service .poll`. PLAN §7 Rule 25 commits to job-owned
+// cleanup; the current implementation relies on standard Unix EOF
+// propagation (close → SIGPIPE → child exits) plus the reap loop.
+
+fn spawnProcSubst(
+    dir: shape_mod.ProcSubstDir,
+    inner: *const program_mod.Program,
+    session: *Session,
+    scratch: Allocator,
+) ![]const u8 {
+    const fds = try exec.makePipe();
+
+    const rc = std.c.fork();
+    if (rc < 0) {
+        exec.closeFd(fds[0]);
+        exec.closeFd(fds[1]);
+        return error.ForkFailed;
+    }
+
+    if (rc == 0) {
+        // Child path. Wire stdout (`<(...)`) or stdin (`>(...)`) to the
+        // pipe end the parent will hand off as `/dev/fd/N`, reset
+        // signal dispositions, then run the body and exit with its
+        // status. Errors here `_exit` with a deterministic code.
+        _ = std.c.setpgid(0, 0);
+        var sa: std.posix.Sigaction = .{
+            .handler = .{ .handler = std.c.SIG.DFL },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        const defaults = [_]std.c.SIG{ .INT, .QUIT, .TSTP, .TTIN, .TTOU, .PIPE, .CHLD, .HUP };
+        for (defaults) |sig| std.posix.sigaction(sig, &sa, null);
+
+        switch (dir) {
+            .input => {
+                // `<(prog)`: prog's stdout → write end; parent reads.
+                _ = std.c.close(fds[0]);
+                _ = std.c.dup2(fds[1], 1);
+                _ = std.c.close(fds[1]);
+            },
+            .output => {
+                // `>(prog)`: prog's stdin ← read end; parent writes.
+                _ = std.c.close(fds[1]);
+                _ = std.c.dup2(fds[0], 0);
+                _ = std.c.close(fds[0]);
+            },
+        }
+
+        const outcome = evalProgram(inner, session, .{
+            .in_child_context = true,
+            .scratch = scratch,
+        }, null) catch {
+            exec._exit(127);
+        };
+        exec._exit(outcome.expression_result.toStatusByte());
+    }
+
+    // Parent: close the end the child uses, keep the other end open
+    // for `/dev/fd/N` referencing. The child's pid is recorded so the
+    // session can reap it at a safe point.
+    const pid: exec.Pid = @intCast(rc);
+    _ = std.c.setpgid(pid, pid);
+    const parent_fd: exec.Fd = switch (dir) {
+        .input => blk: {
+            exec.closeFd(fds[1]);
+            break :blk fds[0];
+        },
+        .output => blk: {
+            exec.closeFd(fds[0]);
+            break :blk fds[1];
+        },
+    };
+    // The exec'd child needs to inherit `parent_fd` across `execve`
+    // so `/dev/fd/N` resolves; strip CLOEXEC the makePipe set.
+    exec.clearCloexec(parent_fd);
+
+    // Track for cleanup: the parent has to close its end after the
+    // foreground command finishes so a `>(...)` reader sees EOF and
+    // any leftover side children get reaped.
+    try session.proc_subs.append(session.alloc, .{ .parent_fd = parent_fd, .pid = pid });
+
+    // `/dev/fd/N` works on Linux and macOS. The exec'd child opens it
+    // and gets a reference to the inherited fd.
+    return std.fmt.allocPrint(scratch, "/dev/fd/{d}", .{parent_fd});
 }
 
 // =============================================================================

@@ -34,8 +34,17 @@ pub const Word = struct {
         /// and each non-empty field becomes one argv entry. The
         /// distinct surface form keeps `$(...)` honest as a scalar form.
         list_capture: *const program_mod.Program,
+        /// Process substitution. Materializes as `/dev/fd/N` at
+        /// expansion time; the inner program runs as a side child
+        /// connected to that fd (PLAN §6.2 / §7 Rule 25).
+        proc_subst: ProcSubst,
         /// Glob pattern from an unquoted bare word containing `*`/`?`/`[...]`.
         glob: []const u8,
+    };
+
+    pub const ProcSubst = struct {
+        dir: shape_mod.ProcSubstDir,
+        body: *const program_mod.Program,
     };
 
     pub const VarBraced = struct {
@@ -83,6 +92,10 @@ fn lowerPart(
         .list_capture => |c| blk: {
             const inner = try program_mod.lower(c.body.*, ctx, null);
             break :blk Word.Part{ .list_capture = inner };
+        },
+        .proc_subst => |ps| blk: {
+            const inner = try program_mod.lower(ps.body.*, ctx, null);
+            break :blk Word.Part{ .proc_subst = .{ .dir = ps.dir, .body = inner } };
         },
         .glob => |g| Word.Part{ .glob = try ctx.alloc.dupe(u8, g.pattern) },
     };

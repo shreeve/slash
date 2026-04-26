@@ -34,6 +34,10 @@ tokens
     dollar_paren    # $( opens a command substitution
     at_paren        # @( opens a list capture (newline-split scalar)
 
+    # Process substitution
+    proc_sub_in     # <( opens a process substitution producing input
+    proc_sub_out    # >( opens a process substitution accepting output
+
     # Grouping
     lparen          # (
     rparen          # )
@@ -96,6 +100,10 @@ tokens
 # Heredoc open sigils (longer pattern — matched before single `<`).
 '<' '<' "'" [A-Za-z_] [A-Za-z0-9_]* "'"         → heredoc_open_lit
 '<' '<' [A-Za-z_] [A-Za-z0-9_]*                 → heredoc_open
+
+# Process substitution sigils (also matched before single `<` / `>`).
+"<("                                            → proc_sub_in,  {paren++}
+">("                                            → proc_sub_out, {paren++}
 
 # fd-prefixed compound operators
 [0-9]+ '>' '&' [0-9]+                           → fd_dup_out
@@ -265,6 +273,8 @@ leading_word    = IDENT                                 → (word 1)
                 | VAR_BRACED                            → (var_braced 1)
                 | DOLLAR_PAREN sequence RPAREN          → (cmd_subst 2)
                 | AT_PAREN     sequence RPAREN          → (list_capture 2)
+                | PROC_SUB_IN  sequence RPAREN          → (proc_sub_in 2)
+                | PROC_SUB_OUT sequence RPAREN          → (proc_sub_out 2)
 
 word_atom       = leading_word
                 | NAME_EQ                               → (word 1)

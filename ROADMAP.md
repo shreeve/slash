@@ -107,16 +107,8 @@ collapsing the cursor.
 
 
 
-### 7. Process substitution `<(...)` / `>(...)`
 
-PLAN §6.2 documents. Implementation:
-- Lexer adds `proc_sub_in` (`<(`) and `proc_sub_out` (`>(`) tokens
-- Word part variants: `process_subst_in`, `process_subst_out`
-- Eval forks a child for each, opens `/dev/fd/N` (Linux) or named-pipe
-  (BSD/macOS) bindings, threads the path into the parent's argv
-- Job-owned cleanup on every termination path (PLAN §7 Rule 25)
-
-### 8. Configuration loading
+### 7. Configuration loading
 
 `~/.slashrc` is sourced at interactive shell startup. That's the entire
 mechanism. No `~/.slash/config` file format, no `set` runtime config
@@ -142,7 +134,7 @@ This work depends on partial-Shape support for incomplete input (REPL
 continuation prompt) and benefits from Tier 3 #3 (real
 diagnostics).
 
-### 9. Live syntax highlighting
+### 8. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -157,7 +149,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 10. Multi-line continuation
+### 9. Multi-line continuation
 
 If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
 heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
@@ -173,7 +165,7 @@ if test -d /tmp {
 We know exactly when they're inside the block (open `{` on stack) and
 when the statement is complete (matched `}` and shape is well-formed).
 
-### 11. Tab completion via Shape introspection
+### 10. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -186,7 +178,7 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 12. History
+### 11. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -199,12 +191,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 13. Bracket matching
+### 12. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 14. Prompt
+### 13. Prompt
 
 Default is minimal but useful:
 
@@ -222,7 +214,7 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 15. Implementation foundation
+### 14. Implementation foundation
 
 The REPL is one new module — `src/repl.zig`, ~600-800 lines.
 Dependencies:

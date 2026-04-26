@@ -854,6 +854,33 @@ const cases: []const Case = &.{
         .source = "trap 'echo trap=$x' EXIT; x=outer; echo before",
         .expect = .{ .exit_code = 0, .stdout = "before\ntrap=outer\n" },
     },
+
+    // ---- process substitution -------------------------------------------
+    //
+    // `<(prog)` materializes as `/dev/fd/N` reading from prog's stdout;
+    // `>(prog)` does the mirror image. The tests use coreutils `cat`,
+    // `diff`, and `wc` to keep the assertions hermetic.
+
+    .{
+        .name = "proc-sub: `<(cmd)` feeds stdout to a reader",
+        .source = "/bin/cat <(/bin/echo hello-from-subst)",
+        .expect = .{ .exit_code = 0, .stdout = "hello-from-subst\n" },
+    },
+    .{
+        .name = "proc-sub: two `<(...)` feeds compare equal",
+        .source = "/usr/bin/diff <(/bin/echo a) <(/bin/echo a) && echo same",
+        .expect = .{ .exit_code = 0, .stdout = "same\n" },
+    },
+    .{
+        .name = "proc-sub: `>(cmd)` accepts stdin via a /dev/fd path",
+        .source = "/bin/echo data > >(/usr/bin/wc -c)",
+        .expect = .{ .exit_code = 0, .stdout = "5", .stdout_contains = true },
+    },
+    .{
+        .name = "proc-sub: nested under @(...)",
+        .source = "for x in @(/bin/cat <(/usr/bin/printf '1\\n2\\n3\\n')) { echo got=$x }",
+        .expect = .{ .exit_code = 0, .stdout = "got=1\ngot=2\ngot=3\n" },
+    },
 };
 
 // =============================================================================

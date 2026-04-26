@@ -205,6 +205,16 @@ fn setCloexec(fd: Fd) void {
     _ = std.c.fcntl(fd, std.c.F.SETFD, flags | std.c.FD_CLOEXEC);
 }
 
+/// Drop FD_CLOEXEC on a fd so it survives `execve`. Process
+/// substitution needs this for the pipe end the user-named child
+/// will inherit; pipeline plumbing keeps CLOEXEC because those ends
+/// are only for the immediate child.
+pub fn clearCloexec(fd: Fd) void {
+    const flags = std.c.fcntl(fd, std.c.F.GETFD);
+    if (flags < 0) return;
+    _ = std.c.fcntl(fd, std.c.F.SETFD, flags & ~@as(c_int, std.c.FD_CLOEXEC));
+}
+
 pub fn closeFd(fd: Fd) void {
     _ = std.c.close(fd);
 }

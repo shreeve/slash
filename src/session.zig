@@ -9,6 +9,11 @@ const program_mod = @import("program.zig");
 
 pub const Allocator = std.mem.Allocator;
 
+pub const ProcSubEntry = struct {
+    parent_fd: i32,
+    pid: i32,
+};
+
 /// Tabulated signals supported by `trap`. The values are sequential
 /// (0..N) because the trap table indexes by `@intFromEnum`; the mapping
 /// to POSIX signal numbers lives in `builtins.sigToCSig`.
@@ -195,6 +200,12 @@ pub const Session = struct {
     exit_request: ?runtime.Result,
     /// Last command's exit status (for `$?`).
     last_status: u8,
+    /// Process-substitution side children whose pipe ends the parent
+    /// is holding open until the foreground command exits. Each
+    /// entry's fd is closed and its child reaped at the next safe
+    /// point (typically right after the foreground job completes, or
+    /// in `Session.deinit` for any stragglers).
+    proc_subs: std.ArrayListUnmanaged(ProcSubEntry) = .empty,
     /// PATH lookup memoization. Keys and values are owned by `alloc`.
     /// `path_cache_signature` is a dup'd snapshot of `$PATH` at the time
     /// the cache was last validated; on mismatch the cache is dropped
@@ -223,6 +234,8 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
+        self.drainProcSubs();
+        self.proc_subs.deinit(self.alloc);
         self.jobs.deinit();
         self.builtins.deinit(self.alloc);
         self.vars.deinit();
@@ -231,6 +244,22 @@ pub const Session = struct {
         self.clearPathCache();
         self.path_cache.deinit(self.alloc);
         if (self.path_cache_signature) |sig| self.alloc.free(sig);
+    }
+
+    /// Close every pending proc-sub fd and reap the side children.
+    /// Closing the parent's end is what lets a `>(...)` reader see
+    /// EOF, so this is called right after the foreground job for a
+    /// command finishes (PLAN §7 Rule 25).
+    pub fn drainProcSubs(self: *Session) void {
+        for (self.proc_subs.items) |entry| {
+            _ = std.c.close(entry.parent_fd);
+            // Best-effort reap; the side child has typically already
+            // exited by the time we get here, but a stuck child won't
+            // wedge the parent — `WNOHANG` returns immediately.
+            var status: c_int = 0;
+            _ = std.c.waitpid(entry.pid, &status, std.c.W.NOHANG);
+        }
+        self.proc_subs.clearRetainingCapacity();
     }
 
     /// Free every cached entry but leave the table allocated.

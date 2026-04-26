@@ -69,6 +69,17 @@ pub const ListCapturePart = struct {
     span: Span,
 };
 
+pub const ProcSubstDir = enum { input, output };
+
+pub const ProcSubstPart = struct {
+    /// `<(...)` produces input (its stdout reads from a pipe whose
+    /// path is the argv element); `>(...)` consumes output the
+    /// other way.
+    dir: ProcSubstDir,
+    body: *const Shape,
+    span: Span,
+};
+
 pub const GlobPart = struct {
     /// The pattern as written (e.g. `*.txt`). Recovered from a bare
     /// text part containing unquoted glob metacharacters during Word
@@ -83,6 +94,7 @@ pub const WordPartShape = union(enum) {
     var_braced: VarBracedPart,
     cmd_subst: CmdSubstPart,
     list_capture: ListCapturePart,
+    proc_subst: ProcSubstPart,
     glob: GlobPart,
 };
 
@@ -1011,6 +1023,8 @@ fn convertWordOrAtomToWord(
         .var_braced => try convertVarBracedAtom(alloc, source, items, sink),
         .cmd_subst => try convertCmdSubstAtom(alloc, source, items, sink),
         .list_capture => try convertListCaptureAtom(alloc, source, items, sink),
+        .proc_sub_in => try convertProcSubAtom(alloc, source, items, .input, sink),
+        .proc_sub_out => try convertProcSubAtom(alloc, source, items, .output, sink),
         else => {
             try emitBadShape(source, sexp, sink, "expected word_atom variant");
             return error.InvalidShape;
@@ -1458,6 +1472,27 @@ fn convertListCaptureAtom(
     return .{ .parts = parts, .span = span };
 }
 
+fn convertProcSubAtom(
+    alloc: Allocator,
+    source: Source,
+    items: []const parser.Sexp,
+    dir: ProcSubstDir,
+    sink: ?Sink,
+) anyerror!WordShape {
+    if (items.len != 2) {
+        try emitBadShape(source, items[0], sink, "proc_subst expects one body");
+        return error.InvalidShape;
+    }
+    const body = try convertShape(alloc, source, items[1], sink);
+    const body_span = body.span();
+    const body_ptr = try alloc.create(Shape);
+    body_ptr.* = body;
+    const span = body_span;
+    const parts = try alloc.alloc(WordPartShape, 1);
+    parts[0] = .{ .proc_subst = .{ .dir = dir, .body = body_ptr, .span = span } };
+    return .{ .parts = parts, .span = span };
+}
+
 // ---- redirects --------------------------------------------------------------
 
 fn convertRedirect(
@@ -1571,7 +1606,7 @@ fn computeHeredocDedentCol(source: []const u8, body_end: u32) u32 {
 
 fn isWordAtomTag(tag: slash.Tag) bool {
     return switch (tag) {
-        .word, .@"var", .var_braced, .cmd_subst, .list_capture => true,
+        .word, .@"var", .var_braced, .cmd_subst, .list_capture, .proc_sub_in, .proc_sub_out => true,
         else => false,
     };
 }
@@ -1724,6 +1759,7 @@ fn dumpPartInline(part: WordPartShape, w: *Writer) WriteError!void {
         .var_braced => |v| try w.print("  var_braced {s}\n", .{v.body}),
         .cmd_subst => try w.writeAll("  cmd_subst <body>\n"),
         .list_capture => try w.writeAll("  list_capture <body>\n"),
+        .proc_subst => |ps| try w.print("  proc_subst {s} <body>\n", .{@tagName(ps.dir)}),
         .glob => |g| try w.print("  glob {s}\n", .{g.pattern}),
     }
 }
@@ -1768,6 +1804,7 @@ fn dumpWordParts(ws: WordShape, depth: u32, w: *Writer) WriteError!void {
             .var_braced => |v| try w.print("var_braced {s}\n", .{v.body}),
             .cmd_subst => try w.writeAll("cmd_subst\n"),
             .list_capture => try w.writeAll("list_capture\n"),
+            .proc_subst => |ps| try w.print("proc_subst {s}\n", .{@tagName(ps.dir)}),
             .glob => |g| try w.print("glob {s}\n", .{g.pattern}),
         }
     }

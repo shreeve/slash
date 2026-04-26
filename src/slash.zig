@@ -50,6 +50,8 @@ pub const Tag = enum(u8) {
     var_braced,
     cmd_subst,
     list_capture,
+    proc_sub_in,
+    proc_sub_out,
     scalar,
     list,
     words,

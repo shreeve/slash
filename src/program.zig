@@ -588,6 +588,10 @@ fn cloneWordPart(part: Word.Part, alloc: Allocator) !Word.Part {
         },
         .cmd_subst => |inner| Word.Part{ .cmd_subst = try clone(inner, alloc) },
         .list_capture => |inner| Word.Part{ .list_capture = try clone(inner, alloc) },
+        .proc_subst => |ps| Word.Part{ .proc_subst = .{
+            .dir = ps.dir,
+            .body = try clone(ps.body, alloc),
+        } },
         .glob => |g| Word.Part{ .glob = try alloc.dupe(u8, g) },
     };
 }
@@ -692,6 +696,7 @@ fn dumpWordParts(word: Word, depth: u32, w: *Writer) WriteError!void {
             },
             .cmd_subst => try w.writeAll("cmd_subst\n"),
             .list_capture => try w.writeAll("list_capture\n"),
+            .proc_subst => |ps| try w.print("proc_subst {s}\n", .{@tagName(ps.dir)}),
             .glob => |pat| try w.print("glob {s}\n", .{pat}),
         }
     }
