@@ -35,26 +35,13 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 2. Tab completion via Shape introspection
 
-| Cursor position | Completions |
-|---|---|
-| Start of statement / first word of command | builtins ∪ PATH ∪ user-defined `cmd`s |
-| `$` token | session variables |
-| After `cd` | directories only |
-| After `export` | existing var names |
-| After redirect operator (`>`, `<`, `2>`) | files |
-| Default argument position | files in current dir, dirs first |
-
-The parser tells us *which* of these we're in. No regex hacks.
-
-
-### 3. Bracket matching
+### 2. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 4. Prompt
+### 3. Prompt
 
 Default is minimal but useful:
 

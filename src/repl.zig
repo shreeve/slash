@@ -263,6 +263,9 @@ fn readLine(
                 _ = std.c.write(1, "\x1b[H\x1b[2J", 7);
                 try editor.render();
             },
+            0x09 => { // Tab — completion
+                try handleTabCompletion(alloc, &editor);
+            },
             0x1b => {
                 // Escape sequence (arrow keys, etc.)
                 var seq: [4]u8 = undefined;
@@ -403,6 +406,243 @@ const LineEditor = struct {
 
 fn isSpace(c: u8) bool {
     return c == ' ' or c == '\t';
+}
+
+// =============================================================================
+// Tab completion
+// =============================================================================
+//
+// Two contexts:
+//   - command position: prefix is the first word on the line (or right
+//     after `;`, `&&`, `||`, `|`, `(`, `{`). Candidates: PATH executables
+//     plus the small set of always-available names slash recognizes
+//     (builtins land elsewhere; the binary doesn't currently expose a
+//     `BuiltinSet` enumerator, so for v0 we just complete against PATH
+//     and let the user lean on `type` for builtin discovery).
+//   - argument position: prefix is everything after the most recent
+//     space; candidates are filesystem entries matching the prefix.
+//
+// On a single match: insert the remainder plus a trailing `/` (dir) or
+// space (file). On multiple matches: emit a fresh line of candidates
+// and redraw the editor.
+
+fn handleTabCompletion(alloc: Allocator, editor: *LineEditor) !void {
+    const ctx = identifyCompletionContext(editor.buf.items, editor.cursor);
+
+    var candidates = std.ArrayListUnmanaged([]u8).empty;
+    defer {
+        for (candidates.items) |c| alloc.free(c);
+        candidates.deinit(alloc);
+    }
+
+    switch (ctx.kind) {
+        .command => try gatherCommandCandidates(alloc, ctx.prefix, &candidates),
+        .file => try gatherFileCandidates(alloc, ctx.prefix, &candidates),
+    }
+
+    if (candidates.items.len == 0) return;
+
+    if (candidates.items.len == 1) {
+        const match = candidates.items[0];
+        const suffix = match[ctx.prefix.len..];
+        for (suffix) |c| try editor.insert(c);
+        // Add `/` for directories, space otherwise — for command
+        // candidates the trailing space lands the user in argv space.
+        const last = match[match.len - 1];
+        if (last != '/') try editor.insert(' ');
+        try editor.render();
+        return;
+    }
+
+    // Multiple matches: print them, then redraw the editor.
+    _ = std.c.write(1, "\r\n", 2);
+    for (candidates.items, 0..) |c, i| {
+        _ = std.c.write(1, c.ptr, c.len);
+        if (i + 1 < candidates.items.len) _ = std.c.write(1, "  ", 2);
+    }
+    _ = std.c.write(1, "\r\n", 2);
+    try editor.render();
+
+    // If the candidates share a common prefix longer than the user's
+    // current prefix, insert the shared portion to bring the user
+    // closer to a unique match.
+    const common = longestCommonPrefix(candidates.items);
+    if (common.len > ctx.prefix.len) {
+        const extra = common[ctx.prefix.len..];
+        for (extra) |c| try editor.insert(c);
+        try editor.render();
+    }
+}
+
+const CompletionKind = enum { command, file };
+
+const CompletionContext = struct {
+    kind: CompletionKind,
+    /// Bytes of the partial token under the cursor (everything from the
+    /// last whitespace / separator up to the cursor).
+    prefix: []const u8,
+};
+
+fn identifyCompletionContext(buf: []const u8, cursor: u32) CompletionContext {
+    // Walk back to find the start of the current token.
+    var token_start: u32 = cursor;
+    while (token_start > 0) {
+        const c = buf[token_start - 1];
+        if (isSpace(c) or c == '|' or c == ';' or c == '&' or c == '(' or c == '{') break;
+        token_start -= 1;
+    }
+    const prefix = buf[token_start..cursor];
+
+    // Walk back further from token_start across whitespace to look at
+    // what came before. If we hit a separator (or beginning of buffer),
+    // we're at command position.
+    var p = token_start;
+    while (p > 0 and isSpace(buf[p - 1])) p -= 1;
+    if (p == 0) return .{ .kind = .command, .prefix = prefix };
+    const prev = buf[p - 1];
+    if (prev == ';' or prev == '|' or prev == '&' or prev == '(' or prev == '{') {
+        return .{ .kind = .command, .prefix = prefix };
+    }
+    return .{ .kind = .file, .prefix = prefix };
+}
+
+fn gatherCommandCandidates(
+    alloc: Allocator,
+    prefix: []const u8,
+    out: *std.ArrayListUnmanaged([]u8),
+) !void {
+    const path_env = std.c.getenv("PATH") orelse return;
+    const path_str = std.mem.span(path_env);
+
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer {
+        var it = seen.iterator();
+        while (it.next()) |e| alloc.free(e.key_ptr.*);
+        seen.deinit(alloc);
+    }
+
+    var dirs = std.mem.splitScalar(u8, path_str, ':');
+    while (dirs.next()) |dir| {
+        if (dir.len == 0) continue;
+        try enumerateMatching(alloc, dir, prefix, out, &seen, .require_executable);
+    }
+}
+
+fn gatherFileCandidates(
+    alloc: Allocator,
+    prefix: []const u8,
+    out: *std.ArrayListUnmanaged([]u8),
+) !void {
+    // Split into directory + basename.
+    const slash_idx = std.mem.lastIndexOfScalar(u8, prefix, '/');
+    const dir_part: []const u8 = if (slash_idx) |i| prefix[0 .. i + 1] else "";
+    const base_part: []const u8 = if (slash_idx) |i| prefix[i + 1 ..] else prefix;
+    const dir_path: []const u8 = if (dir_part.len == 0) "." else dir_part;
+
+    var seen = std.StringHashMapUnmanaged(void){};
+    defer {
+        var it = seen.iterator();
+        while (it.next()) |e| alloc.free(e.key_ptr.*);
+        seen.deinit(alloc);
+    }
+
+    try enumerateMatching(alloc, dir_path, base_part, out, &seen, .any);
+
+    // Re-attach the directory part to each candidate.
+    if (dir_part.len > 0) {
+        for (out.items) |*cand| {
+            const old = cand.*;
+            const combined = try std.fmt.allocPrint(alloc, "{s}{s}", .{ dir_part, old });
+            alloc.free(old);
+            cand.* = combined;
+        }
+    }
+}
+
+const EnumerateMode = enum { any, require_executable };
+
+fn enumerateMatching(
+    alloc: Allocator,
+    dir_path: []const u8,
+    prefix: []const u8,
+    out: *std.ArrayListUnmanaged([]u8),
+    seen: *std.StringHashMapUnmanaged(void),
+    mode: EnumerateMode,
+) !void {
+    var dir_buf: [4096]u8 = undefined;
+    if (dir_path.len >= dir_buf.len) return;
+    @memcpy(dir_buf[0..dir_path.len], dir_path);
+    dir_buf[dir_path.len] = 0;
+    const dir_z: [*:0]const u8 = @ptrCast(&dir_buf);
+
+    const dirp = std.c.opendir(dir_z) orelse return;
+    defer _ = std.c.closedir(dirp);
+
+    while (true) {
+        const ent = std.c.readdir(dirp) orelse break;
+        const name = direntName(ent);
+        if (name.len == 0) continue;
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+        // Hidden files only if the prefix asks for them explicitly.
+        if (name[0] == '.' and (prefix.len == 0 or prefix[0] != '.')) continue;
+        if (!std.mem.startsWith(u8, name, prefix)) continue;
+
+        // For command candidates, require X_OK on the full path.
+        if (mode == .require_executable) {
+            var full_buf: [8192]u8 = undefined;
+            const full = std.fmt.bufPrint(&full_buf, "{s}/{s}\x00", .{ dir_path, name }) catch continue;
+            const full_z: [*:0]const u8 = @ptrCast(full.ptr);
+            if (std.c.access(full_z, std.c.X_OK) != 0) continue;
+        }
+
+        // Dedup by name (per-prefix; cross-PATH-dir dups are merged).
+        const key = try alloc.dupe(u8, name);
+        const gop = try seen.getOrPut(alloc, key);
+        if (gop.found_existing) {
+            alloc.free(key);
+            continue;
+        }
+
+        // For file candidates that are directories, decorate with `/`.
+        var label_buf: [4096]u8 = undefined;
+        var label = name;
+        if (mode == .any) {
+            var path_buf: [8192]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "{s}/{s}\x00", .{ dir_path, name }) catch name;
+            const path_z: [*:0]const u8 = @ptrCast(path.ptr);
+            var st: std.c.Stat = undefined;
+            if (std.c.fstatat(std.c.AT.FDCWD, path_z, &st, 0) == 0 and
+                (st.mode & std.c.S.IFMT) == std.c.S.IFDIR)
+            {
+                const decorated = std.fmt.bufPrint(&label_buf, "{s}/", .{name}) catch name;
+                label = decorated;
+            }
+        }
+        try out.append(alloc, try alloc.dupe(u8, label));
+    }
+}
+
+fn direntName(ent: anytype) []const u8 {
+    const T = @TypeOf(ent.*);
+    if (@hasField(T, "namlen")) {
+        const len: usize = ent.namlen;
+        return ent.name[0..len];
+    }
+    const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+    return std.mem.span(name_ptr);
+}
+
+fn longestCommonPrefix(items: []const []u8) []const u8 {
+    if (items.len == 0) return "";
+    var n: usize = items[0].len;
+    for (items[1..]) |s| {
+        const m = @min(n, s.len);
+        var i: usize = 0;
+        while (i < m and items[0][i] == s[i]) : (i += 1) {}
+        n = i;
+        if (n == 0) break;
+    }
+    return items[0][0..n];
 }
 
 // -----------------------------------------------------------------------------
