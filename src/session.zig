@@ -24,6 +24,12 @@ pub const Session = struct {
     exit_request: ?runtime.Result,
     /// Last command's exit status (for `$?`).
     last_status: u8,
+    /// PATH lookup memoization. Keys and values are owned by `alloc`.
+    /// `path_cache_signature` is a dup'd snapshot of `$PATH` at the time
+    /// the cache was last validated; on mismatch the cache is dropped
+    /// before any lookup.
+    path_cache: std.StringHashMapUnmanaged([]const u8) = .empty,
+    path_cache_signature: ?[]const u8 = null,
 
     pub fn init(
         alloc: Allocator,
@@ -47,6 +53,44 @@ pub const Session = struct {
         self.jobs.deinit();
         self.builtins.deinit(self.alloc);
         self.vars.deinit();
+        self.clearPathCache();
+        self.path_cache.deinit(self.alloc);
+        if (self.path_cache_signature) |sig| self.alloc.free(sig);
+    }
+
+    /// Free every cached entry but leave the table allocated.
+    pub fn clearPathCache(self: *Session) void {
+        var it = self.path_cache.iterator();
+        while (it.next()) |e| {
+            self.alloc.free(e.key_ptr.*);
+            self.alloc.free(e.value_ptr.*);
+        }
+        self.path_cache.clearRetainingCapacity();
+    }
+
+    /// Drop the cache if `$PATH` has changed since the last validation.
+    /// Returns the live `$PATH` slice (or `null` if PATH is unset). The
+    /// returned slice is borrowed from the C runtime and is only valid
+    /// until the next env mutation.
+    pub fn refreshPathSignature(self: *Session) ?[]const u8 {
+        const env = std.c.getenv("PATH") orelse {
+            if (self.path_cache_signature != null) {
+                self.alloc.free(self.path_cache_signature.?);
+                self.path_cache_signature = null;
+                self.clearPathCache();
+            }
+            return null;
+        };
+        const live = std.mem.span(env);
+        if (self.path_cache_signature) |sig| {
+            if (std.mem.eql(u8, sig, live)) return live;
+            self.alloc.free(sig);
+            self.path_cache_signature = null;
+            self.clearPathCache();
+        }
+        const dup = self.alloc.dupe(u8, live) catch return live;
+        self.path_cache_signature = dup;
+        return live;
     }
 
     /// Read a variable as a single string (joining lists with space).

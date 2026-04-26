@@ -1029,7 +1029,7 @@ fn buildAction(
         return .{ .builtin_child = .{ .run = builtinChildTrampoline, .ctx = ctx } };
     }
 
-    const path_z = try resolvePath(scratch, exe_text);
+    const path_z = try resolvePath(session, scratch, exe_text);
     const argv_z = try buildArgvZ(scratch, argv_text);
     const envp = local_env orelse blk: {
         // Child inherits session-merged env even with no env-prefix.
@@ -1073,28 +1073,59 @@ fn buildArgvZ(scratch: Allocator, argv: []const []const u8) ![*:null]const ?[*:0
     return slots.ptr;
 }
 
-fn resolvePath(scratch: Allocator, exe: []const u8) ![*:0]const u8 {
+/// Resolve a bare command name to an absolute path by walking `$PATH`.
+/// Names containing a `/` (`./script`, `/usr/bin/env`) skip the lookup
+/// entirely. Successful lookups are cached on `session`; the cache is
+/// dropped whenever `$PATH` changes (validated by string compare on
+/// every call). The returned NUL-terminated string is allocated from
+/// `scratch` so it always has the lifetime callers expect, even on a
+/// cache hit.
+fn resolvePath(session: *Session, scratch: Allocator, exe: []const u8) ![*:0]const u8 {
     if (std.mem.indexOfScalar(u8, exe, '/') != null) {
         const z = try scratch.dupeZ(u8, exe);
         return z.ptr;
     }
 
-    const path_env = std.c.getenv("PATH") orelse {
+    const path_str = session.refreshPathSignature() orelse {
         const z = try scratch.dupeZ(u8, exe);
         return z.ptr;
     };
-    const path_str = std.mem.span(path_env);
+
+    if (session.path_cache.get(exe)) |cached| {
+        const z = try scratch.dupeZ(u8, cached);
+        return z.ptr;
+    }
 
     var it = std.mem.splitScalar(u8, path_str, ':');
     while (it.next()) |dir| {
         if (dir.len == 0) continue;
-        const candidate = try std.fmt.allocPrintSentinel(scratch, "{s}/{s}", .{ dir, exe }, 0);
+        const candidate = try std.fmt.allocPrintSentinel(
+            scratch,
+            "{s}/{s}",
+            .{ dir, exe },
+            0,
+        );
         const rc = std.c.access(candidate.ptr, std.c.X_OK);
-        if (rc == 0) return candidate.ptr;
+        if (rc == 0) {
+            cachePathHit(session, exe, candidate);
+            return candidate.ptr;
+        }
     }
 
     const z = try scratch.dupeZ(u8, exe);
     return z.ptr;
+}
+
+fn cachePathHit(session: *Session, name: []const u8, candidate: [:0]const u8) void {
+    const key = session.alloc.dupe(u8, name) catch return;
+    const value = session.alloc.dupe(u8, candidate) catch {
+        session.alloc.free(key);
+        return;
+    };
+    session.path_cache.put(session.alloc, key, value) catch {
+        session.alloc.free(key);
+        session.alloc.free(value);
+    };
 }
 
 fn buildRedirectOps(

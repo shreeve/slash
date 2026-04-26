@@ -114,15 +114,7 @@ expose:
 `fg`/`bg` need terminal handoff via `tcsetpgrp` (PLAN §11
 must-get-right #4) and SIGCONT plumbing — separate, larger commit.
 
-### 8. PATH resolution caching
-
-We walk `$PATH` linearly on every external command. For a REPL where
-users hit the same commands repeatedly, this is wasteful.
-
-A small hashmap on `Session` (name → resolved-path), invalidated on
-`PATH` change. Two dozen lines.
-
-### 9. Diagnostic infrastructure actually used
+### 8. Diagnostic infrastructure actually used
 
 We built `diag.Sink` / `ListSink` / codes per PLAN §16. Almost nothing
 emits structured diagnostics. Every `slash: parse error` print today
@@ -138,7 +130,7 @@ Specific call sites needing structured diagnostics:
 - `exec.spawn` — `EX00xx` for fork/exec/redirect failures with the
   failing path
 
-### 10. CLOEXEC discipline audit
+### 9. CLOEXEC discipline audit
 
 Pipes get FD_CLOEXEC. What about other fds opened by the shell? Verify
 no fd leaks into spawned children when:
@@ -152,7 +144,7 @@ no fd leaks into spawned children when:
 
 ## Tier 4 — quality of execution
 
-### 11. Comprehensive test suite
+### 10. Comprehensive test suite
 
 Need:
 
@@ -170,7 +162,7 @@ Need:
   (PLAN §17.8) — and **only** for those; intentional deltas don't get a
   diff case
 
-### 12. UTF-8 awareness
+### 11. UTF-8 awareness
 
 Today the lexer is ASCII. A user typing `let café = 5` or piping Chinese
 filenames hits errors. We need at minimum:
@@ -183,7 +175,7 @@ filenames hits errors. We need at minimum:
 Stretch: render multi-byte characters in REPL highlighting without
 collapsing the cursor.
 
-### 13. `cd` polish
+### 12. `cd` polish
 
 - `cd -` — toggle to `$OLDPWD`
 - `cd` with no arg goes to `$HOME` (already works), but verify `~` and
@@ -192,7 +184,7 @@ collapsing the cursor.
   decide logical-vs-physical and document
 - `$PWD` and `$OLDPWD` updates in **every** path that changes cwd
 
-### 14. `cmd` user-defined commands (positional only)
+### 13. `cmd` user-defined commands (positional only)
 
 PLAN §3 mentions, §7 Rule 26 commits to "session-scoped unless created
 inside a subshell". Implementation:
@@ -216,7 +208,7 @@ cmd greet {
 }
 ```
 
-### 15. Process substitution `<(...)` / `>(...)`
+### 14. Process substitution `<(...)` / `>(...)`
 
 PLAN §6.2 documents. Implementation:
 - Lexer adds `proc_sub_in` (`<(`) and `proc_sub_out` (`>(`) tokens
@@ -225,7 +217,7 @@ PLAN §6.2 documents. Implementation:
   (BSD/macOS) bindings, threads the path into the parent's argv
 - Job-owned cleanup on every termination path (PLAN §7 Rule 25)
 
-### 16. Configuration loading
+### 15. Configuration loading
 
 `~/.slashrc` is sourced at interactive shell startup. That's the entire
 mechanism. No `~/.slash/config` file format, no `set` runtime config
@@ -235,13 +227,13 @@ builtin. Users configure by writing Slash code in `.slashrc`.
 - `.slashrc` is run before the first prompt; non-interactive shells (`-c`,
   scripts) do not source it
 
-### 17. `read` builtin
+### 16. `read` builtin
 
 `read NAME` consumes a line from stdin into a variable. `read NAME1
 NAME2 ...` consumes a line and splits on whitespace into the named
 variables. Required for any script that takes interactive input.
 
-### 18. `shift` builtin
+### 17. `shift` builtin
 
 `shift` shifts positional parameters down by one (`$2` becomes `$1`,
 etc.); `$#` decrements. `shift N` shifts by N. Required for the
@@ -256,13 +248,13 @@ while test $# -gt 0 {
 }
 ```
 
-### 19. `exec` builtin
+### 18. `exec` builtin
 
 `exec CMD ARGS...` replaces the shell process with the named command (no
 fork). `exec` with redirects and no command applies the redirects to the
 shell itself permanently.
 
-### 20. `type` and `command` builtins
+### 19. `type` and `command` builtins
 
 - `type NAME` — describes how `NAME` resolves: builtin, `cmd`
   definition, alias (none yet), or external (with PATH location)
@@ -271,7 +263,7 @@ shell itself permanently.
 
 Introspection. ~30 lines each.
 
-### 21. `trap` builtin
+### 20. `trap` builtin
 
 `trap 'CMD' SIGNAL...` registers a Slash source string to run when the
 named signal is received. `trap '' SIGNAL` ignores the signal. `trap -`
@@ -458,10 +450,10 @@ pattern-matching tokens for highlighting, completion, or error preview —
 we're rendering the parse tree. It can never lie.
 
 This work depends on Tier 1 #1 (recoverable parse errors with partial
-Shape on incomplete input) and benefits from Tier 3 #9 (real
+Shape on incomplete input) and benefits from Tier 3 #8 (real
 diagnostics).
 
-### 22. Live syntax highlighting
+### 21. Live syntax highlighting
 
 Re-parse on each keystroke. Walk the Shape, emit ANSI escape sequences
 per node type:
@@ -476,7 +468,7 @@ per node type:
 The DuckDB CLI insight: highlight from the parse tree, not regex. Our
 parser is fast enough — even multi-KB lines re-parse in microseconds.
 
-### 23. Multi-line continuation
+### 22. Multi-line continuation
 
 If `shape.parse(line)` returns "incomplete" (open `{` / `(` / `[` /
 heredoc), set the prompt to `... ` and accumulate. Otherwise execute.
@@ -492,7 +484,7 @@ if test -d /tmp {
 We know exactly when they're inside the block (open `{` on stack) and
 when the statement is complete (matched `}` and shape is well-formed).
 
-### 24. Tab completion via Shape introspection
+### 23. Tab completion via Shape introspection
 
 | Cursor position | Completions |
 |---|---|
@@ -505,7 +497,7 @@ when the statement is complete (matched `}` and shape is well-formed).
 
 The parser tells us *which* of these we're in. No regex hacks.
 
-### 25. History
+### 24. History
 
 Persistent flat file at `~/.slash/history`. Each entry has rich
 metadata:
@@ -518,12 +510,12 @@ metadata:
 filtering. **Frecency** sort by default (frequency × recency, weighted
 toward recency).
 
-### 26. Bracket matching
+### 25. Bracket matching
 
 When the cursor sits on `}`, dim the matching `{` for 200ms (or until
 cursor moves). Use the Shape spans — no character-counting needed.
 
-### 27. Prompt
+### 26. Prompt
 
 Default is minimal but useful:
 
@@ -541,7 +533,7 @@ Components (each independently disable-able):
 
 Continuation prompt: `... `.
 
-### 28. Implementation foundation
+### 27. Implementation foundation
 
 The REPL is one new module — `src/repl.zig`, ~600-800 lines.
 Dependencies:

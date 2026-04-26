@@ -488,6 +488,25 @@ const cases: []const Case = &.{
         .source = "source /tmp/slash-source-fixture/shebang.sl",
         .expect = .{ .exit_code = 0, .stdout = "after-shebang\n" },
     },
+
+    // ---- PATH resolution caching ----------------------------------------
+    //
+    // The cache is a performance optimization; from the user's point of
+    // view, repeated lookups must produce the same answer and a `$PATH`
+    // change must be honored on the next external invocation.
+
+    .{
+        .name = "path-cache: same command resolved twice in one session",
+        .source = "/bin/sh -c 'echo first'; /bin/sh -c 'echo second'",
+        .expect = .{ .exit_code = 0, .stdout = "first\nsecond\n" },
+    },
+    .{
+        // Two bare-name invocations of the same external command in a
+        // sequence — second one must hit the cache and resolve identically.
+        .name = "path-cache: bare-name lookup is consistent",
+        .source = "true; true; true",
+        .expect = .{ .exit_code = 0 },
+    },
 };
 
 // =============================================================================
