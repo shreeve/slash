@@ -110,13 +110,16 @@ fn runSource(
 
     const source = diag.Source{ .name = name, .text = source_text };
 
-    const parsed = shape.parse(source, a, null) catch {
-        std.debug.print("slash: parse error\n", .{});
+    var diag_list = diag.ListSink.init(a);
+    const sink = diag_list.sink();
+
+    const parsed = shape.parse(source, a, sink) catch {
+        renderDiagnostics(diag_list.items.items);
         return 1;
     };
     const ctx = program.LowerContext{ .alloc = a, .source = source };
-    const prog = program.lower(parsed.root, &ctx, null) catch {
-        std.debug.print("slash: lower error\n", .{});
+    const prog = program.lower(parsed.root, &ctx, sink) catch {
+        renderDiagnostics(diag_list.items.items);
         return 1;
     };
 
@@ -221,14 +224,30 @@ fn dumpSexp(alloc: std.mem.Allocator, io: std.Io, source: []const u8) !u8 {
     return 0;
 }
 
+/// Render every recorded diagnostic to stderr. Slash writes through
+/// the raw POSIX fd because the rest of the eval pipeline already lives
+/// on `std.c.*` and threading an `Io` purely for diagnostics would mean
+/// touching the harness too.
+fn renderDiagnostics(items: []const diag.Diagnostic) void {
+    var buf: [4096]u8 = undefined;
+    for (items) |d| {
+        var stream = std.Io.Writer.fixed(&buf);
+        diag.render(d, .snippet, &stream) catch continue;
+        const bytes = stream.buffered();
+        _ = std.c.write(2, bytes.ptr, bytes.len);
+    }
+}
+
 fn dumpShape(alloc: std.mem.Allocator, io: std.Io, source_text: []const u8) !u8 {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const a = arena.allocator();
 
     const source = diag.Source{ .name = "<arg>", .text = source_text };
-    const parsed = shape.parse(source, a, null) catch |err| {
-        std.debug.print("slash: shape error: {s}\n", .{@errorName(err)});
+    var diag_list = diag.ListSink.init(a);
+    const sink = diag_list.sink();
+    const parsed = shape.parse(source, a, sink) catch {
+        renderDiagnostics(diag_list.items.items);
         return 1;
     };
 
@@ -245,13 +264,15 @@ fn dumpProgram(alloc: std.mem.Allocator, io: std.Io, source_text: []const u8) !u
     const a = arena.allocator();
 
     const source = diag.Source{ .name = "<arg>", .text = source_text };
-    const parsed = shape.parse(source, a, null) catch |err| {
-        std.debug.print("slash: shape error: {s}\n", .{@errorName(err)});
+    var diag_list = diag.ListSink.init(a);
+    const sink = diag_list.sink();
+    const parsed = shape.parse(source, a, sink) catch {
+        renderDiagnostics(diag_list.items.items);
         return 1;
     };
     const ctx = program.LowerContext{ .alloc = a, .source = source };
-    const prog = program.lower(parsed.root, &ctx, null) catch |err| {
-        std.debug.print("slash: lower error: {s}\n", .{@errorName(err)});
+    const prog = program.lower(parsed.root, &ctx, sink) catch {
+        renderDiagnostics(diag_list.items.items);
         return 1;
     };
 

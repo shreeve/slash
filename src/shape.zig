@@ -266,14 +266,32 @@ pub fn parse(source: Source, alloc: Allocator, sink: ?Sink) !Parsed {
     var p = parser.Parser.init(alloc, source.text);
     defer p.deinit();
 
-    const sexp = p.parseProgram() catch |err| {
+    const sexp = p.parseProgram() catch {
+        // Build a span pointing at the offending token. For an
+        // unexpected EOF, point at the end of the source so the caret
+        // lands somewhere sensible.
+        const tok = p.current;
+        const start: u32 = @min(tok.pos, @as(u32, @intCast(source.text.len)));
+        const end: u32 = if (tok.cat == .eof)
+            start
+        else
+            @min(start + @max(tok.len, 1), @as(u32, @intCast(source.text.len)));
+        const span = diag.Span{ .start = start, .end = end };
+
+        // Allocate the message from the caller's arena so its lifetime
+        // outlives `parse`. The diagnostic itself keeps the slice; the
+        // arena stays alive long enough for the caller to render.
+        const msg = std.fmt.allocPrint(
+            alloc,
+            "unexpected {s}",
+            .{@tagName(tok.cat)},
+        ) catch "parse error";
+
+        // Code allocation is per-error class; use SH0001 as a generic
+        // fallback so callers can match on it. Future code split can
+        // break out specific categories without breaking existing tests.
         try diag.emit(sink, diag.make(
-            .shape,
-            .@"error",
-            "SH0001",
-            @errorName(err),
-            source,
-            null,
+            .shape, .@"error", "SH0001", msg, source, span,
         ));
         return error.ParserError;
     };
