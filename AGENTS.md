@@ -104,7 +104,7 @@ is wrong.
 
 - **Zig 0.16.** `std.posix.fork`/`waitpid`/`pipe`/`close`/`dup2`/`_exit`
   were removed; use `std.c.*` with `std.c.errno(rc)`. See
-  `ZIG-0.16.0-REFERENCE.md`.
+  `ZIG-0.16.0.md`.
 - **No temporal framing.** Don't write "currently does X but later will do
   Y", "deferred to phase 2", "TODO add this", or "for now we just". Code
   describes what *is*. Features that haven't shipped yet simply aren't
