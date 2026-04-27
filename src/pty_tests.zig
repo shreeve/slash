@@ -495,6 +495,37 @@ test "slash pty: M-. (yank-last-arg) pulls last word of last command — zigline
     try std.testing.expect(count >= 2);
 }
 
+test "slash pty: bracket matching emits a bold span on the matching opener (zigline ≥ v0.1.6)" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // Type a complete brace block. After typing, the cursor is just
+    // past the closing `}` — slash's highlightHook reads
+    // request.cursor_byte and emits a bold span over the matching `{`.
+    // Verify the bold-SGR escape (\x1b[1m) appears in the rendered
+    // PTY output BEFORE submitting the line. Submitting Enter is what
+    // triggers slash to actually run `if true { echo bracket-test }`,
+    // which prints "bracket-test" — so we verify both the bold ANSI
+    // (during edit) and the executed output (after submit) appear.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "if true { echo bracket-test }", .settle_ms = 250 },
+        .{ .send = "\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+
+    // Bold SGR appears as `\x1b[1m`. Slash's highlighter emits this
+    // ONLY for the matching-bracket span (everything else uses dim
+    // white, cyan-bold for keywords, etc.). Bold-cyan keywords would
+    // render as `\x1b[1;36m` or `\x1b[36;1m`. So a bare `\x1b[1m`
+    // (with the `m` immediately after `1`) is uniquely the bracket-
+    // match span.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[1m") != null);
+    // And the executed command produced its expected stdout.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "bracket-test") != null);
+}
+
 test "slash pty: highlighter inside dq with $var emits both green AND yellow" {
     if (!ptySupported()) return error.SkipZigTest;
 

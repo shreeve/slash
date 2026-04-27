@@ -14,17 +14,6 @@ ROADMAP shrinks until empty.
 
 ---
 
-## REPL — world-class polish
-
-The cooked-mode REPL with multi-line continuation and `~/.slashrc`
-sourcing is in. The remaining items upgrade the experience to what a
-modern shell user expects.
-
-- **Bracket matching.** When the cursor sits on `}`, dim the matching
-  `{` for 200ms (or until cursor moves). Use the Shape spans — no
-  character-counting needed.
-
-
 ## Done means done
 
 When this file is empty, Slash 1.0 ships:

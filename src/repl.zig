@@ -397,9 +397,20 @@ const SlashHooks = struct {
 fn highlightHook(
     ctx_ptr: *anyopaque,
     allocator: Allocator,
-    buffer: []const u8,
+    request: zigline.HighlightRequest,
 ) anyerror![]zigline.HighlightSpan {
     _ = ctx_ptr;
+    const buffer = request.buffer;
+
+    // Bracket matching: when the cursor is on (or just past) a closing
+    // bracket, find the matching opener and emit a bold span over it
+    // instead of the normal dim-white bracket style. The cursor-side
+    // bracket keeps its normal style — the visual cue is a single
+    // emphasized character at the matching opener. (zigline's renderer
+    // drops overlapping spans with the longer-on-equal-start tie-break,
+    // so we don't emit two spans for the same bracket; we substitute.)
+    const match_pos = findMatchingBracket(buffer, request.cursor_byte);
+
     var spans: std.ArrayListUnmanaged(zigline.HighlightSpan) = .empty;
     errdefer spans.deinit(allocator);
 
@@ -417,11 +428,109 @@ fn highlightHook(
             try emitDqSpans(allocator, &spans, buffer, start, end);
             continue;
         }
+        if (match_pos != null and match_pos.? == start and isOpenBracketTok(tok.cat)) {
+            try spans.append(allocator, .{
+                .start = start,
+                .end = end,
+                .style = .{ .bold = true },
+            });
+            continue;
+        }
         const style = styleFor(tok, buffer[start..end]) orelse continue;
         try spans.append(allocator, .{ .start = start, .end = end, .style = style });
     }
 
     return spans.toOwnedSlice(allocator);
+}
+
+fn isOpenBracketTok(cat: parser.TokenCat) bool {
+    return switch (cat) {
+        .lbrace, .lparen, .lbracket => true,
+        else => false,
+    };
+}
+
+/// When the cursor sits on (or just past) a closing bracket, find the
+/// byte offset of the matching opener. Returns `null` if the cursor
+/// isn't on a close bracket, or if no matching opener is in scope
+/// (unbalanced source).
+///
+/// Uses `parser.BaseLexer` to walk bracket tokens, so brackets inside
+/// `"..."` strings, `'...'` strings, comments, heredoc bodies, and
+/// `${...}`/`$(...)` (each is a single token at this level) are
+/// automatically excluded from the matching search.
+fn findMatchingBracket(buffer: []const u8, cursor_byte: usize) ?usize {
+    // Cheap precondition: cursor must be on or just after a closing
+    // bracket byte. Skips the lex walk for the typical keystroke.
+    const on_close = cursor_byte < buffer.len and isCloseBracketByte(buffer[cursor_byte]);
+    const after_close = cursor_byte > 0 and isCloseBracketByte(buffer[cursor_byte - 1]);
+    if (!on_close and !after_close) return null;
+
+    // Maintain three small stacks (brace / paren / bracket) of recent
+    // unmatched-opener positions. Walk tokens left-to-right; on each
+    // closer, pop the matching stack. The closer at `cursor_byte` (or
+    // `cursor_byte - 1`) is our target — when we reach it, the top of
+    // its stack is the match.
+    const STACK_DEPTH = 32;
+    var brace_stack: [STACK_DEPTH]u32 = undefined;
+    var paren_stack: [STACK_DEPTH]u32 = undefined;
+    var bracket_stack: [STACK_DEPTH]u32 = undefined;
+    var brace_depth: usize = 0;
+    var paren_depth: usize = 0;
+    var bracket_depth: usize = 0;
+
+    var lex = parser.BaseLexer.init(buffer);
+    while (true) {
+        const tok = lex.next();
+        if (tok.cat == .eof) break;
+        const pos: usize = @intCast(tok.pos);
+
+        // Did we reach the cursor's bracket?
+        const target_hit =
+            (on_close and pos == cursor_byte) or
+            (after_close and pos == cursor_byte - 1);
+
+        if (target_hit) {
+            return switch (tok.cat) {
+                .rbrace => if (brace_depth > 0) brace_stack[brace_depth - 1] else null,
+                .rparen => if (paren_depth > 0) paren_stack[paren_depth - 1] else null,
+                .rbracket => if (bracket_depth > 0) bracket_stack[bracket_depth - 1] else null,
+                else => null, // cursor's byte is `}` etc. but lexer didn't tokenize it as a bracket
+                              // (probably inside a string/comment/heredoc) → no match
+            };
+        }
+
+        switch (tok.cat) {
+            .lbrace => if (brace_depth < STACK_DEPTH) {
+                brace_stack[brace_depth] = @intCast(pos);
+                brace_depth += 1;
+            },
+            .rbrace => if (brace_depth > 0) {
+                brace_depth -= 1;
+            },
+            .lparen => if (paren_depth < STACK_DEPTH) {
+                paren_stack[paren_depth] = @intCast(pos);
+                paren_depth += 1;
+            },
+            .rparen => if (paren_depth > 0) {
+                paren_depth -= 1;
+            },
+            .lbracket => if (bracket_depth < STACK_DEPTH) {
+                bracket_stack[bracket_depth] = @intCast(pos);
+                bracket_depth += 1;
+            },
+            .rbracket => if (bracket_depth > 0) {
+                bracket_depth -= 1;
+            },
+            else => {},
+        }
+    }
+
+    return null;
+}
+
+fn isCloseBracketByte(b: u8) bool {
+    return b == '}' or b == ')' or b == ']';
 }
 
 fn styleFor(tok: parser.Token, span_bytes: []const u8) ?zigline.Style {
@@ -1006,9 +1115,27 @@ fn sourceRcFile(session: *session_mod.Session, alloc: Allocator) !void {
 // Tests — span-based highlighter
 // =============================================================================
 
+/// Test helper: invoke `highlightHook` against a buffer with the cursor
+/// implicitly at the end (the common shape — typing left-to-right). For
+/// tests that exercise cursor-sensitive features (bracket matching), use
+/// `highlightHookAt` directly with an explicit cursor byte.
+fn highlightHookEnd(alloc: Allocator, buffer: []const u8) anyerror![]zigline.HighlightSpan {
+    return highlightHook(@ptrFromInt(0xdeadbeef), alloc, .{
+        .buffer = buffer,
+        .cursor_byte = buffer.len,
+    });
+}
+
+fn highlightHookAt(alloc: Allocator, buffer: []const u8, cursor_byte: usize) anyerror![]zigline.HighlightSpan {
+    return highlightHook(@ptrFromInt(0xdeadbeef), alloc, .{
+        .buffer = buffer,
+        .cursor_byte = cursor_byte,
+    });
+}
+
 test "highlight: keywords get cyan + bold span" {
     const alloc = std.testing.allocator;
-    const spans = try highlightHook(@ptrFromInt(0xdeadbeef), alloc, "if true { echo hi }");
+    const spans = try highlightHookEnd(alloc, "if true { echo hi }");
     defer alloc.free(spans);
 
     var saw_keyword = false;
@@ -1027,7 +1154,7 @@ test "highlight: keywords get cyan + bold span" {
 
 test "highlight: dq with embedded $var emits alternating green/yellow spans" {
     const alloc = std.testing.allocator;
-    const spans = try highlightHook(@ptrFromInt(0xdeadbeef), alloc, "echo \"hi $name\"");
+    const spans = try highlightHookEnd(alloc, "echo \"hi $name\"");
     defer alloc.free(spans);
 
     var has_green = false;
@@ -1044,7 +1171,7 @@ test "highlight: dq with embedded $var emits alternating green/yellow spans" {
 
 test "highlight: comment is dim" {
     const alloc = std.testing.allocator;
-    const spans = try highlightHook(@ptrFromInt(0xdeadbeef), alloc, "echo a # trailing");
+    const spans = try highlightHookEnd(alloc, "echo a # trailing");
     defer alloc.free(spans);
     var saw_dim = false;
     for (spans) |s| if (s.style.dim) {
@@ -1119,7 +1246,7 @@ test "highlight: spans well-formed across slash's full input matrix" {
     };
 
     for (cases) |buf| {
-        const spans = try highlightHook(@ptrFromInt(0xdeadbeef), alloc, buf);
+        const spans = try highlightHookEnd(alloc, buf);
         defer alloc.free(spans);
         assertSpansWellFormed(spans, buf.len) catch |e| {
             std.debug.print("highlighter failed well-formedness on: \"{s}\"\n", .{buf});
@@ -1135,7 +1262,7 @@ test "highlight: spans well-formed across slash's full input matrix" {
 test "highlight: dq with embedded $var produces strict alternation (no wrapping span)" {
     const alloc = std.testing.allocator;
     const buf = "echo \"hi $name there\"";
-    const spans = try highlightHook(@ptrFromInt(0xdeadbeef), alloc, buf);
+    const spans = try highlightHookEnd(alloc, buf);
     defer alloc.free(spans);
 
     // Find the dq-region spans (style is green or yellow). The dq token
@@ -1158,6 +1285,89 @@ test "highlight: dq with embedded $var produces strict alternation (no wrapping 
             const fully_contains = outer.start <= inner.start and outer.end >= inner.end;
             const equal = outer.start == inner.start and outer.end == inner.end;
             try std.testing.expect(!fully_contains or equal);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Bracket matching — unit tests for findMatchingBracket
+// -----------------------------------------------------------------------------
+
+test "bracket: cursor on } finds matching {" {
+    // "if true { x }"  → cursor on the closing } at byte 12
+    // matching { is at byte 8.
+    const buf = "if true { x }";
+    try std.testing.expectEqual(@as(?usize, 8), findMatchingBracket(buf, 12));
+}
+
+test "bracket: cursor just past } finds matching {" {
+    const buf = "if true { x }";
+    // cursor at byte 13 (just past `}`)
+    try std.testing.expectEqual(@as(?usize, 8), findMatchingBracket(buf, 13));
+}
+
+test "bracket: nested braces match the inner pair" {
+    //  byte: 0         1         2
+    //        0123456789012345678901
+    const buf = "{ outer { inner } x }";
+    // Cursor on the inner `}` at byte 16 → match is the inner `{` at byte 8.
+    try std.testing.expectEqual(@as(?usize, 8), findMatchingBracket(buf, 16));
+    // Cursor on the outer `}` at byte 20 → match is the outer `{` at byte 0.
+    try std.testing.expectEqual(@as(?usize, 0), findMatchingBracket(buf, 20));
+}
+
+test "bracket: parens and square brackets work too" {
+    try std.testing.expectEqual(@as(?usize, 0), findMatchingBracket("(a b)", 4));
+    try std.testing.expectEqual(@as(?usize, 0), findMatchingBracket("[a b]", 4));
+}
+
+test "bracket: cursor on non-bracket returns null" {
+    try std.testing.expectEqual(@as(?usize, null), findMatchingBracket("hello world", 5));
+}
+
+test "bracket: brackets inside strings are ignored" {
+    //         0         1
+    //         0123456789012345
+    const buf = "echo \"} 1 2 3 \"";
+    // The literal `}` byte at position 6 is INSIDE the dq string. The
+    // lexer tokenizes the whole `"...}..."` as one `.string_dq` token.
+    // Cursor on byte 6 sees a `}` byte, but no bracket-token at that
+    // position → null.
+    try std.testing.expectEqual(@as(?usize, null), findMatchingBracket(buf, 6));
+}
+
+test "bracket: unbalanced source returns null" {
+    // Closing without opener.
+    try std.testing.expectEqual(@as(?usize, null), findMatchingBracket("} no opener", 0));
+}
+
+test "bracket: highlightHook emits bold span on matching opener" {
+    const alloc = std.testing.allocator;
+    // Cursor just past the closing `}` (byte 14) → matcher should bolden
+    // the opening `{` at byte 9.
+    const buf = "if true { x }";
+    const spans = try highlightHookAt(alloc, buf, buf.len);
+    defer alloc.free(spans);
+
+    // `{` is at byte 8 in `"if true { x }"`.
+    var found_bold_at_8 = false;
+    for (spans) |s| {
+        if (s.start == 8 and s.end == 9 and s.style.bold) found_bold_at_8 = true;
+    }
+    try std.testing.expect(found_bold_at_8);
+}
+
+test "bracket: cursor not on a bracket emits no bold span on the openers" {
+    const alloc = std.testing.allocator;
+    // Cursor mid-buffer, not on any bracket. Existing dim style on the
+    // brackets should fire, but no bold-on-opener span.
+    const buf = "if true { x }";
+    const spans = try highlightHookAt(alloc, buf, 5);
+    defer alloc.free(spans);
+
+    for (spans) |s| {
+        if (s.start == 8 and s.end == 9) {
+            try std.testing.expect(!s.style.bold);
         }
     }
 }
