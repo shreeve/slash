@@ -1,22 +1,31 @@
-//! repl — interactive read-evaluate-print loop with raw-mode line editing.
+//! repl — interactive REPL on top of zigline.
 //!
 //! Two paths share a parse/lower/run helper:
 //!
-//!   - **Raw mode** (TTY-attached stdin): `runRaw` puts the terminal in
-//!     character-at-a-time mode and drives a `LineEditor` that handles
-//!     cursor movement, history recall, kill-to-end / kill-to-start,
-//!     backspace, and the usual readline-style emacs keys. ANSI escape
-//!     sequences for cursor movement are emitted directly to fd 1.
+//!   - **Raw mode** (TTY-attached stdin): drives a `zigline.Editor`
+//!     for line editing, history, completion, and syntax highlighting.
+//!     Slash supplies the `CompletionHook` (PATH + filesystem walk)
+//!     and `HighlightHook` (BaseLexer-driven spans). Multi-line
+//!     continuation is handled here: a parse failure that points at
+//!     the very end of the buffer keeps the editor open with the
+//!     `... ` continuation prompt.
 //!
-//!   - **Cooked mode** (piped or non-TTY stdin): `runCooked` uses the
-//!     kernel line discipline. One read per Enter; multi-line
-//!     continuation accumulates into `pending` until `shape.parse`
-//!     succeeds. Used by the headless test harness and shell scripts
-//!     that pipe input into slash.
+//!   - **Cooked mode** (piped or non-TTY stdin): uses the kernel
+//!     line discipline. One read per Enter; multi-line continuation
+//!     accumulates into `pending` until `shape.parse` succeeds. Used
+//!     by the headless test harness and shell scripts that pipe
+//!     input into slash.
 //!
 //! `~/.slashrc` sourcing, signal handler installation, and the Ctrl-C
 //! discipline are common to both paths. History persists to
 //! `~/.slash/history`, one accepted line per file entry.
+//!
+//! Line-editor surface (raw mode, key parsing, cursor + buffer state,
+//! repaint, history navigation, tab-completion UI, syntax-highlight
+//! SGR generation) is owned by zigline. Slash provides this file's
+//! adapter — keymap, span-returning highlighter, replacement-range
+//! completer, custom-action hook for Ctrl-X edit-in-editor — plus
+//! its own parse/eval pipeline, prompt content, and signal policy.
 
 const std = @import("std");
 const diag = @import("diagnostics.zig");
@@ -28,6 +37,7 @@ const builtins = @import("builtins.zig");
 const exec = @import("exec.zig");
 const parser = @import("parser.zig");
 const slash = @import("slash.zig");
+const zigline = @import("zigline");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -98,465 +108,332 @@ fn runCooked(session: *session_mod.Session, alloc: Allocator) !u8 {
 }
 
 // =============================================================================
-// Raw-mode loop with line editor + history
+// Raw-mode loop driven by zigline.Editor
 // =============================================================================
 
 fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
-    var history = History.init(alloc);
+    // History — owned by us; passed to the editor by reference. Path is
+    // ~/.slash/history; failures (no HOME, can't mkdir) leave history
+    // in-memory only.
+    const hist_path = resolveHistoryPath(alloc) catch null;
+    defer if (hist_path) |p| alloc.free(p);
+
+    var history = try zigline.History.init(alloc, .{
+        .path = hist_path,
+        .max_entries = 1000,
+        .dedupe = .adjacent,
+    });
     defer history.deinit();
-    history.load() catch {};
+
+    var hooks = SlashHooks{
+        .session = session,
+        .alloc = alloc,
+        .history = &history,
+    };
+
+    var editor = try zigline.Editor.init(alloc, .{
+        .keymap = slash_keymap,
+        .history = &history,
+        .completion = .{
+            .ctx = @ptrCast(&hooks),
+            .completeFn = completionHook,
+        },
+        .highlight = .{
+            .ctx = @ptrCast(&hooks),
+            .highlightFn = highlightHook,
+        },
+        .custom_action = .{
+            .ctx = @ptrCast(&hooks),
+            .invokeFn = customActionHook,
+        },
+    });
+    defer editor.deinit();
 
     var pending = std.ArrayListUnmanaged(u8).empty;
     defer pending.deinit(alloc);
 
     var prompt_buf: [1024]u8 = undefined;
     while (true) {
-        const prompt = if (pending.items.len == 0)
+        const prompt_text = if (pending.items.len == 0)
             renderPrompt(&prompt_buf, session)
         else
             "... ";
-        const line = try readLine(alloc, prompt, &history);
-        defer alloc.free(line);
+        const prompt = zigline.Prompt.plain(prompt_text);
 
-        // Ctrl-D on an empty line returns null-equivalent (we use a
-        // sentinel: empty line + line.eof = true). For now: empty line
-        // && pending empty == EOF on a fresh prompt → exit.
-        if (line.len == 1 and line[0] == 0x04) {
-            if (pending.items.len == 0) {
-                const status = session.last_status;
-                eval.fireExitTrap(session, alloc, null) catch {};
-                _ = std.c.write(1, "\n", 1);
-                return status;
-            }
-            // Otherwise treat as cancel: drop the partial buffer.
-            pending.clearRetainingCapacity();
-            _ = std.c.write(1, "\n", 1);
-            continue;
-        }
+        const result = editor.readLine(prompt) catch |err| {
+            std.debug.print("slash: readLine error: {s}\n", .{@errorName(err)});
+            return 1;
+        };
 
-        if (line.len == 1 and line[0] == 0x03) {
-            // Ctrl-C: cancel any partial buffer, fresh prompt.
-            pending.clearRetainingCapacity();
-            _ = std.c.write(1, "\n", 1);
-            continue;
-        }
+        switch (result) {
+            .line => |line| {
+                defer alloc.free(line);
+                try pending.appendSlice(alloc, line);
+                try pending.append(alloc, '\n');
 
-        try pending.appendSlice(alloc, line);
-        try pending.append(alloc, '\n');
+                const before_len = pending.items.len;
+                _ = try evaluatePending(session, alloc, &pending);
+                // Parse incomplete → keep accumulating; show `... ` next.
+                if (pending.items.len == before_len and pending.items.len > 0) continue;
 
-        // Try to evaluate; if incomplete, loop and prompt continuation.
-        const before_len = pending.items.len;
-        _ = try evaluatePending(session, alloc, &pending);
-        // If pending wasn't reset, parse was incomplete — keep going.
-        if (pending.items.len == before_len and pending.items.len > 0) continue;
-
-        // A line that actually ran (or was a real parse error) is
-        // worth saving to history. Reconstruct the source from the
-        // line we just submitted; the trailing newline is dropped.
-        if (line.len > 0) try history.append(line);
-
-        if (session.exit_request) |req| {
-            eval.fireExitTrap(session, alloc, null) catch {};
-            return req.toStatusByte();
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// readLine: raw-mode keystroke processor
-// -----------------------------------------------------------------------------
-
-/// Read a single logical line in raw mode. Returns an allocated slice;
-/// caller frees. The slice contains user-typed bytes only — no trailing
-/// newline. Special cases:
-///   - Ctrl-C → returns a single 0x03 byte
-///   - Ctrl-D on empty line → returns a single 0x04 byte
-fn readLine(
-    alloc: Allocator,
-    prompt: []const u8,
-    history: *History,
-) ![]u8 {
-    var raw = try RawMode.enter();
-    defer raw.leave();
-
-    var editor = LineEditor.init(alloc, prompt);
-    defer editor.deinit();
-
-    try editor.render();
-
-    while (true) {
-        var byte: [1]u8 = undefined;
-        const n = std.c.read(0, &byte, 1);
-        if (n < 0) {
-            const e = std.c.errno(@as(c_int, -1));
-            if (e == .INTR) {
-                _ = std.c.write(1, "\r\n", 2);
-                editor.buf.clearRetainingCapacity();
-                editor.cursor = 0;
-                try editor.render();
-                continue;
-            }
-            return error.ReadFailed;
-        }
-        if (n == 0) {
-            // Stdin closed mid-line. Treat as Ctrl-D.
-            if (editor.buf.items.len == 0) {
-                const out = try alloc.alloc(u8, 1);
-                out[0] = 0x04;
-                return out;
-            }
-            return editor.takeBuf(alloc);
-        }
-
-        const c = byte[0];
-
-        switch (c) {
-            0x03 => {
-                // Ctrl-C
-                _ = std.c.write(1, "^C\r\n", 4);
-                const out = try alloc.alloc(u8, 1);
-                out[0] = 0x03;
-                return out;
-            },
-            0x04 => {
-                // Ctrl-D
-                if (editor.buf.items.len == 0) {
-                    const out = try alloc.alloc(u8, 1);
-                    out[0] = 0x04;
-                    return out;
-                }
-                // Otherwise act as forward-delete.
-                editor.deleteForward();
-                try editor.render();
-            },
-            0x0a, 0x0d => {
-                // Enter
-                _ = std.c.write(1, "\r\n", 2);
-                history.cursor = null;
-                return editor.takeBuf(alloc);
-            },
-            0x08, 0x7f => {
-                // Backspace
-                editor.deleteBackward();
-                try editor.render();
-            },
-            0x01 => { // Ctrl-A
-                editor.cursor = 0;
-                try editor.render();
-            },
-            0x05 => { // Ctrl-E
-                editor.cursor = @intCast(editor.buf.items.len);
-                try editor.render();
-            },
-            0x0b => { // Ctrl-K — kill to end
-                editor.buf.shrinkRetainingCapacity(editor.cursor);
-                try editor.render();
-            },
-            0x15 => { // Ctrl-U — kill to start
-                if (editor.cursor > 0) {
-                    const remaining = editor.buf.items[editor.cursor..];
-                    std.mem.copyForwards(u8, editor.buf.items[0..remaining.len], remaining);
-                    editor.buf.shrinkRetainingCapacity(remaining.len);
-                    editor.cursor = 0;
-                    try editor.render();
+                if (session.exit_request) |req| {
+                    eval.fireExitTrap(session, alloc, null) catch {};
+                    return req.toStatusByte();
                 }
             },
-            0x17 => { // Ctrl-W — kill word backward
-                editor.killWordBackward();
-                try editor.render();
+            .interrupt => {
+                // Ctrl-C: cancel any partial buffer, prompt fresh.
+                pending.clearRetainingCapacity();
             },
-            0x0c => { // Ctrl-L — clear screen
-                _ = std.c.write(1, "\x1b[H\x1b[2J", 7);
-                try editor.render();
-            },
-            0x09 => { // Tab — completion
-                try handleTabCompletion(alloc, &editor);
-            },
-            0x1b => {
-                // Escape sequence (arrow keys, etc.)
-                var seq: [4]u8 = undefined;
-                const got = std.c.read(0, &seq, 2);
-                if (got < 2) {
-                    // Bare ESC: ignore.
-                    continue;
+            .eof => {
+                if (pending.items.len == 0) {
+                    const status = session.last_status;
+                    eval.fireExitTrap(session, alloc, null) catch {};
+                    return status;
                 }
-                if (seq[0] != '[') continue;
-                switch (seq[1]) {
-                    'A' => { // Up
-                        if (history.previous(editor.buf.items)) |entry| {
-                            editor.replace(entry) catch {};
-                            try editor.render();
-                        }
-                    },
-                    'B' => { // Down
-                        if (history.next()) |entry| {
-                            editor.replace(entry) catch {};
-                            try editor.render();
-                        }
-                    },
-                    'C' => { // Right
-                        if (editor.cursor < editor.buf.items.len) {
-                            editor.cursor += 1;
-                            try editor.render();
-                        }
-                    },
-                    'D' => { // Left
-                        if (editor.cursor > 0) {
-                            editor.cursor -= 1;
-                            try editor.render();
-                        }
-                    },
-                    else => {},
-                }
-            },
-            else => {
-                if (c >= 0x20 or c >= 0x80) {
-                    try editor.insert(c);
-                    try editor.render();
-                }
+                pending.clearRetainingCapacity();
             },
         }
     }
 }
 
-// -----------------------------------------------------------------------------
-// LineEditor — buffer + cursor + render
-// -----------------------------------------------------------------------------
+// =============================================================================
+// Slash-side hooks — completion, syntax highlighting, custom actions
+// =============================================================================
 
-const LineEditor = struct {
-    alloc: Allocator,
-    buf: std.ArrayListUnmanaged(u8),
-    cursor: u32,
-    prompt: []const u8,
-    /// Rows the previous render occupied (1 if no wrap, more if input
-    /// is long enough to wrap onto subsequent terminal rows).
-    last_rows: u32 = 1,
-    /// Which of those rows the cursor was on after the previous
-    /// render (0-indexed from the top of the rendered block).
-    last_cursor_row: u32 = 0,
-
-    fn init(alloc: Allocator, prompt: []const u8) LineEditor {
-        return .{
-            .alloc = alloc,
-            .buf = .empty,
-            .cursor = 0,
-            .prompt = prompt,
-        };
-    }
-
-    fn deinit(self: *LineEditor) void {
-        self.buf.deinit(self.alloc);
-    }
-
-    fn insert(self: *LineEditor, c: u8) !void {
-        try self.buf.insert(self.alloc, self.cursor, c);
-        self.cursor += 1;
-    }
-
-    fn deleteBackward(self: *LineEditor) void {
-        if (self.cursor == 0) return;
-        _ = self.buf.orderedRemove(self.cursor - 1);
-        self.cursor -= 1;
-    }
-
-    fn deleteForward(self: *LineEditor) void {
-        if (self.cursor >= self.buf.items.len) return;
-        _ = self.buf.orderedRemove(self.cursor);
-    }
-
-    fn killWordBackward(self: *LineEditor) void {
-        if (self.cursor == 0) return;
-        var end = self.cursor;
-        while (end > 0 and isSpace(self.buf.items[end - 1])) : (end -= 1) {}
-        while (end > 0 and !isSpace(self.buf.items[end - 1])) : (end -= 1) {}
-        const start = end;
-        const remaining = self.buf.items[self.cursor..];
-        std.mem.copyForwards(u8, self.buf.items[start..][0..remaining.len], remaining);
-        const new_len = start + @as(u32, @intCast(remaining.len));
-        self.buf.shrinkRetainingCapacity(new_len);
-        self.cursor = start;
-    }
-
-    fn replace(self: *LineEditor, replacement: []const u8) !void {
-        self.buf.clearRetainingCapacity();
-        try self.buf.appendSlice(self.alloc, replacement);
-        self.cursor = @intCast(self.buf.items.len);
-    }
-
-    /// Hand the accumulated bytes to the caller; reset internal state.
-    fn takeBuf(self: *LineEditor, alloc: Allocator) ![]u8 {
-        const out = try alloc.dupe(u8, self.buf.items);
-        self.buf.clearRetainingCapacity();
-        self.cursor = 0;
-        return out;
-    }
-
-    /// Redraw the input line in place. Linenoise-style full repaint,
-    /// but wrap-aware: when the prompt + buffer span more than one
-    /// terminal row, the prior render's row count is remembered so
-    /// the cursor can climb back to the top of the rendered block
-    /// before writing fresh content. Without this, edits beyond the
-    /// terminal width leave stale rows above the editing line.
-    ///
-    /// ANSI escape sequences are zero-width on terminal cells, so
-    /// counting `prompt.len + cursor` printable bytes still gives
-    /// correct cursor placement after the colorized writes.
-    fn render(self: *LineEditor) !void {
-        const cols = queryTerminalCols();
-        const plen: u32 = @intCast(self.prompt.len);
-        const blen: u32 = @intCast(self.buf.items.len);
-
-        // New layout:
-        //   total_cols   = printable columns the prompt + buffer occupy
-        //   new_rows     = visual rows used (≥ 1)
-        //   new_cur_row  = row the cursor sits on (0-indexed from top)
-        //   new_cur_col  = cursor column within that row
-        const total_cols = plen + blen;
-        const new_rows = if (total_cols == 0) 1 else (total_cols + cols - 1) / cols;
-        const cursor_pos = plen + self.cursor;
-        const new_cur_row = if (cursor_pos == 0) 0 else cursor_pos / cols;
-        const new_cur_col = cursor_pos % cols;
-
-        var out_buf: [16384]u8 = undefined;
-        var w = std.Io.Writer.fixed(&out_buf);
-
-        // Step 1 — climb back to the TOP row of the previous render.
-        // After the last render the cursor was at `last_cursor_row`
-        // (0-indexed). We need to move up that many rows.
-        if (self.last_cursor_row > 0) {
-            try w.print("\x1b[{d}A", .{self.last_cursor_row});
-        }
-        try w.writeByte('\r');
-
-        // Step 2 — clear from this point through the end of the
-        // screen. `\x1b[J` (default == `\x1b[0J`) erases from the
-        // cursor down, so any rows the previous render painted go
-        // away cleanly.
-        try w.writeAll("\x1b[J");
-
-        // Step 3 — write the new prompt + colored buffer.
-        try w.writeAll(self.prompt);
-        writeColored(&w, self.buf.items) catch {
-            // Colored buffer overflowed our scratch (rare — needs
-            // ~16 KB of input + escapes). Fall back to plain bytes so
-            // the user always sees what they're typing.
-            w = std.Io.Writer.fixed(&out_buf);
-            if (self.last_cursor_row > 0) {
-                try w.print("\x1b[{d}A", .{self.last_cursor_row});
-            }
-            try w.writeByte('\r');
-            try w.writeAll("\x1b[J");
-            try w.writeAll(self.prompt);
-            try w.writeAll(self.buf.items);
-        };
-
-        // Step 4 — terminal autowrap quirk: when content ends exactly
-        // at the right edge of a row, the cursor stays on the current
-        // row physically (column == cols) until another byte is
-        // written. Force a newline so subsequent vertical moves count
-        // from the correct logical row. Skip when the buffer is
-        // empty (prompt-only line).
-        const needs_phantom_nl = total_cols > 0 and total_cols % cols == 0;
-        if (needs_phantom_nl) {
-            try w.writeAll("\n\r");
-        }
-
-        // Step 5 — move cursor from where it ended (after the writes)
-        // to the desired position (`new_cur_row`, `new_cur_col`). The
-        // post-write cursor sits on the LAST row of new content
-        // (or one past it if we just emitted the phantom newline).
-        const end_row: u32 = if (needs_phantom_nl) new_rows else new_rows - 1;
-        if (end_row > new_cur_row) {
-            try w.print("\x1b[{d}A", .{end_row - new_cur_row});
-        } else if (new_cur_row > end_row) {
-            try w.print("\x1b[{d}B", .{new_cur_row - end_row});
-        }
-        try w.writeByte('\r');
-        if (new_cur_col > 0) {
-            try w.print("\x1b[{d}C", .{new_cur_col});
-        }
-
-        const bytes = w.buffered();
-        _ = std.c.write(1, bytes.ptr, bytes.len);
-
-        // Save state for the next render to use as its starting point.
-        self.last_rows = @intCast(new_rows);
-        self.last_cursor_row = @intCast(new_cur_row);
-    }
+// Slash-defined custom-action IDs. Zigline's `Action.custom: u32` is the
+// dispatch tag the keymap returns; the editor invokes `customActionHook`
+// with this ID to run the action.
+const ActionId = enum(u32) {
+    edit_in_editor = 1,
 };
 
-/// Query the terminal width for the current STDOUT. Falls back to a
-/// safe 80 columns if the ioctl fails (e.g. STDOUT isn't a tty, which
-/// shouldn't happen on the raw-mode path but doesn't hurt to guard).
-fn queryTerminalCols() u32 {
-    var ws: std.c.winsize = undefined;
-    const rc = std.c.ioctl(1, std.c.T.IOCGWINSZ, &ws);
-    if (rc < 0 or ws.col == 0) return 80;
-    return ws.col;
+// `execvp` isn't exposed in `std.c` for our target. Declare the minimum
+// extern so `editInEditor` can spawn `$VISUAL`/`$EDITOR` by basename.
+extern fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+
+/// Slash's keymap. Intercepts Ctrl-X for the edit-in-editor action,
+/// then falls through to zigline's default emacs bindings.
+///
+/// Note: Ctrl-X-E (the bash/emacs canonical sequence) requires
+/// multi-keystroke sequence support which zigline doesn't yet ship.
+/// Single-key Ctrl-X is the prototype binding until zigline adds the
+/// binding-table API (their v1.0 blocker #2).
+fn slashKeymapLookup(key: zigline.KeyEvent) ?zigline.Action {
+    if (key.mods.ctrl) {
+        switch (key.code) {
+            .char => |c| switch (c) {
+                'x' => return zigline.Action{ .custom = @intFromEnum(ActionId.edit_in_editor) },
+                else => {},
+            },
+            else => {},
+        }
+    }
+    return zigline.Keymap.defaultEmacs().lookup(key);
 }
 
-// =============================================================================
-// Syntax highlighting
-// =============================================================================
-//
-// Token-based, driven by the existing `parser.BaseLexer`. ANSI escape
-// sequences are zero-width on the terminal, so we splice them around
-// the user's typed bytes without disturbing the line editor's
-// column-counting math.
-//
-// Color map (matches PLAN §10's expected palette):
-//
-//   bold cyan      keywords (if / else / while / for / cmd / in)
-//   yellow         variables, ${...}, $(...), @(...), integer literals
-//   green          string literals (sq, dq, heredoc bodies)
-//   dim white      pipes, redirects, separators, brackets/braces/parens
-//   dim gray       comments
-//   red underline  unrecognized bytes (lex `err`)
-//   default        identifiers, NAME_EQ, plain `=`
-//
-// Inside double-quoted strings, `$var` / `${...}` / `$(...)` should
-// flip back to yellow inside the green run. The token stream gives us
-// `string_dq` as one chunk; `recolorDoubleQuoted` walks the body and
-// emits per-segment colors so the highlighting is faithful to the
-// dq splitter's interpretation at parse time.
+const slash_keymap: zigline.Keymap = .{ .lookupFn = slashKeymapLookup };
 
-fn writeColored(w: anytype, bytes: []const u8) !void {
-    var lex = parser.BaseLexer.init(bytes);
-    var last_pos: u32 = 0;
+fn customActionHook(
+    ctx_ptr: *anyopaque,
+    allocator: Allocator,
+    id: u32,
+    request: zigline.CustomActionRequest,
+    action_ctx: zigline.CustomActionContext,
+) anyerror!zigline.CustomActionResult {
+    const hooks: *SlashHooks = @ptrCast(@alignCast(ctx_ptr));
+    return switch (@as(ActionId, @enumFromInt(id))) {
+        .edit_in_editor => editInEditor(allocator, request, action_ctx, hooks),
+    };
+}
+
+/// Open the current line in `$VISUAL` (or `$EDITOR`, or `vi`) via a
+/// temp file. The spawn runs inside `withCookedMode`, which brackets
+/// pause/resume of raw mode with proper error propagation. If the
+/// editor exits non-zero (`:cq` in vim, segfault, exec failed) the
+/// buffer is left untouched. Trailing whitespace from the editor is
+/// stripped.
+///
+/// **Empty-buffer behavior** (zigline ≥ v0.1.5): when the user hits
+/// Ctrl-X with nothing typed, the temp file is pre-filled with the
+/// most-recent history entry — the bash `fc -e`/`Ctrl-X-Ctrl-E` "edit
+/// my last command" pattern. Falls back to an empty file if history
+/// is empty.
+fn editInEditor(
+    allocator: Allocator,
+    request: zigline.CustomActionRequest,
+    action_ctx: zigline.CustomActionContext,
+    hooks: *const SlashHooks,
+) anyerror!zigline.CustomActionResult {
+    // Decide what bytes go into the temp file.
+    //   - non-empty buffer → edit the buffer in place
+    //   - empty buffer + history available → pre-fill with last entry
+    //   - empty buffer + no history → start with an empty file
+    const initial_text: []const u8 = if (request.buffer.len > 0)
+        request.buffer
+    else if (hooks.history.lastEntry()) |last|
+        last
+    else
+        "";
+
+    // Write the chosen bytes to a temp file. Use the pid to keep
+    // concurrent slash processes from colliding.
+    var path_buf: [128]u8 = undefined;
+    const tmp_path = try std.fmt.bufPrintZ(
+        &path_buf,
+        "/tmp/slash-edit-{d}.sh",
+        .{std.c.getpid()},
+    );
+
+    {
+        const fd = std.c.open(
+            tmp_path.ptr,
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true },
+            @as(std.c.mode_t, 0o600),
+        );
+        if (fd < 0) return error.OpenFailed;
+        defer _ = std.c.close(fd);
+        var off: usize = 0;
+        while (off < initial_text.len) {
+            const n = std.c.write(fd, initial_text.ptr + off, initial_text.len - off);
+            if (n <= 0) return error.WriteFailed;
+            off += @intCast(n);
+        }
+    }
+    defer _ = std.c.unlink(tmp_path.ptr);
+
+    // Spawn the editor with raw mode paused. `withCookedMode` brackets
+    // pause + spawn + resume; pause failure stops everything, spawn
+    // failure propagates, and a failure to re-enter raw mode after a
+    // successful spawn surfaces as the returned error (no silent
+    // swallow). Returns the editor's exit code.
+    const exit_code = try action_ctx.withCookedMode(tmp_path, spawnEditor);
+    if (exit_code != 0) return .no_op;
+
+    // Read the edited content back.
+    const fd = std.c.open(tmp_path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.OpenFailed;
+    defer _ = std.c.close(fd);
+
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const n = std.c.read(fd, &chunk, chunk.len);
+        if (n < 0) {
+            const e = std.c.errno(@as(c_int, -1));
+            if (e == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (n == 0) break;
+        try bytes.appendSlice(allocator, chunk[0..@intCast(n)]);
+    }
+
+    // Strip trailing newlines / carriage returns. Most editors append
+    // a final \n; some emit \r\n; some emit a double \n.
+    var content = try bytes.toOwnedSlice(allocator);
+    while (content.len > 0 and (content[content.len - 1] == '\n' or
+        content[content.len - 1] == '\r'))
+    {
+        content = try allocator.realloc(content, content.len - 1);
+    }
+
+    return .{ .replace_buffer = content };
+}
+
+/// Fork + execvp `$VISUAL`/`$EDITOR`/`vi` to edit `tmp_path`, wait
+/// for it. Runs inside `withCookedMode` so the editor sees a normal
+/// TTY. Returns the exit status (`0` = saved, anything else =
+/// signaled / non-zero exit / exec failure).
+fn spawnEditor(tmp_path: [:0]const u8) anyerror!u8 {
+    const editor_env: [*:0]const u8 = std.c.getenv("VISUAL") orelse
+        std.c.getenv("EDITOR") orelse
+        @ptrCast("vi");
+    var argv = [_:null]?[*:0]const u8{ editor_env, tmp_path.ptr };
+
+    const child = std.c.fork();
+    if (child < 0) return error.ForkFailed;
+    if (child == 0) {
+        _ = execvp(editor_env, &argv);
+        std.c._exit(127);
+    }
+
+    var status: c_int = 0;
+    while (true) {
+        const r = std.c.waitpid(child, &status, 0);
+        if (r >= 0) break;
+        const e = std.c.errno(r);
+        if (e == .INTR) continue;
+        return error.WaitFailed;
+    }
+
+    const ux: u32 = @bitCast(status);
+    if (!std.c.W.IFEXITED(ux)) return 1; // signaled / stopped → treat as cancel
+    return std.c.W.EXITSTATUS(ux);
+}
+
+/// Context shared with the completion, highlight, and custom-action
+/// hooks. Keeps `*anyopaque` casts honest at the boundary.
+const SlashHooks = struct {
+    session: *session_mod.Session,
+    alloc: Allocator,
+    /// Reference to the editor's history. Used by `editInEditor` to
+    /// pre-fill the temp file with the most-recent command when the
+    /// user hits Ctrl-X on an empty buffer (zigline ≥ v0.1.5).
+    history: *zigline.History,
+};
+
+// -----------------------------------------------------------------------------
+// Highlight — span-returning adapter over parser.BaseLexer
+// -----------------------------------------------------------------------------
+//
+// The previous slash highlighter emitted ANSI escape sequences directly.
+// zigline expects semantic spans (`HighlightSpan`); the renderer owns
+// SGR generation. Spans must be sorted ascending by `start` and
+// non-overlapping. For string_dq tokens, the body is walked so that
+// `$var` / `${...}` / `$(...)` references emit yellow spans inside the
+// surrounding green-string spans.
+
+fn highlightHook(
+    ctx_ptr: *anyopaque,
+    allocator: Allocator,
+    buffer: []const u8,
+) anyerror![]zigline.HighlightSpan {
+    _ = ctx_ptr;
+    var spans: std.ArrayListUnmanaged(zigline.HighlightSpan) = .empty;
+    errdefer spans.deinit(allocator);
+
+    var lex = parser.BaseLexer.init(buffer);
     while (true) {
         const tok = lex.next();
         if (tok.cat == .eof) break;
-        if (tok.pos > last_pos and tok.pos <= bytes.len) {
-            try w.writeAll(bytes[last_pos..tok.pos]);
+        const start: usize = @intCast(tok.pos);
+        const end_unclamped: usize = @as(usize, @intCast(tok.pos)) +
+            @as(usize, @intCast(tok.len));
+        const end = @min(buffer.len, end_unclamped);
+        if (end <= start) continue;
+
+        if (tok.cat == .string_dq) {
+            try emitDqSpans(allocator, &spans, buffer, start, end);
+            continue;
         }
-        const span = bytes[tok.pos..@min(tok.pos + tok.len, @as(u32, @intCast(bytes.len)))];
-        try writeColoredToken(w, tok, span);
-        last_pos = tok.pos + tok.len;
-        if (last_pos > bytes.len) last_pos = @intCast(bytes.len);
+        const style = styleFor(tok, buffer[start..end]) orelse continue;
+        try spans.append(allocator, .{ .start = start, .end = end, .style = style });
     }
-    if (last_pos < bytes.len) try w.writeAll(bytes[last_pos..]);
+
+    return spans.toOwnedSlice(allocator);
 }
 
-fn writeColoredToken(w: anytype, tok: parser.Token, span: []const u8) !void {
-    const code = colorCodeFor(tok, span);
-    if (tok.cat == .string_dq) {
-        try recolorDoubleQuoted(w, span);
-        return;
-    }
-    if (code.len == 0) {
-        try w.writeAll(span);
-        return;
-    }
-    try w.print("\x1b[{s}m{s}\x1b[0m", .{ code, span });
-}
-
-fn colorCodeFor(tok: parser.Token, span: []const u8) []const u8 {
+fn styleFor(tok: parser.Token, span_bytes: []const u8) ?zigline.Style {
     return switch (tok.cat) {
-        .ident => if (slash.keywordAs(span) != null) "1;36" else "",
-        .integer => "33",
-        .string_sq, .string_dq => "32",
-        .variable, .var_braced, .dollar_paren, .at_paren => "33",
-        .heredoc_body => "32",
+        .ident => if (slash.keywordAs(span_bytes) != null)
+            zigline.Style{ .fg = .{ .basic = .cyan }, .bold = true }
+        else
+            null,
+        .integer => zigline.Style{ .fg = .{ .basic = .yellow } },
+        .string_sq => zigline.Style{ .fg = .{ .basic = .green } },
+        .variable, .var_braced, .dollar_paren, .at_paren => zigline.Style{ .fg = .{ .basic = .yellow } },
+        .heredoc_body => zigline.Style{ .fg = .{ .basic = .green } },
         .pipe,
         .lt,
         .gt,
@@ -571,83 +448,118 @@ fn colorCodeFor(tok: parser.Token, span: []const u8) []const u8 {
         .heredoc_open_lit,
         .proc_sub_in,
         .proc_sub_out,
-        => "2;37",
-        .lparen, .rparen, .lbrace, .rbrace, .lbracket, .rbracket => "2;37",
-        .semi, .and_and, .or_or, .amp => "2;37",
-        .comment => "2;37",
-        .err => "1;4;31",
-        else => "",
+        .lparen,
+        .rparen,
+        .lbrace,
+        .rbrace,
+        .lbracket,
+        .rbracket,
+        .semi,
+        .and_and,
+        .or_or,
+        .amp,
+        .comment,
+        => zigline.Style{ .fg = .{ .basic = .white }, .dim = true },
+        .err => zigline.Style{ .fg = .{ .basic = .red }, .bold = true, .underline = true },
+        else => null,
     };
 }
 
-/// `string_dq` covers the entire `"..."` token. Walk the interior to
-/// recolor `$name`, `${...}`, and `$(...)` segments back to yellow on
-/// top of the green base. Mirrors the splitter in `shape.splitDoubleQuoted`
-/// closely enough that what the user sees matches what gets parsed.
-fn recolorDoubleQuoted(w: anytype, span: []const u8) !void {
-    if (span.len < 2 or span[0] != '"') {
-        try w.print("\x1b[32m{s}\x1b[0m", .{span});
-        return;
-    }
-    // Open quote.
-    try w.writeAll("\x1b[32m\"");
+/// Walk a `"..."` token's body and emit alternating green / yellow
+/// spans for the literal text and embedded `$var` / `${...}` /
+/// `$(...)` references. Spans must remain non-overlapping (zigline's
+/// renderer drops any inner span enclosed by an earlier-kept one),
+/// so the body is split into sequential ranges rather than a wrapping
+/// dq span with var spans inside.
+fn emitDqSpans(
+    allocator: Allocator,
+    spans: *std.ArrayListUnmanaged(zigline.HighlightSpan),
+    buffer: []const u8,
+    start: usize,
+    end: usize,
+) !void {
+    const green = zigline.Style{ .fg = .{ .basic = .green } };
+    const yellow = zigline.Style{ .fg = .{ .basic = .yellow } };
 
-    const body = span[1 .. if (span[span.len - 1] == '"') span.len - 1 else span.len];
-    var i: usize = 0;
-    while (i < body.len) {
-        const c = body[i];
-        if (c == '\\' and i + 1 < body.len) {
-            // Escape sequence — keep green, advance two bytes.
-            try w.writeAll(body[i .. i + 2]);
+    // The token covers `"..."` (or `"...` when the closing quote is
+    // missing). Walk the interior; emit a green span up to each `$var`
+    // boundary, then a yellow span for the var, then continue.
+    var seg_start = start;
+    var i = start + 1; // skip opening quote
+    while (i < end) {
+        const c = buffer[i];
+        if (c == '\\' and i + 1 < end) {
             i += 2;
             continue;
         }
-        if (c == '$' and i + 1 < body.len) {
-            const n = body[i + 1];
+        if (c == '$' and i + 1 < end) {
+            const n = buffer[i + 1];
             if (n == '{') {
-                const close = std.mem.indexOfScalarPos(u8, body, i + 2, '}');
-                const end_idx = if (close) |x| x + 1 else body.len;
-                try w.print("\x1b[0m\x1b[33m{s}\x1b[0m\x1b[32m", .{body[i..end_idx]});
-                i = end_idx;
+                const close_rel = std.mem.indexOfScalarPos(u8, buffer[0..end], i + 2, '}');
+                const var_end = if (close_rel) |x| x + 1 else end;
+                if (i > seg_start) try spans.append(allocator, .{
+                    .start = seg_start,
+                    .end = i,
+                    .style = green,
+                });
+                try spans.append(allocator, .{ .start = i, .end = var_end, .style = yellow });
+                seg_start = var_end;
+                i = var_end;
                 continue;
             }
             if (n == '(') {
                 var depth: u32 = 1;
                 var j = i + 2;
-                while (j < body.len) : (j += 1) {
-                    if (body[j] == '(') depth += 1;
-                    if (body[j] == ')') {
+                while (j < end) : (j += 1) {
+                    if (buffer[j] == '(') depth += 1;
+                    if (buffer[j] == ')') {
                         depth -= 1;
                         if (depth == 0) break;
                     }
                 }
-                const end_idx = if (j < body.len) j + 1 else body.len;
-                try w.print("\x1b[0m\x1b[33m{s}\x1b[0m\x1b[32m", .{body[i..end_idx]});
-                i = end_idx;
+                const var_end = if (j < end) j + 1 else end;
+                if (i > seg_start) try spans.append(allocator, .{
+                    .start = seg_start,
+                    .end = i,
+                    .style = green,
+                });
+                try spans.append(allocator, .{ .start = i, .end = var_end, .style = yellow });
+                seg_start = var_end;
+                i = var_end;
                 continue;
             }
             if (isVarRefStart(n)) {
                 var j = i + 2;
-                while (j < body.len and isVarRefCont(body[j])) : (j += 1) {}
-                try w.print("\x1b[0m\x1b[33m{s}\x1b[0m\x1b[32m", .{body[i..j]});
+                while (j < end and isVarRefCont(buffer[j])) : (j += 1) {}
+                if (i > seg_start) try spans.append(allocator, .{
+                    .start = seg_start,
+                    .end = i,
+                    .style = green,
+                });
+                try spans.append(allocator, .{ .start = i, .end = j, .style = yellow });
+                seg_start = j;
                 i = j;
                 continue;
             }
             if (isSpecialVarChar(n)) {
-                try w.print("\x1b[0m\x1b[33m{s}\x1b[0m\x1b[32m", .{body[i .. i + 2]});
+                if (i > seg_start) try spans.append(allocator, .{
+                    .start = seg_start,
+                    .end = i,
+                    .style = green,
+                });
+                try spans.append(allocator, .{ .start = i, .end = i + 2, .style = yellow });
+                seg_start = i + 2;
                 i += 2;
                 continue;
             }
         }
-        try w.writeByte(c);
         i += 1;
     }
-
-    // Close quote (if present).
-    if (span.len >= 2 and span[span.len - 1] == '"') {
-        try w.writeByte('"');
-    }
-    try w.writeAll("\x1b[0m");
+    if (seg_start < end) try spans.append(allocator, .{
+        .start = seg_start,
+        .end = end,
+        .style = green,
+    });
 }
 
 fn isVarRefStart(c: u8) bool {
@@ -665,98 +577,75 @@ fn isSpecialVarChar(c: u8) bool {
     };
 }
 
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t';
-}
+// -----------------------------------------------------------------------------
+// Completion — replacement-range adapter over PATH + filesystem walk
+// -----------------------------------------------------------------------------
 
-// =============================================================================
-// Tab completion
-// =============================================================================
-//
-// Two contexts:
-//   - command position: prefix is the first word on the line (or right
-//     after `;`, `&&`, `||`, `|`, `(`, `{`). Candidates: PATH executables
-//     plus the small set of always-available names slash recognizes
-//     (builtins land elsewhere; the binary doesn't currently expose a
-//     `BuiltinSet` enumerator, so for v0 we just complete against PATH
-//     and let the user lean on `type` for builtin discovery).
-//   - argument position: prefix is everything after the most recent
-//     space; candidates are filesystem entries matching the prefix.
-//
-// On a single match: insert the remainder plus a trailing `/` (dir) or
-// space (file). On multiple matches: emit a fresh line of candidates
-// and redraw the editor.
+fn completionHook(
+    ctx_ptr: *anyopaque,
+    allocator: Allocator,
+    request: zigline.CompletionRequest,
+) anyerror!zigline.CompletionResult {
+    _ = ctx_ptr;
+    const ctx = identifyCompletionContext(request.buffer, request.cursor_byte);
 
-fn handleTabCompletion(alloc: Allocator, editor: *LineEditor) !void {
-    const ctx = identifyCompletionContext(editor.buf.items, editor.cursor);
-
-    var candidates = std.ArrayListUnmanaged([]u8).empty;
+    var raw: std.ArrayListUnmanaged([]u8) = .empty;
     defer {
-        for (candidates.items) |c| alloc.free(c);
-        candidates.deinit(alloc);
+        for (raw.items) |s| allocator.free(s);
+        raw.deinit(allocator);
     }
 
     switch (ctx.kind) {
-        .command => try gatherCommandCandidates(alloc, ctx.prefix, &candidates),
-        .file => try gatherFileCandidates(alloc, ctx.prefix, &candidates),
+        .command => try gatherCommandCandidates(allocator, ctx.prefix, &raw),
+        .file => try gatherFileCandidates(allocator, ctx.prefix, &raw),
     }
 
-    if (candidates.items.len == 0) return;
-
-    if (candidates.items.len == 1) {
-        const match = candidates.items[0];
-        const suffix = match[ctx.prefix.len..];
-        for (suffix) |c| try editor.insert(c);
-        // Add `/` for directories, space otherwise — for command
-        // candidates the trailing space lands the user in argv space.
-        const last = match[match.len - 1];
-        if (last != '/') try editor.insert(' ');
-        try editor.render();
-        return;
+    var candidates: std.ArrayListUnmanaged(zigline.Candidate) = .empty;
+    errdefer {
+        for (candidates.items) |c| {
+            allocator.free(c.insert);
+            if (c.display) |d| allocator.free(d);
+        }
+        candidates.deinit(allocator);
     }
 
-    // Multiple matches: print them, then redraw the editor.
-    _ = std.c.write(1, "\r\n", 2);
-    for (candidates.items, 0..) |c, i| {
-        _ = std.c.write(1, c.ptr, c.len);
-        if (i + 1 < candidates.items.len) _ = std.c.write(1, "  ", 2);
+    for (raw.items) |label| {
+        // A trailing '/' on a candidate means "directory". Strip the
+        // marker for `insert` and re-attach via the per-candidate
+        // append rule the renderer will apply when only one matches.
+        const is_dir = label.len > 0 and label[label.len - 1] == '/';
+        const insert_text = try allocator.dupe(u8, if (is_dir) label[0 .. label.len - 1] else label);
+        try candidates.append(allocator, .{
+            .insert = insert_text,
+            .kind = if (ctx.kind == .command) .command else if (is_dir) .directory else .file,
+            .append = if (is_dir) '/' else if (ctx.kind == .command) ' ' else null,
+        });
     }
-    _ = std.c.write(1, "\r\n", 2);
-    try editor.render();
 
-    // If the candidates share a common prefix longer than the user's
-    // current prefix, insert the shared portion to bring the user
-    // closer to a unique match.
-    const common = longestCommonPrefix(candidates.items);
-    if (common.len > ctx.prefix.len) {
-        const extra = common[ctx.prefix.len..];
-        for (extra) |c| try editor.insert(c);
-        try editor.render();
-    }
+    return .{
+        .replacement_start = request.cursor_byte - ctx.prefix.len,
+        .replacement_end = request.cursor_byte,
+        .candidates = try candidates.toOwnedSlice(allocator),
+    };
 }
 
 const CompletionKind = enum { command, file };
 
 const CompletionContext = struct {
     kind: CompletionKind,
-    /// Bytes of the partial token under the cursor (everything from the
-    /// last whitespace / separator up to the cursor).
+    /// Bytes of the partial token under the cursor.
     prefix: []const u8,
 };
 
-fn identifyCompletionContext(buf: []const u8, cursor: u32) CompletionContext {
-    // Walk back to find the start of the current token.
-    var token_start: u32 = cursor;
+fn identifyCompletionContext(buf: []const u8, cursor_byte: usize) CompletionContext {
+    var token_start = cursor_byte;
     while (token_start > 0) {
         const c = buf[token_start - 1];
         if (isSpace(c) or c == '|' or c == ';' or c == '&' or c == '(' or c == '{') break;
         token_start -= 1;
     }
-    const prefix = buf[token_start..cursor];
+    const prefix = buf[token_start..cursor_byte];
 
-    // Walk back further from token_start across whitespace to look at
-    // what came before. If we hit a separator (or beginning of buffer),
-    // we're at command position.
     var p = token_start;
     while (p > 0 and isSpace(buf[p - 1])) p -= 1;
     if (p == 0) return .{ .kind = .command, .prefix = prefix };
@@ -768,53 +657,51 @@ fn identifyCompletionContext(buf: []const u8, cursor: u32) CompletionContext {
 }
 
 fn gatherCommandCandidates(
-    alloc: Allocator,
+    allocator: Allocator,
     prefix: []const u8,
     out: *std.ArrayListUnmanaged([]u8),
 ) !void {
     const path_env = std.c.getenv("PATH") orelse return;
     const path_str = std.mem.span(path_env);
 
-    var seen = std.StringHashMapUnmanaged(void){};
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var it = seen.iterator();
-        while (it.next()) |e| alloc.free(e.key_ptr.*);
-        seen.deinit(alloc);
+        while (it.next()) |e| allocator.free(e.key_ptr.*);
+        seen.deinit(allocator);
     }
 
     var dirs = std.mem.splitScalar(u8, path_str, ':');
     while (dirs.next()) |dir| {
         if (dir.len == 0) continue;
-        try enumerateMatching(alloc, dir, prefix, out, &seen, .require_executable);
+        try enumerateMatching(allocator, dir, prefix, out, &seen, .require_executable);
     }
 }
 
 fn gatherFileCandidates(
-    alloc: Allocator,
+    allocator: Allocator,
     prefix: []const u8,
     out: *std.ArrayListUnmanaged([]u8),
 ) !void {
-    // Split into directory + basename.
     const slash_idx = std.mem.lastIndexOfScalar(u8, prefix, '/');
     const dir_part: []const u8 = if (slash_idx) |i| prefix[0 .. i + 1] else "";
     const base_part: []const u8 = if (slash_idx) |i| prefix[i + 1 ..] else prefix;
     const dir_path: []const u8 = if (dir_part.len == 0) "." else dir_part;
 
-    var seen = std.StringHashMapUnmanaged(void){};
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var it = seen.iterator();
-        while (it.next()) |e| alloc.free(e.key_ptr.*);
-        seen.deinit(alloc);
+        while (it.next()) |e| allocator.free(e.key_ptr.*);
+        seen.deinit(allocator);
     }
 
-    try enumerateMatching(alloc, dir_path, base_part, out, &seen, .any);
+    try enumerateMatching(allocator, dir_path, base_part, out, &seen, .any);
 
-    // Re-attach the directory part to each candidate.
     if (dir_part.len > 0) {
         for (out.items) |*cand| {
             const old = cand.*;
-            const combined = try std.fmt.allocPrint(alloc, "{s}{s}", .{ dir_part, old });
-            alloc.free(old);
+            const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ dir_part, old });
+            allocator.free(old);
             cand.* = combined;
         }
     }
@@ -823,7 +710,7 @@ fn gatherFileCandidates(
 const EnumerateMode = enum { any, require_executable };
 
 fn enumerateMatching(
-    alloc: Allocator,
+    allocator: Allocator,
     dir_path: []const u8,
     prefix: []const u8,
     out: *std.ArrayListUnmanaged([]u8),
@@ -844,11 +731,9 @@ fn enumerateMatching(
         const name = direntName(ent);
         if (name.len == 0) continue;
         if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-        // Hidden files only if the prefix asks for them explicitly.
         if (name[0] == '.' and (prefix.len == 0 or prefix[0] != '.')) continue;
         if (!std.mem.startsWith(u8, name, prefix)) continue;
 
-        // For command candidates, require X_OK on the full path.
         if (mode == .require_executable) {
             var full_buf: [8192]u8 = undefined;
             const full = std.fmt.bufPrint(&full_buf, "{s}/{s}\x00", .{ dir_path, name }) catch continue;
@@ -856,15 +741,13 @@ fn enumerateMatching(
             if (std.c.access(full_z, std.c.X_OK) != 0) continue;
         }
 
-        // Dedup by name (per-prefix; cross-PATH-dir dups are merged).
-        const key = try alloc.dupe(u8, name);
-        const gop = try seen.getOrPut(alloc, key);
+        const key = try allocator.dupe(u8, name);
+        const gop = try seen.getOrPut(allocator, key);
         if (gop.found_existing) {
-            alloc.free(key);
+            allocator.free(key);
             continue;
         }
 
-        // For file candidates that are directories, decorate with `/`.
         var label_buf: [4096]u8 = undefined;
         var label = name;
         if (mode == .any) {
@@ -879,7 +762,7 @@ fn enumerateMatching(
                 label = decorated;
             }
         }
-        try out.append(alloc, try alloc.dupe(u8, label));
+        try out.append(allocator, try allocator.dupe(u8, label));
     }
 }
 
@@ -893,228 +776,35 @@ fn direntName(ent: anytype) []const u8 {
     return std.mem.span(name_ptr);
 }
 
-fn longestCommonPrefix(items: []const []u8) []const u8 {
-    if (items.len == 0) return "";
-    var n: usize = items[0].len;
-    for (items[1..]) |s| {
-        const m = @min(n, s.len);
-        var i: usize = 0;
-        while (i < m and items[0][i] == s[i]) : (i += 1) {}
-        n = i;
-        if (n == 0) break;
-    }
-    return items[0][0..n];
-}
-
-// -----------------------------------------------------------------------------
-// RawMode — termios save/restore
-// -----------------------------------------------------------------------------
-
-const RawMode = struct {
-    saved: std.c.termios,
-
-    fn enter() !RawMode {
-        var saved: std.c.termios = undefined;
-        if (std.c.tcgetattr(0, &saved) != 0) return error.NotATty;
-        var raw = saved;
-        // ICANON off → byte at a time; ECHO off → we render ourselves.
-        raw.lflag.ICANON = false;
-        raw.lflag.ECHO = false;
-        // Keep ISIG on so Ctrl-C delivers SIGINT (caught by our no-op
-        // handler, which interrupts the read).
-        raw.lflag.ISIG = true;
-        // Disable input mapping we don't want: CR→NL translation, etc.
-        raw.iflag.ICRNL = false;
-        raw.iflag.IXON = false;
-        // Read returns as soon as 1 byte is available.
-        raw.cc[@intFromEnum(std.c.V.MIN)] = 1;
-        raw.cc[@intFromEnum(std.c.V.TIME)] = 0;
-        if (std.c.tcsetattr(0, .NOW, &raw) != 0) return error.SetattrFailed;
-        return .{ .saved = saved };
-    }
-
-    fn leave(self: RawMode) void {
-        _ = std.c.tcsetattr(0, .NOW, &self.saved);
-    }
-};
-
-fn isStdinTty() bool {
-    return std.c.isatty(0) != 0;
+fn isSpace(c: u8) bool {
+    return c == ' ' or c == '\t';
 }
 
 // =============================================================================
-// Prompt rendering
+// History path resolver — kept slash-side because the location is
+// slash-specific (`~/.slash/history`). Falls back to in-memory only on
+// failure.
 // =============================================================================
-//
-// Default prompt: home-collapsed PWD, optional non-zero last status,
-// then `$ ` (or `# ` for root). Colors via ANSI: cwd in cyan, status
-// in red. `\x01`/`\x02` aren't used because we always recompute the
-// rendered prompt before each prompt boundary; the line editor's
-// `total_cols` accounting just needs the printable byte count, which
-// `cwd.len + 2` gives directly when no escapes are present.
 
-fn renderPrompt(buf: []u8, session: *const session_mod.Session) []const u8 {
-    var w = std.Io.Writer.fixed(buf);
+fn resolveHistoryPath(allocator: Allocator) !?[]u8 {
+    const home_env = std.c.getenv("HOME") orelse return null;
+    const home = std.mem.span(home_env);
+    if (home.len == 0) return null;
 
-    // PWD with home collapsed.
-    var cwd_buf: [4096]u8 = undefined;
-    const got = std.c.getcwd(&cwd_buf, cwd_buf.len);
-    var cwd: []const u8 = "?";
-    if (got != null) {
-        const len = std.mem.len(@as([*:0]u8, @ptrCast(got)));
-        cwd = cwd_buf[0..len];
-    }
+    const dir = try std.fmt.allocPrint(allocator, "{s}/.slash", .{home});
+    defer allocator.free(dir);
+    const dir_z = try allocator.dupeZ(u8, dir);
+    defer allocator.free(dir_z);
+    _ = std.c.mkdir(dir_z.ptr, 0o700);
 
-    // Home collapse.
-    if (std.c.getenv("HOME")) |home_env| {
-        const home = std.mem.span(home_env);
-        if (home.len > 0 and std.mem.startsWith(u8, cwd, home)) {
-            w.writeAll("~") catch return "$ ";
-            cwd = cwd[home.len..];
-        }
-    }
-    w.writeAll(cwd) catch return "$ ";
-
-    // Last status (only if non-zero).
-    if (session.last_status != 0) {
-        w.print(" [{d}]", .{session.last_status}) catch {};
-    }
-
-    // Suffix — root gets `#`, everyone else gets `$`.
-    const suffix: []const u8 = if (std.c.getuid() == 0) " # " else " $ ";
-    w.writeAll(suffix) catch return "$ ";
-
-    return w.buffered();
+    return try std.fmt.allocPrint(allocator, "{s}/history", .{dir});
 }
-
-// -----------------------------------------------------------------------------
-// History — persistent flat-file
-// -----------------------------------------------------------------------------
-
-const History = struct {
-    alloc: Allocator,
-    entries: std.ArrayListUnmanaged([]const u8) = .empty,
-    /// Cursor into `entries` while the user navigates Up/Down. `null`
-    /// means we're on the live editing line, not in the history.
-    cursor: ?usize = null,
-    /// Snapshot of the live editing line when the user first hit Up,
-    /// so Down past the end of history restores what they typed.
-    snapshot: ?[]const u8 = null,
-    path: ?[]u8 = null,
-
-    fn init(alloc: Allocator) History {
-        return .{ .alloc = alloc };
-    }
-
-    fn deinit(self: *History) void {
-        for (self.entries.items) |e| self.alloc.free(e);
-        self.entries.deinit(self.alloc);
-        if (self.snapshot) |s| self.alloc.free(s);
-        if (self.path) |p| self.alloc.free(p);
-    }
-
-    fn load(self: *History) !void {
-        try self.resolvePath();
-        const path = self.path orelse return;
-        const path_z = try self.alloc.dupeZ(u8, path);
-        defer self.alloc.free(path_z);
-        const fd = std.c.open(path_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, @as(std.c.mode_t, 0));
-        if (fd < 0) return; // missing history is fine
-
-        var buf = std.ArrayListUnmanaged(u8).empty;
-        defer buf.deinit(self.alloc);
-        var chunk: [4096]u8 = undefined;
-        while (true) {
-            const n = std.c.read(fd, &chunk, chunk.len);
-            if (n < 0) break;
-            if (n == 0) break;
-            try buf.appendSlice(self.alloc, chunk[0..@intCast(n)]);
-        }
-        _ = std.c.close(fd);
-
-        var it = std.mem.splitScalar(u8, buf.items, '\n');
-        while (it.next()) |line| {
-            if (line.len == 0) continue;
-            const dup = try self.alloc.dupe(u8, line);
-            try self.entries.append(self.alloc, dup);
-        }
-    }
-
-    fn append(self: *History, line: []const u8) !void {
-        if (line.len == 0) return;
-        if (self.entries.items.len > 0) {
-            // Skip exact duplicates of the previous entry.
-            const last = self.entries.items[self.entries.items.len - 1];
-            if (std.mem.eql(u8, last, line)) {
-                self.persistAppend(line) catch {};
-                return;
-            }
-        }
-        const dup = try self.alloc.dupe(u8, line);
-        try self.entries.append(self.alloc, dup);
-        self.persistAppend(line) catch {};
-    }
-
-    /// Step one entry back. `current` is the user's in-progress edit;
-    /// it gets snapshotted so a later Down past the end can restore it.
-    fn previous(self: *History, current: []const u8) ?[]const u8 {
-        if (self.entries.items.len == 0) return null;
-        if (self.cursor == null) {
-            if (self.snapshot) |s| self.alloc.free(s);
-            self.snapshot = self.alloc.dupe(u8, current) catch null;
-            self.cursor = self.entries.items.len;
-        }
-        if (self.cursor.? == 0) return null;
-        self.cursor = self.cursor.? - 1;
-        return self.entries.items[self.cursor.?];
-    }
-
-    fn next(self: *History) ?[]const u8 {
-        const cur = self.cursor orelse return null;
-        if (cur + 1 < self.entries.items.len) {
-            self.cursor = cur + 1;
-            return self.entries.items[cur + 1];
-        }
-        // Past the end → restore the snapshot (or empty).
-        self.cursor = null;
-        if (self.snapshot) |s| return s;
-        return "";
-    }
-
-    fn resolvePath(self: *History) !void {
-        const home_env = std.c.getenv("HOME") orelse return;
-        const home = std.mem.span(home_env);
-        const dir = try std.fmt.allocPrint(self.alloc, "{s}/.slash", .{home});
-        defer self.alloc.free(dir);
-        const dir_z = try self.alloc.dupeZ(u8, dir);
-        defer self.alloc.free(dir_z);
-        _ = std.c.mkdir(dir_z.ptr, 0o700);
-
-        self.path = try std.fmt.allocPrint(self.alloc, "{s}/history", .{dir});
-    }
-
-    fn persistAppend(self: *History, line: []const u8) !void {
-        const path = self.path orelse return;
-        const path_z = try self.alloc.dupeZ(u8, path);
-        defer self.alloc.free(path_z);
-        const fd = std.c.open(
-            path_z.ptr,
-            .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true },
-            @as(std.c.mode_t, 0o600),
-        );
-        if (fd < 0) return;
-        defer _ = std.c.close(fd);
-        _ = std.c.write(fd, line.ptr, line.len);
-        _ = std.c.write(fd, "\n", 1);
-    }
-};
 
 // =============================================================================
 // Shared parse/lower/run helpers
 // =============================================================================
 
-/// Parse + lower + run the buffered source. Distinguishes three
-/// outcomes:
+/// Parse + lower + run the buffered source. Three outcomes:
 ///   - parse succeeds → run, clear buffer, return the result status
 ///   - parse fails AT EOF → buffer is incomplete; keep accumulating
 ///   - parse fails before EOF → real error; render and clear buffer
@@ -1189,13 +879,15 @@ fn renderDiagnostics(items: []const diag.Diagnostic) void {
 // =============================================================================
 // Signal discipline
 // =============================================================================
+//
+// At the prompt the parent shell catches `SIGINT` so any stray signal
+// to the shell process group doesn't kill it. The line editor's
+// Ctrl-C handling is independent — zigline turns `ISIG` off in raw
+// mode, so the byte 0x03 reaches the editor's keymap rather than
+// becoming a SIGINT. SIGTSTP / SIGTTIN / SIGTTOU stay ignored so a
+// stray Ctrl-Z doesn't suspend slash. Children reset to defaults
+// before exec already (see `exec.resetSignalDefaults`).
 
-/// At the prompt the parent shell catches `SIGINT` so Ctrl-C
-/// interrupts the pending `read` (we'll see EINTR and clear the
-/// in-flight buffer) without actually killing the shell. `SIGTSTP`
-/// / `SIGTTIN` / `SIGTTOU` stay ignored so a stray Ctrl-Z doesn't
-/// suspend slash. Children reset to defaults before exec already
-/// (see `exec.resetSignalDefaults`).
 fn installInteractiveSignalHandlers() void {
     var ignore: std.posix.Sigaction = .{
         .handler = .{ .handler = std.c.SIG.IGN },
@@ -1214,6 +906,48 @@ fn installInteractiveSignalHandlers() void {
 }
 
 fn sigintNoop(_: std.c.SIG) callconv(.c) void {}
+
+fn isStdinTty() bool {
+    return std.c.isatty(0) != 0;
+}
+
+// =============================================================================
+// Prompt rendering
+// =============================================================================
+//
+// Default prompt: home-collapsed PWD, optional non-zero last status,
+// then `$ ` (or `# ` for root). Pure ASCII bytes — no embedded ANSI —
+// so `Prompt.plain` (which sets `width = bytes.len`) is correct.
+
+fn renderPrompt(buf: []u8, session: *const session_mod.Session) []const u8 {
+    var w = std.Io.Writer.fixed(buf);
+
+    var cwd_buf: [4096]u8 = undefined;
+    const got = std.c.getcwd(&cwd_buf, cwd_buf.len);
+    var cwd: []const u8 = "?";
+    if (got != null) {
+        const len = std.mem.len(@as([*:0]u8, @ptrCast(got)));
+        cwd = cwd_buf[0..len];
+    }
+
+    if (std.c.getenv("HOME")) |home_env| {
+        const home = std.mem.span(home_env);
+        if (home.len > 0 and std.mem.startsWith(u8, cwd, home)) {
+            w.writeAll("~") catch return "$ ";
+            cwd = cwd[home.len..];
+        }
+    }
+    w.writeAll(cwd) catch return "$ ";
+
+    if (session.last_status != 0) {
+        w.print(" [{d}]", .{session.last_status}) catch {};
+    }
+
+    const suffix: []const u8 = if (std.c.getuid() == 0) " # " else " $ ";
+    w.writeAll(suffix) catch return "$ ";
+
+    return w.buffered();
+}
 
 // =============================================================================
 // rc-file sourcing
@@ -1238,7 +972,7 @@ fn sourceRcFile(session: *session_mod.Session, alloc: Allocator) !void {
     );
     if (fd < 0) return;
 
-    var buf = std.ArrayListUnmanaged(u8).empty;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(a);
     var chunk: [4096]u8 = undefined;
     while (true) {
@@ -1269,67 +1003,161 @@ fn sourceRcFile(session: *session_mod.Session, alloc: Allocator) !void {
 }
 
 // =============================================================================
-// Tests
+// Tests — span-based highlighter
 // =============================================================================
 
-test "highlight: keywords get bold cyan" {
-    var buf: [256]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    try writeColored(&w, "if true { echo hi }");
-    const out = w.buffered();
-    // `if` (keyword), `true` and `echo` (idents), strings (none here),
-    // braces (dim). Expect at least one bold-cyan and one dim escape.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[1;36m") != null); // keyword
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2;37m") != null); // braces
+test "highlight: keywords get cyan + bold span" {
+    const alloc = std.testing.allocator;
+    const spans = try highlightHook(@ptrFromInt(0xdeadbeef), alloc, "if true { echo hi }");
+    defer alloc.free(spans);
+
+    var saw_keyword = false;
+    var saw_dim = false;
+    for (spans) |s| {
+        if (s.style.bold) {
+            if (s.style.fg) |fg| {
+                if (fg == .basic and fg.basic == .cyan) saw_keyword = true;
+            }
+        }
+        if (s.style.dim) saw_dim = true;
+    }
+    try std.testing.expect(saw_keyword);
+    try std.testing.expect(saw_dim);
 }
 
-test "highlight: variables and strings" {
-    var buf: [256]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    try writeColored(&w, "x=hello; echo $x 'lit'");
-    const out = w.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33m") != null); // $x yellow
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[32m") != null); // 'lit' green
-}
+test "highlight: dq with embedded $var emits alternating green/yellow spans" {
+    const alloc = std.testing.allocator;
+    const spans = try highlightHook(@ptrFromInt(0xdeadbeef), alloc, "echo \"hi $name\"");
+    defer alloc.free(spans);
 
-test "highlight: dq with embedded $var flips back to yellow" {
-    var buf: [256]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    try writeColored(&w, "echo \"hello $name\"");
-    const out = w.buffered();
-    // Should contain a green→yellow transition for the inner $name.
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[32m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[33m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "$name") != null);
+    var has_green = false;
+    var has_yellow = false;
+    for (spans) |s| {
+        if (s.style.fg) |fg| {
+            if (fg == .basic and fg.basic == .green) has_green = true;
+            if (fg == .basic and fg.basic == .yellow) has_yellow = true;
+        }
+    }
+    try std.testing.expect(has_green);
+    try std.testing.expect(has_yellow);
 }
 
 test "highlight: comment is dim" {
-    var buf: [256]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    try writeColored(&w, "echo a # trailing comment");
-    const out = w.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "# trailing") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[2;37m") != null);
+    const alloc = std.testing.allocator;
+    const spans = try highlightHook(@ptrFromInt(0xdeadbeef), alloc, "echo a # trailing");
+    defer alloc.free(spans);
+    var saw_dim = false;
+    for (spans) |s| if (s.style.dim) {
+        saw_dim = true;
+    };
+    try std.testing.expect(saw_dim);
 }
 
-test "highlight: bytes pass through unchanged when stripped of escapes" {
-    var buf: [256]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    const input = "for x in 1 2 3 { echo $x }";
-    try writeColored(&w, input);
-    const out = w.buffered();
-    // Stripping ANSI escapes should give back exactly the input.
-    var stripped: [256]u8 = undefined;
-    var len: usize = 0;
-    var i: usize = 0;
-    while (i < out.len) : (i += 1) {
-        if (out[i] == 0x1b) {
-            // Skip until 'm'.
-            while (i < out.len and out[i] != 'm') : (i += 1) {}
-            continue;
-        }
-        stripped[len] = out[i];
-        len += 1;
+// -----------------------------------------------------------------------------
+// Highlighter contract — non-overlap regression net
+// -----------------------------------------------------------------------------
+//
+// zigline's renderer normalizes spans by sorting them and dropping any that
+// overlap an earlier-kept span (`renderer.zig:normalizeSpans`). If slash's
+// highlighter emits a "wrapping" span (e.g. one big `string_dq` span over
+// the entire `"..."` followed by inner `$var` spans), the inner spans get
+// silently dropped and the user sees a single color where slash intended
+// alternation. This test pins the alternating-non-overlapping shape across
+// every category-mix slash highlighter is expected to handle, so a future
+// edit to `emitDqSpans` or `styleFor` that accidentally re-introduces a
+// wrapping span fails loud.
+
+fn assertSpansWellFormed(spans: []const zigline.HighlightSpan, buffer_len: usize) !void {
+    var prev_end: usize = 0;
+    for (spans) |s| {
+        try std.testing.expect(s.start >= prev_end); // sorted, non-overlapping
+        try std.testing.expect(s.end > s.start); // non-empty
+        try std.testing.expect(s.end <= buffer_len); // in bounds
+        prev_end = s.end;
     }
-    try std.testing.expectEqualStrings(input, stripped[0..len]);
+}
+
+test "highlight: spans well-formed across slash's full input matrix" {
+    const alloc = std.testing.allocator;
+
+    const cases = [_][]const u8{
+        // empty + minimal
+        "",
+        "echo hi",
+
+        // keywords + delimiters
+        "if true { echo x }",
+        "for x in 1 2 3 { echo $x }",
+        "x=1; y=2 && echo $y || echo nope",
+
+        // strings + variables
+        "echo 'literal'",
+        "echo \"hello\"",
+        "echo \"hi $name\"", // the case the constraint matters for
+        "echo \"a ${name} b\"",
+        "echo \"a $(date) b\"",
+        "echo \"a $x b $y c\"", // multiple vars in one dq
+
+        // multiple dq tokens on one line
+        "echo \"a $x\" \"b $y\"",
+
+        // var + cmd-sub + at-paren (lists)
+        "echo $name ${name} $(echo hi) @(echo a b)",
+
+        // pipes + redirects
+        "ls -la | head -3 | wc -l > /tmp/out 2>&1",
+
+        // heredoc
+        "cat <<EOF\nhello\nEOF",
+
+        // comments
+        "echo a # trailing comment",
+        "# leading comment only",
+
+        // mixed everything — the stress case
+        "if [[ -n \"$x\" ]] { for y in $(ls) { echo \"y=$y\" } }",
+    };
+
+    for (cases) |buf| {
+        const spans = try highlightHook(@ptrFromInt(0xdeadbeef), alloc, buf);
+        defer alloc.free(spans);
+        assertSpansWellFormed(spans, buf.len) catch |e| {
+            std.debug.print("highlighter failed well-formedness on: \"{s}\"\n", .{buf});
+            std.debug.print("emitted {d} spans:\n", .{spans.len});
+            for (spans, 0..) |s, idx| {
+                std.debug.print("  [{d}] start={d} end={d}\n", .{ idx, s.start, s.end });
+            }
+            return e;
+        };
+    }
+}
+
+test "highlight: dq with embedded $var produces strict alternation (no wrapping span)" {
+    const alloc = std.testing.allocator;
+    const buf = "echo \"hi $name there\"";
+    const spans = try highlightHook(@ptrFromInt(0xdeadbeef), alloc, buf);
+    defer alloc.free(spans);
+
+    // Find the dq-region spans (style is green or yellow). The dq token
+    // covers `"hi $name there"` from byte 5 to byte 21; we expect at
+    // least three spans within that range — a green prefix, a yellow
+    // var, and a green suffix — none of which overlap.
+    var dq_spans: std.ArrayListUnmanaged(zigline.HighlightSpan) = .empty;
+    defer dq_spans.deinit(alloc);
+    for (spans) |s| {
+        if (s.start >= 5 and s.end <= 21) try dq_spans.append(alloc, s);
+    }
+    try std.testing.expect(dq_spans.items.len >= 3);
+
+    // No span fully encloses another. (zigline's normalizer would drop
+    // the inner one if it did, and slash would silently lose the var
+    // highlighting.)
+    for (dq_spans.items, 0..) |outer, i| {
+        for (dq_spans.items, 0..) |inner, j| {
+            if (i == j) continue;
+            const fully_contains = outer.start <= inner.start and outer.end >= inner.end;
+            const equal = outer.start == inner.start and outer.end == inner.end;
+            try std.testing.expect(!fully_contains or equal);
+        }
+    }
 }

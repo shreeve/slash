@@ -8,7 +8,14 @@
     // cryptic partial-compile errors.
     .minimum_zig_version = "0.16.0",
 
-    .dependencies = .{},
+    .dependencies = .{
+        // zigline — the line editor lives in a sibling repo. Path
+        // dependency so iteration on zigline reflects in slash without
+        // a fetch cycle. Switch to a tagged URL dependency at v1.0.
+        .zigline = .{
+            .path = "../zigline",
+        },
+    },
 
     .paths = .{
         "build.zig",

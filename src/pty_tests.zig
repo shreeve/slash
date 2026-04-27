@@ -1,24 +1,21 @@
-//! PTY-driven tests for the raw-mode REPL.
+//! PTY-driven tests for slash — shell-specific cases.
 //!
-//! Each test allocates a fresh pseudo-terminal via `posix_openpt` /
-//! `grantpt` / `unlockpt` / `ptsname`, forks a slash subprocess with
-//! the slave end as its stdin/stdout/stderr, and drives keystrokes
-//! through the master end. Because slash sees a TTY-attached stdin,
-//! it takes the `runRaw` path — the same path real users get — and
-//! we assert on the rendered output.
+//! After the zigline cutover, line-editor mechanics (cursor movement,
+//! backspace, history navigation, Ctrl-C cancel, wrap-aware repaint)
+//! are covered by zigline's own PTY tests against zigline's example
+//! binaries. This file focuses on what zigline can't test for slash
+//! specifically:
 //!
-//! The harness covers the load-bearing line-editor invariants:
-//! prompt rendering, basic line entry, `Backspace`, cursor arrows,
-//! `Ctrl-C` cancellation, history recall (`Up` / `Down`), `Tab`
-//! completion, multi-line continuation, and `exit N` returning the
-//! requested status. PLAN §17.7 calls these out as the only
-//! credible proof of the interactive surface; without them every
-//! REPL change is unverified.
+//!   - shell-specific behaviors that need slash to think it's at an
+//!     interactive prompt (multi-line continuation, exit-status
+//!     propagation, prompt content with PWD + last-status suffix)
+//!   - slash's syntax highlighter actually firing through zigline's
+//!     renderer to produce ANSI on the wire
 //!
-//! Tests are platform-gated — Linux and macOS only. The PTY APIs
-//! used here are POSIX-2008 and present on both. If the test is run
-//! on a host where `/dev/ptmx` is unavailable, the harness reports a
-//! clean skip.
+//! The harness allocates a fresh pseudo-terminal via `posix_openpt` /
+//! `grantpt` / `unlockpt` / `ptsname`, forks `bin/slash` with the
+//! slave end as its stdin/stdout/stderr, and drives keystrokes through
+//! the master end. Tests are platform-gated — Linux and macOS only.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -29,29 +26,16 @@ extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname(fd: c_int) ?[*:0]u8;
 extern "c" fn setsid() std.c.pid_t;
 
-/// Custom `ioctl` extern with `c_ulong` request. The BSD/macOS magic
-/// value for `TIOCSWINSZ` overflows `c_int` (signed 32-bit), so the
-/// `std.c.ioctl` declaration's `c_int` request type can't hold it at
-/// compile time.
 const ioctl_with_ulong_request = struct {
     extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
 }.ioctl;
 
-/// Set the PTY's winsize so the line editor sees a known terminal
-/// width. Useful for forcing the wrap path with short test inputs.
-/// `std.c.T.IOCSWINSZ` is missing from the macOS stdlib mapping (only
-/// `IOCGWINSZ` is exposed there), so we hardcode the platform values.
 const TIOCSWINSZ: c_ulong = switch (builtin.target.os.tag) {
     .linux => 0x5414,
     .macos, .ios, .driverkit, .maccatalyst, .tvos, .visionos, .watchos => 0x80087467,
     .freebsd, .netbsd, .openbsd, .dragonfly => 0x80087467,
     else => 0x80087467,
 };
-
-fn setWinsize(master: c_int, rows: u16, cols: u16) void {
-    var ws: std.c.winsize = .{ .row = rows, .col = cols, .xpixel = 0, .ypixel = 0 };
-    _ = ioctl_with_ulong_request(master, TIOCSWINSZ, &ws);
-}
 
 const O_RDWR: c_int = 2;
 const O_NOCTTY: c_int = switch (builtin.target.os.tag) {
@@ -94,8 +78,6 @@ const Spawned = struct {
     pid: std.c.pid_t,
     master: c_int,
 
-    /// Write a byte sequence to the master. Short writes loop; EAGAIN
-    /// loops; anything else is reported as an error.
     fn send(self: Spawned, bytes: []const u8) !void {
         var off: usize = 0;
         while (off < bytes.len) {
@@ -110,9 +92,12 @@ const Spawned = struct {
         }
     }
 
-    /// Drain the master end until either EOF or a deadline expires.
-    /// The bytes the test asserts on are accumulated into `out`.
-    fn drain(self: Spawned, alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), deadline_ms: i64) !void {
+    fn drain(
+        self: Spawned,
+        alloc: std.mem.Allocator,
+        out: *std.ArrayListUnmanaged(u8),
+        deadline_ms: i64,
+    ) !void {
         var chunk: [4096]u8 = undefined;
         while (true) {
             if (try waitReadable(self.master, deadline_ms)) {
@@ -126,12 +111,11 @@ const Spawned = struct {
                 if (n == 0) return; // EOF
                 try out.appendSlice(alloc, chunk[0..@intCast(n)]);
             } else {
-                return; // deadline reached; caller decides whether that's an error
+                return; // deadline reached
             }
         }
     }
 
-    /// Wait for the child to exit and return its status byte.
     fn reap(self: Spawned) u8 {
         var status: c_int = 0;
         while (true) {
@@ -151,8 +135,6 @@ const Spawned = struct {
     }
 };
 
-/// Block on the master fd via `poll` until it's readable or the
-/// deadline expires. Returns true if data is ready, false on timeout.
 fn waitReadable(fd: c_int, deadline_ms: i64) !bool {
     var pfd: std.c.pollfd = .{ .fd = fd, .events = std.c.POLL.IN, .revents = 0 };
     const rc = std.c.poll(@ptrCast(&pfd), 1, @intCast(deadline_ms));
@@ -164,20 +146,13 @@ fn waitReadable(fd: c_int, deadline_ms: i64) !bool {
     return rc > 0;
 }
 
-/// Spawn slash against a fresh PTY with an explicit window size. The
-/// width is what the line editor's wrap math will use, so callers can
-/// deliberately exercise the multi-row repaint by picking a small
-/// `cols` and typing past it.
-fn spawnSlashSized(args: []const []const u8, rows: u16, cols: u16) !Spawned {
-    const child = try spawnSlash(args);
-    setWinsize(child.master, rows, cols);
-    return child;
+fn ptySupported() bool {
+    return switch (builtin.target.os.tag) {
+        .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly => true,
+        else => false,
+    };
 }
 
-/// Spawn slash against a fresh PTY. Inherits the calling process's
-/// env so PATH lookups and HOME-based `~/.slashrc` checks behave as
-/// they would for a real user (the rc file probably won't exist in
-/// CI; the test runs with `--norc` to make that explicit).
 fn spawnSlash(args: []const []const u8) !Spawned {
     const pty = try PtyPair.open();
 
@@ -185,11 +160,6 @@ fn spawnSlash(args: []const []const u8) !Spawned {
     if (pid < 0) return error.ForkFailed;
     if (pid == 0) {
         _ = std.c.close(pty.master);
-        // Become a session leader so the slave PTY becomes the
-        // controlling terminal when we open it. macOS auto-assigns;
-        // Linux needs TIOCSCTTY but the slave was already open()'d in
-        // the parent which on Linux makes it controlling for the new
-        // session as long as setsid runs first.
         _ = setsid();
 
         _ = std.c.dup2(pty.slave, 0);
@@ -197,22 +167,19 @@ fn spawnSlash(args: []const []const u8) !Spawned {
         _ = std.c.dup2(pty.slave, 2);
         if (pty.slave > 2) _ = std.c.close(pty.slave);
 
-        // Build NUL-terminated argv: slash binary + caller args.
         var argv_buf: [16]?[*:0]const u8 = undefined;
         var i: usize = 0;
         const slash_z = slash_bin ++ "\x00";
         argv_buf[i] = @ptrCast(slash_z.ptr);
         i += 1;
+
+        var arg_storage: [16][256]u8 = undefined;
         for (args) |a| {
             if (i + 1 >= argv_buf.len) std.c._exit(127);
-            // Each arg needs to be NUL-terminated; copy onto the stack.
-            var stack_buf: [256]u8 = undefined;
-            if (a.len + 1 > stack_buf.len) std.c._exit(127);
-            @memcpy(stack_buf[0..a.len], a);
-            stack_buf[a.len] = 0;
-            // Lifetime: stack_buf lives only this iteration. Since
-            // execve doesn't return on success, that's fine.
-            argv_buf[i] = @ptrCast(&stack_buf);
+            if (a.len + 1 > arg_storage[i].len) std.c._exit(127);
+            @memcpy(arg_storage[i][0..a.len], a);
+            arg_storage[i][a.len] = 0;
+            argv_buf[i] = @ptrCast(&arg_storage[i]);
             i += 1;
         }
         argv_buf[i] = null;
@@ -226,19 +193,20 @@ fn spawnSlash(args: []const []const u8) !Spawned {
     return .{ .pid = pid, .master = pty.master };
 }
 
-/// Drive a script of (write-then-drain) steps. After all steps,
-/// drain to EOF (or deadline). Returns the full collected output.
 const Step = struct {
     send: ?[]const u8 = null,
-    /// After sending, drain for at least this many ms before next step.
-    settle_ms: i64 = 80,
+    settle_ms: i64 = 100,
 };
 
-fn runScript(alloc: std.mem.Allocator, args: []const []const u8, steps: []const Step) !struct { out: []u8, status: u8 } {
+fn runScript(
+    alloc: std.mem.Allocator,
+    args: []const []const u8,
+    steps: []const Step,
+) !struct { out: []u8, status: u8 } {
     const child = try spawnSlash(args);
     defer child.close();
 
-    var collected = std.ArrayListUnmanaged(u8).empty;
+    var collected: std.ArrayListUnmanaged(u8) = .empty;
     defer collected.deinit(alloc);
 
     for (steps) |step| {
@@ -246,10 +214,8 @@ fn runScript(alloc: std.mem.Allocator, args: []const []const u8, steps: []const 
         try child.drain(alloc, &collected, step.settle_ms);
     }
 
-    // Final drain — give the child up to 1.5s to exit cleanly.
     try child.drain(alloc, &collected, 1500);
     const status = child.reap();
-
     return .{ .out = try collected.toOwnedSlice(alloc), .status = status };
 }
 
@@ -257,20 +223,20 @@ fn runScript(alloc: std.mem.Allocator, args: []const []const u8, steps: []const 
 // Tests
 // =============================================================================
 
-test "pty: basic line entry runs and exits" {
+test "slash pty: basic command runs and produces output" {
     if (!ptySupported()) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
     const r = try runScript(alloc, &.{"--norc"}, &.{
-        .{ .send = "echo hi-from-pty\n" },
+        .{ .send = "echo hi-from-slash-pty\n" },
         .{ .send = "exit 0\n" },
     });
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "hi-from-pty") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "hi-from-slash-pty") != null);
 }
 
-test "pty: exit status propagates" {
+test "slash pty: exit status propagates" {
     if (!ptySupported()) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
@@ -281,73 +247,14 @@ test "pty: exit status propagates" {
     try std.testing.expectEqual(@as(u8, 7), r.status);
 }
 
-test "pty: backspace deletes the previous character before submit" {
+test "slash pty: multi-line continuation accumulates a brace block" {
     if (!ptySupported()) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
-    // Type "echoX" then BS BS, then "o hi\n" → resulting line is "echo hi".
-    const r = try runScript(alloc, &.{"--norc"}, &.{
-        .{ .send = "echoX\x7f\x7fo hi\n" },
-        .{ .send = "exit 0\n" },
-    });
-    defer alloc.free(r.out);
-    try std.testing.expectEqual(@as(u8, 0), r.status);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "hi") != null);
-}
-
-test "pty: Ctrl-C clears in-flight buffer and emits a fresh prompt" {
-    if (!ptySupported()) return error.SkipZigTest;
-
-    const alloc = std.testing.allocator;
-    // Type a partial line, send Ctrl-C, then a real command.
-    const r = try runScript(alloc, &.{"--norc"}, &.{
-        .{ .send = "echo never" },
-        .{ .send = "\x03" }, // Ctrl-C
-        .{ .send = "echo recovered\n" },
-        .{ .send = "exit 0\n" },
-    });
-    defer alloc.free(r.out);
-    try std.testing.expectEqual(@as(u8, 0), r.status);
-    // The terminal's `ISIG` handling delivers SIGINT to the shell
-    // BEFORE the literal `\x03` byte reaches us, so the EINTR path in
-    // `readLine` fires (which prints just `\r\n`, not `^C`). What we
-    // really observe: the cancelled `echo never` doesn't run, and the
-    // post-cancel `echo recovered` does — its stdout shows up after
-    // a fresh prompt. The line editor echoes typed bytes too, so
-    // "never" shows up in the rendered keystroke buffer; what we
-    // can't get is two consecutive runs of `recovered` without a
-    // surviving cancel.
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "recovered") != null);
-}
-
-test "pty: Up arrow recalls the previous line" {
-    if (!ptySupported()) return error.SkipZigTest;
-
-    const alloc = std.testing.allocator;
-    // Submit one line, then Up + Enter to re-run it.
-    const r = try runScript(alloc, &.{"--norc"}, &.{
-        .{ .send = "echo first\n" },
-        .{ .send = "\x1b[A\n" }, // Up arrow + Enter
-        .{ .send = "exit 0\n" },
-    });
-    defer alloc.free(r.out);
-    try std.testing.expectEqual(@as(u8, 0), r.status);
-    // The word "first" should appear at least twice in the rendered
-    // output: once for the first run, once for the recalled line's
-    // echoed render plus its run.
-    var count: usize = 0;
-    var search: []const u8 = r.out;
-    while (std.mem.indexOf(u8, search, "first")) |idx| {
-        count += 1;
-        search = search[idx + 5 ..];
-    }
-    try std.testing.expect(count >= 2);
-}
-
-test "pty: multi-line continuation accumulates a block" {
-    if (!ptySupported()) return error.SkipZigTest;
-
-    const alloc = std.testing.allocator;
+    // Open brace, body, close brace on separate lines. Slash's
+    // `evaluatePending` recognizes the parse-incomplete state at EOF
+    // and keeps accumulating; the editor receives `... ` as the
+    // continuation prompt.
     const r = try runScript(alloc, &.{"--norc"}, &.{
         .{ .send = "if true {\n" },
         .{ .send = "echo block-body\n" },
@@ -357,91 +264,256 @@ test "pty: multi-line continuation accumulates a block" {
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "block-body") != null);
-    // The continuation prompt `... ` should have appeared at least
-    // once (between the open brace and the closing brace).
+    // The `... ` continuation prompt must have been written at least
+    // once between the open brace and the close brace.
     try std.testing.expect(std.mem.indexOf(u8, r.out, "... ") != null);
 }
 
-test "pty: Ctrl-D on an empty buffer exits cleanly" {
+test "slash pty: prompt renders with `$ ` (or `# ` for root)" {
     if (!ptySupported()) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
     const r = try runScript(alloc, &.{"--norc"}, &.{
-        .{ .send = "\x04" }, // Ctrl-D on empty line
+        .{ .send = "exit 0\n" },
     });
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
+
+    const has_dollar = std.mem.indexOf(u8, r.out, "$ ") != null;
+    const has_hash = std.mem.indexOf(u8, r.out, "# ") != null;
+    try std.testing.expect(has_dollar or has_hash);
 }
 
-test "pty: wrap-aware repaint runs a line longer than terminal width" {
+test "slash pty: nonzero last-status appears in next prompt" {
     if (!ptySupported()) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
-
-    // Force a narrow window so a routine command wraps.
-    const child = try spawnSlashSized(&.{"--norc"}, 24, 20);
-    defer child.close();
-
-    // The line is 33 bytes plus the prompt — well past 20 columns.
-    // The wrap-aware renderer must climb back to the top row before
-    // each repaint; the bug-symptom on a non-wrap-aware renderer is
-    // stale glyphs above the prompt and a corrupted run.
-    try child.send("echo wrap-runs-anyway\n");
-    try child.send("exit 0\n");
-
-    var collected = std.ArrayListUnmanaged(u8).empty;
-    defer collected.deinit(alloc);
-    try child.drain(alloc, &collected, 1500);
-    const status = child.reap();
-
-    try std.testing.expectEqual(@as(u8, 0), status);
-    try std.testing.expect(std.mem.indexOf(u8, collected.items, "wrap-runs-anyway") != null);
-    // The renderer should have emitted at least one cursor-up sequence
-    // while editing wrapped content.
-    try std.testing.expect(std.mem.indexOf(u8, collected.items, "\x1b[1A") != null or
-        std.mem.indexOf(u8, collected.items, "\x1b[2A") != null);
+    // Run a command that exits 1, then check the next prompt contains
+    // the bracketed status. (`renderPrompt` formats it as ` [{d}]`.)
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "false\n" },
+        .{ .send = "exit 0\n", .settle_ms = 200 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1]") != null);
 }
 
-test "pty: typed input is syntax-highlighted with ANSI escapes" {
+test "slash pty: highlighter emits ANSI for keywords + strings" {
     if (!ptySupported()) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
-    // Type a line that exercises a few categories: keyword, ident,
-    // string, variable. The line editor renders each typed byte
-    // through the colorizer, so the PTY master should observe ANSI
-    // escape sequences in the rendered stream.
+    // Slash's highlightHook returns spans; zigline's renderer translates
+    // them to SGR. The full pipeline through a real PTY produces ANSI
+    // escape sequences on the wire — bold-cyan for `if`, green for the
+    // string literal.
     const r = try runScript(alloc, &.{"--norc"}, &.{
         .{ .send = "if true { echo \"hi\" }\n" },
         .{ .send = "exit 0\n" },
     });
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
-    // Bold cyan (keyword) and green (string) escapes both fire.
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[1;36m") != null);
+
+    // Bold cyan == ESC [ 1 ; 36 m  (keyword); the renderer may emit the
+    // SGR fields in either order — accept both.
+    const bold_cyan_a = std.mem.indexOf(u8, r.out, "\x1b[1;36m") != null;
+    const bold_cyan_b = std.mem.indexOf(u8, r.out, "\x1b[36;1m") != null;
+    try std.testing.expect(bold_cyan_a or bold_cyan_b);
+
+    // Green for the dq string body.
     try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[32m") != null);
 }
 
-test "pty: prompt renders pwd and `$ ` suffix" {
+test "slash pty: Ctrl-X opens current line in $EDITOR and replaces buffer" {
     if (!ptySupported()) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
+
+    // Fake editor: a small shell script that writes a known marker to
+    // its argv[1] (the temp file slash creates) AND touches a sentinel
+    // so we can detect even-the-hook-fired separately from
+    // even-the-buffer-replaced.
+    const script_path = "/tmp/slash-pty-fake-editor.sh";
+    const sentinel_path = "/tmp/slash-pty-fake-editor-fired";
+    _ = std.c.unlink(sentinel_path);
+
+    const script_body =
+        \\#!/bin/sh
+        \\touch /tmp/slash-pty-fake-editor-fired
+        \\printf 'replaced\n' > "$1"
+        \\
+    ;
+    {
+        const fd = std.c.open(script_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o755));
+        try std.testing.expect(fd >= 0);
+        defer _ = std.c.close(fd);
+        _ = std.c.write(fd, script_body.ptr, script_body.len);
+    }
+    defer _ = std.c.unlink(script_path);
+    defer _ = std.c.unlink(sentinel_path);
+    _ = std.c.chmod(script_path, 0o755);
+
+    const setenv = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    }.setenv;
+    const unsetenv = struct {
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    }.unsetenv;
+    _ = setenv("EDITOR", script_path, 1);
+    _ = unsetenv("VISUAL");
+
     const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "original-text" },
+        .{ .send = "\x18", .settle_ms = 600 }, // Ctrl-X
+        .{ .send = "\n", .settle_ms = 200 },
         .{ .send = "exit 0\n" },
     });
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
-    // The prompt always ends with `$ ` (or `# ` for root). Exit happens
-    // before the user types so the buffer must contain the suffix.
-    const has_dollar = std.mem.indexOf(u8, r.out, "$ ") != null;
-    const has_hash = std.mem.indexOf(u8, r.out, "# ") != null;
-    try std.testing.expect(has_dollar or has_hash);
+
+    // First check: did the hook fire at all? (sentinel file exists)
+    const sentinel_fd = std.c.open(sentinel_path, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const sentinel_existed = sentinel_fd >= 0;
+    if (sentinel_fd >= 0) _ = std.c.close(sentinel_fd);
+
+    if (!sentinel_existed) {
+        std.debug.print("Ctrl-X did NOT invoke the custom-action hook.\n", .{});
+        std.debug.print("PTY output ({d} bytes):\n{s}\n", .{ r.out.len, r.out });
+    }
+    try std.testing.expect(sentinel_existed);
+
+    // Second check: did the buffer get replaced? "replaced" should
+    // appear in the rendered output after the Ctrl-X round-trip.
+    if (std.mem.indexOf(u8, r.out, "replaced") == null) {
+        std.debug.print("hook fired but buffer wasn't redrawn with new content.\n", .{});
+        std.debug.print("PTY output:\n{s}\n", .{r.out});
+    }
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "replaced") != null);
 }
 
-/// True if the PTY tests can run on this platform. macOS and Linux
-/// both support `posix_openpt`; other targets aren't checked.
-fn ptySupported() bool {
-    return switch (builtin.target.os.tag) {
-        .macos, .ios, .linux => true,
-        else => false,
-    };
+test "slash pty: Ctrl-X on empty buffer pre-fills with last history entry (zigline ≥ v0.1.5)" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+
+    // Fake editor: copies its argv[1] to a sentinel file so the test
+    // can inspect what slash wrote there. (The test asserts on the
+    // sentinel content, not on the rendered output, because the
+    // editor takes over the terminal during its run.)
+    const script_path = "/tmp/slash-pty-prefill-editor.sh";
+    const sentinel_path = "/tmp/slash-pty-prefill-snapshot";
+    _ = std.c.unlink(sentinel_path);
+
+    const script_body =
+        \\#!/bin/sh
+        \\cp "$1" /tmp/slash-pty-prefill-snapshot
+        \\printf 'edited\n' > "$1"
+        \\
+    ;
+    {
+        const fd = std.c.open(script_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o755));
+        try std.testing.expect(fd >= 0);
+        defer _ = std.c.close(fd);
+        _ = std.c.write(fd, script_body.ptr, script_body.len);
+    }
+    defer _ = std.c.unlink(script_path);
+    defer _ = std.c.unlink(sentinel_path);
+    _ = std.c.chmod(script_path, 0o755);
+
+    const setenv = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    }.setenv;
+    const unsetenv = struct {
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    }.unsetenv;
+    _ = setenv("EDITOR", script_path, 1);
+    _ = unsetenv("VISUAL");
+
+    // Submit a command first (populates history), then with an empty
+    // buffer hit Ctrl-X. Slash's editInEditor should detect the empty
+    // buffer + non-empty history and pre-fill the temp file with the
+    // last entry.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "echo seeded-from-history\n", .settle_ms = 200 },
+        .{ .send = "\x18", .settle_ms = 600 }, // Ctrl-X on empty buffer
+        .{ .send = "\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+
+    // Read the sentinel snapshot — it captured what slash wrote into
+    // the temp file before invoking the editor. Should contain the
+    // last history entry.
+    const fd = std.c.open(sentinel_path, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    var buf: [256]u8 = undefined;
+    const n = std.c.read(fd, &buf, buf.len);
+    try std.testing.expect(n > 0);
+    const captured = buf[0..@intCast(n)];
+
+    if (std.mem.indexOf(u8, captured, "echo seeded-from-history") == null) {
+        std.debug.print("temp file did NOT receive the last history entry.\n", .{});
+        std.debug.print("captured ({d} bytes): {s}\n", .{ captured.len, captured });
+    }
+    try std.testing.expect(std.mem.indexOf(u8, captured, "echo seeded-from-history") != null);
+}
+
+test "slash pty: M-. (yank-last-arg) pulls last word of last command — zigline v0.1.5 binding" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+
+    // Submit a command, then on a fresh prompt type "echo " followed
+    // by Alt-. The yank-last-arg action should insert the last
+    // whitespace token of the previous command ("/tmp/foo"). Submit
+    // the result; slash echoes whatever was on the line.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "echo first /tmp/foo\n", .settle_ms = 200 },
+        .{ .send = "echo " },
+        .{ .send = "\x1b." }, // Alt-. = M-. = yank-last-arg
+        .{ .send = "\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+
+    // The submitted line was "echo /tmp/foo" — its output appears in
+    // the PTY stream after the rendered prompt + keystrokes. Verify
+    // /tmp/foo shows up at least twice (once in the original command,
+    // once as yanked output).
+    var count: usize = 0;
+    var search: []const u8 = r.out;
+    while (std.mem.indexOf(u8, search, "/tmp/foo")) |idx| {
+        count += 1;
+        search = search[idx + 8 ..];
+    }
+    if (count < 2) {
+        std.debug.print("M-. did not appear to yank last arg. Output:\n{s}\n", .{r.out});
+    }
+    try std.testing.expect(count >= 2);
+}
+
+test "slash pty: highlighter inside dq with $var emits both green AND yellow" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // The constraint slash's highlighter MUST satisfy: emit alternating
+    // non-overlapping spans inside dq strings. If slash emitted a
+    // wrapping span (one big green over the whole dq + an inner yellow
+    // for $name), zigline's renderer would drop the yellow as an
+    // overlap and the user would see green-only output. This test
+    // catches that regression by asserting both colors fire.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "echo \"hi $USER there\"\n" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+
+    // Both green (literal) and yellow (variable) must appear in the
+    // rendered output. The renderer emits SGR around each span.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[32m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[33m") != null);
 }

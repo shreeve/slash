@@ -17,6 +17,20 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "version", version);
 
     // =========================================================================
+    // Dependencies
+    // =========================================================================
+
+    // zigline — the line editor library. Imported in slash's repl.zig
+    // for raw-mode line editing, history, completion, and syntax-
+    // highlighting hooks. Path dep until zigline reaches v1.0; see
+    // build.zig.zon.
+    const zigline_dep = b.dependency("zigline", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zigline_mod = zigline_dep.module("zigline");
+
+    // =========================================================================
     // Main executable
     // =========================================================================
 
@@ -26,6 +40,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     main_mod.addOptions("build_options", options);
+    main_mod.addImport("zigline", zigline_mod);
 
     const exe = b.addExecutable(.{
         .name = "slash",
@@ -60,6 +75,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_mod.addOptions("build_options", options);
+    test_mod.addImport("zigline", zigline_mod);
 
     // Tests need libc for std.c symbols (fork/waitpid/pipe/dup2/...).
     // Zig 0.16 removed the corresponding wrappers from std.posix, so the
@@ -90,8 +106,10 @@ pub fn build(b: *std.Build) void {
     // be skipped on platforms without /dev/ptmx. They run the just-built
     // slash binary as a subprocess attached to a pseudo-terminal, drive
     // keystrokes through the master end, and assert on the rendered
-    // output. The build path makes them depend on the installed
-    // executable so `zig build test-pty` always uses a fresh binary.
+    // output. After the zigline cutover, slash's PTY suite focuses on
+    // shell-specific behavior (multi-line continuation, prompt content,
+    // exit-status propagation, slash-flavored highlighter output) —
+    // line-editor mechanics are covered in zigline's own PTY tests.
     const pty_mod = b.createModule(.{
         .root_source_file = b.path("src/pty_tests.zig"),
         .target = target,
@@ -105,7 +123,5 @@ pub fn build(b: *std.Build) void {
     const test_pty_step = b.step("test-pty", "Run PTY-driven REPL tests");
     test_pty_step.dependOn(&run_pty_tests.step);
 
-    // Roll PTY tests into the default `test` step too so a clean build
-    // catches REPL regressions without an extra command.
     test_step.dependOn(&run_pty_tests.step);
 }
