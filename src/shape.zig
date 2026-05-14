@@ -241,6 +241,23 @@ pub const CmdDefShape = struct {
     span: Span,
 };
 
+/// `match SUBJECT { arms... }`. Subject is one word; each arm has one or
+/// more patterns (literal grammar atoms — see PLAN §12) and a body. The
+/// runtime tries arms in source order and runs the first arm whose
+/// pattern set matches the subject's expanded value. With no match,
+/// `match` exits 0 and runs nothing.
+pub const MatchArmShape = struct {
+    patterns: []const WordShape,
+    body: *const Shape,
+    span: Span,
+};
+
+pub const MatchShape = struct {
+    subject: WordShape,
+    arms: []const MatchArmShape,
+    span: Span,
+};
+
 // =============================================================================
 // Shape union
 // =============================================================================
@@ -257,6 +274,7 @@ pub const Shape = union(enum) {
     conditional: ConditionalShape,
     @"while": WhileShape,
     @"for": ForShape,
+    @"match": MatchShape,
     cmd_def: CmdDefShape,
 
     pub fn span(self: Shape) Span {
@@ -272,6 +290,7 @@ pub const Shape = union(enum) {
             .conditional => |c| c.span,
             .@"while" => |w| w.span,
             .@"for" => |f| f.span,
+            .@"match" => |m| m.span,
             .cmd_def => |d| d.span,
         };
     }
@@ -356,6 +375,7 @@ fn convertShape(
         .@"if" => Shape{ .conditional = try convertConditional(alloc, source, items[1..], sink) },
         .@"while" => Shape{ .@"while" = try convertWhile(alloc, source, items[1..], sink) },
         .@"for" => Shape{ .@"for" = try convertFor(alloc, source, items[1..], sink) },
+        .@"match" => Shape{ .@"match" = try convertMatch(alloc, source, items[1..], sink) },
         .cmd_def => Shape{ .cmd_def = try convertCmdDef(alloc, source, items[1..], sink) },
         else => {
             try emitBadShape(source, sexp, sink, "unexpected head tag at top level");
@@ -473,6 +493,7 @@ fn convertStage(
         .@"if" => Shape{ .conditional = try convertConditional(alloc, source, items[1..], sink) },
         .@"while" => Shape{ .@"while" = try convertWhile(alloc, source, items[1..], sink) },
         .@"for" => Shape{ .@"for" = try convertFor(alloc, source, items[1..], sink) },
+        .@"match" => Shape{ .@"match" = try convertMatch(alloc, source, items[1..], sink) },
         .cmd_def => Shape{ .cmd_def = try convertCmdDef(alloc, source, items[1..], sink) },
         else => {
             try emitBadShape(source, sexp, sink, "expected a command, pipeline, subshell, block, assignment, or control form");
@@ -825,6 +846,75 @@ fn convertFor(
     };
 }
 
+fn convertMatch(
+    alloc: Allocator,
+    source: Source,
+    children: []const parser.Sexp,
+    sink: ?Sink,
+) anyerror!MatchShape {
+    if (children.len != 2) {
+        try emitBadShape(source, .nil, sink, "match requires subject and arm-block");
+        return error.InvalidShape;
+    }
+
+    const subject = try convertWordOrAtomToWord(alloc, source, children[0], sink);
+
+    // children[1] is `(match_arms arm1 arm2 ...)` from the LBRACE/INDENT
+    // wrapper; the spread-collector strips the wrapping list.
+    const arms_items = try expectList(children[1], source, sink);
+    _ = try expectHeadTag(arms_items, .match_arms, source, sink);
+
+    if (arms_items.len < 2) {
+        try emitBadShape(source, children[1], sink, "match requires at least one arm");
+        return error.InvalidShape;
+    }
+
+    var arms = try alloc.alloc(MatchArmShape, arms_items.len - 1);
+    for (arms_items[1..], 0..) |arm_sexp, i|
+        arms[i] = try convertMatchArm(alloc, source, arm_sexp, sink);
+
+    const total_span: Span = .{
+        .start = subject.span.start,
+        .end = arms[arms.len - 1].span.end,
+    };
+    return .{ .subject = subject, .arms = arms, .span = total_span };
+}
+
+fn convertMatchArm(
+    alloc: Allocator,
+    source: Source,
+    sexp: parser.Sexp,
+    sink: ?Sink,
+) anyerror!MatchArmShape {
+    const items = try expectList(sexp, source, sink);
+    _ = try expectHeadTag(items, .match_arm, source, sink);
+    if (items.len != 3) {
+        try emitBadShape(source, sexp, sink, "match arm needs patterns and body");
+        return error.InvalidShape;
+    }
+
+    // items[1] is `(words word_atom+)` (one or more patterns).
+    const words_items = try expectList(items[1], source, sink);
+    _ = try expectHeadTag(words_items, .words, source, sink);
+    if (words_items.len < 2) {
+        try emitBadShape(source, items[1], sink, "match arm needs at least one pattern");
+        return error.InvalidShape;
+    }
+    var patterns = try alloc.alloc(WordShape, words_items.len - 1);
+    for (words_items[1..], 0..) |w, i|
+        patterns[i] = try convertWordOrAtomToWord(alloc, source, w, sink);
+
+    const body = try convertBody(alloc, source, items[2], sink);
+    const body_ptr = try alloc.create(Shape);
+    body_ptr.* = body;
+
+    return .{
+        .patterns = patterns,
+        .body = body_ptr,
+        .span = .{ .start = patterns[0].span.start, .end = body.span().end },
+    };
+}
+
 /// `cond_chain` resolves to either a single pipeline/command or to a chain
 /// of `cond_and`/`cond_or` reductions wrapping pipelines. We canonicalize
 /// chains into `SequenceShape` with `and_then`/`or_else` connectors.
@@ -1119,6 +1209,7 @@ fn splitDoubleQuoted(
                 'n' => '\n',
                 't' => '\t',
                 'r' => '\r',
+                'e' => 0x1b, // ESC — for ANSI escape sequences
                 '0' => 0,
                 else => {
                     try text_buf.append(alloc, c);
@@ -1740,6 +1831,7 @@ fn dumpShape(source: Source, s: Shape, depth: u32, w: *Writer, opts: DumpOptions
         .conditional => |c| try dumpConditional(source, c, depth, w, opts),
         .@"while" => |x| try dumpWhile(source, x, depth, w, opts),
         .@"for" => |x| try dumpFor(source, x, depth, w, opts),
+        .@"match" => |x| try dumpMatch(source, x, depth, w, opts),
         .cmd_def => |d| try dumpCmdDef(source, d, depth, w, opts),
     }
 }
@@ -1917,6 +2009,25 @@ fn dumpFor(source: Source, x: ForShape, depth: u32, w: *Writer, opts: DumpOption
     try indent(w, depth + 1);
     try w.writeAll("body\n");
     try dumpShape(source, x.body.*, depth + 2, w, opts);
+}
+
+fn dumpMatch(source: Source, m: MatchShape, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.writeAll("match");
+    try maybeSpan(m.span, w, opts);
+    try w.writeByte('\n');
+    try indent(w, depth + 1);
+    try w.writeAll("subject\n");
+    try dumpWordParts(m.subject, depth + 2, w);
+    for (m.arms) |arm| {
+        try indent(w, depth + 1);
+        try w.writeAll("arm\n");
+        try indent(w, depth + 2);
+        try w.writeAll("patterns\n");
+        for (arm.patterns) |p| try dumpWordParts(p, depth + 3, w);
+        try indent(w, depth + 2);
+        try w.writeAll("body\n");
+        try dumpShape(source, arm.body.*, depth + 3, w, opts);
+    }
 }
 
 fn dumpCmdDef(source: Source, d: CmdDefShape, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {

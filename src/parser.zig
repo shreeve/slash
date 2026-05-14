@@ -637,84 +637,94 @@ pub const Parser = struct {
             8 => self.list(pass),
             9 => self.list(pass),
             10 => self.list(pass),
-            11 => self.sexp(.@"seq_always", &.{pass[1]}),
-            12 => self.sexp(.@"seq_always", &.{.nil}),
-            13 => self.sexp(.@"seq_and", &.{pass[1]}),
-            14 => self.sexp(.@"seq_or", &.{pass[1]}),
-            15 => self.sexp(.@"seq_bg", &.{pass[1]}),
-            16 => self.sexp(.@"seq_bg", &.{.nil}),
-            17 => pass[0],
-            18 => self.spreadList(pass[0], pass[1]),
-            19 => .{ .list = &[_]Sexp{} },
-            20 => self.spreadList(pass[0], pass[1]),
-            21 => self.sexpPosSpread(.@"pipeline", pass[0], pass[1]),
-            22 => pass[1],
-            23 => self.list(pass),
+            11 => self.list(pass),
+            12 => self.sexp(.@"seq_always", &.{pass[1]}),
+            13 => self.sexp(.@"seq_always", &.{.nil}),
+            14 => self.sexp(.@"seq_and", &.{pass[1]}),
+            15 => self.sexp(.@"seq_or", &.{pass[1]}),
+            16 => self.sexp(.@"seq_bg", &.{pass[1]}),
+            17 => self.sexp(.@"seq_bg", &.{.nil}),
+            18 => pass[0],
+            19 => self.spreadList(pass[0], pass[1]),
+            20 => .{ .list = &[_]Sexp{} },
+            21 => self.spreadList(pass[0], pass[1]),
+            22 => self.sexpPosSpread(.@"pipeline", pass[0], pass[1]),
+            23 => pass[1],
             24 => self.list(pass),
-            25 => self.sexp(.@"subshell", &.{pass[1]}),
-            26 => self.sexp(.@"subshell", &.{pass[1], pass[3]}),
-            27 => self.sexp(.@"block", &.{pass[1]}),
-            28 => self.sexp(.@"block", &.{pass[1], pass[3]}),
-            29 => self.spreadList(pass[0], pass[1]),
-            30 => .{ .list = &[_]Sexp{} },
-            31 => self.spreadList(pass[0], pass[1]),
-            32 => self.sexpSpread(.@"redirects", pass[0]),
-            33 => self.spreadList(pass[0], pass[1]),
-            34 => .{ .list = &[_]Sexp{} },
-            35 => blk: { var out: std.ArrayListUnmanaged(Sexp) = .empty; out.append(self.allocator(), .{ .tag = .@"command" }) catch break :blk .nil; out.append(self.allocator(), .nil) catch break :blk .nil; out.append(self.allocator(), pass[0]) catch break :blk .nil; if (pass[1] == .list) for (pass[1].list) |item| out.append(self.allocator(), item) catch break :blk .nil; while (out.items.len > 0 and out.items[out.items.len - 1] == .nil) _ = out.pop(); break :blk .{ .list = out.toOwnedSlice(self.allocator()) catch &[_]Sexp{} }; },
-            36 => blk: { var out: std.ArrayListUnmanaged(Sexp) = .empty; out.append(self.allocator(), .{ .tag = .@"command" }) catch break :blk .nil; out.append(self.allocator(), pass[0]) catch break :blk .nil; out.append(self.allocator(), pass[1]) catch break :blk .nil; if (pass[2] == .list) for (pass[2].list) |item| out.append(self.allocator(), item) catch break :blk .nil; while (out.items.len > 0 and out.items[out.items.len - 1] == .nil) _ = out.pop(); break :blk .{ .list = out.toOwnedSlice(self.allocator()) catch &[_]Sexp{} }; },
-            37 => self.spreadList(pass[0], pass[1]),
-            38 => .{ .list = &[_]Sexp{} },
-            39 => self.spreadList(pass[0], pass[1]),
-            40 => self.sexpSpread(.@"env_binds", pass[0]),
-            41 => self.sexpSpread(.@"assigns", pass[0]),
-            42 => self.sexp(.@"env_bind", &.{pass[0], pass[1]}),
-            43 => self.sexp(.@"scalar", &.{pass[0]}),
-            44 => self.sexpSpread(.@"list", pass[1]),
-            45 => self.spreadList(pass[0], pass[1]),
-            46 => .{ .list = &[_]Sexp{} },
-            47 => blk: { var out: std.ArrayListUnmanaged(Sexp) = .empty; if (pass[0] == .list) for (pass[0].list) |item| out.append(self.allocator(), item) catch break :blk .nil; while (out.items.len > 0 and out.items[out.items.len - 1] == .nil) _ = out.pop(); break :blk .{ .list = out.toOwnedSlice(self.allocator()) catch &[_]Sexp{} }; },
-            48 => self.list(pass),
+            25 => self.list(pass),
+            26 => self.sexp(.@"subshell", &.{pass[1]}),
+            27 => self.sexp(.@"subshell", &.{pass[1], pass[3]}),
+            28 => self.sexp(.@"block", &.{pass[1]}),
+            29 => self.sexp(.@"block", &.{pass[1], pass[3]}),
+            30 => self.spreadList(pass[0], pass[1]),
+            31 => .{ .list = &[_]Sexp{} },
+            32 => self.spreadList(pass[0], pass[1]),
+            33 => self.sexpSpread(.@"redirects", pass[0]),
+            34 => self.spreadList(pass[0], pass[1]),
+            35 => .{ .list = &[_]Sexp{} },
+            36 => blk: { var out: std.ArrayListUnmanaged(Sexp) = .empty; out.append(self.allocator(), .{ .tag = .@"command" }) catch break :blk .nil; out.append(self.allocator(), .nil) catch break :blk .nil; out.append(self.allocator(), pass[0]) catch break :blk .nil; if (pass[1] == .list) for (pass[1].list) |item| out.append(self.allocator(), item) catch break :blk .nil; while (out.items.len > 0 and out.items[out.items.len - 1] == .nil) _ = out.pop(); break :blk .{ .list = out.toOwnedSlice(self.allocator()) catch &[_]Sexp{} }; },
+            37 => blk: { var out: std.ArrayListUnmanaged(Sexp) = .empty; out.append(self.allocator(), .{ .tag = .@"command" }) catch break :blk .nil; out.append(self.allocator(), pass[0]) catch break :blk .nil; out.append(self.allocator(), pass[1]) catch break :blk .nil; if (pass[2] == .list) for (pass[2].list) |item| out.append(self.allocator(), item) catch break :blk .nil; while (out.items.len > 0 and out.items[out.items.len - 1] == .nil) _ = out.pop(); break :blk .{ .list = out.toOwnedSlice(self.allocator()) catch &[_]Sexp{} }; },
+            38 => self.spreadList(pass[0], pass[1]),
+            39 => .{ .list = &[_]Sexp{} },
+            40 => self.spreadList(pass[0], pass[1]),
+            41 => self.sexpSpread(.@"env_binds", pass[0]),
+            42 => self.sexpSpread(.@"assigns", pass[0]),
+            43 => self.sexp(.@"env_bind", &.{pass[0], pass[1]}),
+            44 => self.sexp(.@"scalar", &.{pass[0]}),
+            45 => self.sexpSpread(.@"list", pass[1]),
+            46 => self.spreadList(pass[0], pass[1]),
+            47 => .{ .list = &[_]Sexp{} },
+            48 => blk: { var out: std.ArrayListUnmanaged(Sexp) = .empty; if (pass[0] == .list) for (pass[0].list) |item| out.append(self.allocator(), item) catch break :blk .nil; while (out.items.len > 0 and out.items[out.items.len - 1] == .nil) _ = out.pop(); break :blk .{ .list = out.toOwnedSlice(self.allocator()) catch &[_]Sexp{} }; },
             49 => self.list(pass),
-            50 => self.sexp(.@"word", &.{pass[0]}),
+            50 => self.list(pass),
             51 => self.sexp(.@"word", &.{pass[0]}),
             52 => self.sexp(.@"word", &.{pass[0]}),
             53 => self.sexp(.@"word", &.{pass[0]}),
-            54 => self.sexp(.@"var", &.{pass[0]}),
-            55 => self.sexp(.@"var_braced", &.{pass[0]}),
-            56 => self.sexp(.@"cmd_subst", &.{pass[1]}),
-            57 => self.sexp(.@"list_capture", &.{pass[1]}),
-            58 => self.sexp(.@"proc_sub_in", &.{pass[1]}),
-            59 => self.sexp(.@"proc_sub_out", &.{pass[1]}),
-            60 => self.list(pass),
-            61 => self.sexp(.@"word", &.{pass[0]}),
+            54 => self.sexp(.@"word", &.{pass[0]}),
+            55 => self.sexp(.@"var", &.{pass[0]}),
+            56 => self.sexp(.@"var_braced", &.{pass[0]}),
+            57 => self.sexp(.@"cmd_subst", &.{pass[1]}),
+            58 => self.sexp(.@"list_capture", &.{pass[1]}),
+            59 => self.sexp(.@"proc_sub_in", &.{pass[1]}),
+            60 => self.sexp(.@"proc_sub_out", &.{pass[1]}),
+            61 => self.list(pass),
             62 => self.sexp(.@"word", &.{pass[0]}),
-            63 => self.sexp(.@"if", &.{pass[1], pass[2], .nil}),
-            64 => self.sexp(.@"if", &.{pass[1], pass[2], pass[3]}),
-            65 => pass[0],
-            66 => self.sexp(.@"cond_and", &.{pass[0], pass[2]}),
-            67 => self.sexp(.@"cond_or", &.{pass[0], pass[2]}),
-            68 => self.sexp(.@"else", &.{pass[1]}),
-            69 => self.sexp(.@"elif", &.{pass[1]}),
-            70 => self.sexp(.@"body", &.{pass[1]}),
+            63 => self.sexp(.@"word", &.{pass[0]}),
+            64 => self.sexp(.@"if", &.{pass[1], pass[2], .nil}),
+            65 => self.sexp(.@"if", &.{pass[1], pass[2], pass[3]}),
+            66 => pass[0],
+            67 => self.sexp(.@"cond_and", &.{pass[0], pass[2]}),
+            68 => self.sexp(.@"cond_or", &.{pass[0], pass[2]}),
+            69 => self.sexp(.@"else", &.{pass[1]}),
+            70 => self.sexp(.@"elif", &.{pass[1]}),
             71 => self.sexp(.@"body", &.{pass[1]}),
-            72 => self.sexp(.@"while", &.{pass[1], pass[2]}),
-            73 => self.sexp(.@"for", &.{pass[1], pass[3], pass[4]}),
-            74 => self.sexp(.@"cmd_def", &.{pass[1], pass[2]}),
-            75 => self.spreadList(pass[0], pass[1]),
-            76 => self.sexpSpread(.@"words", pass[0]),
-            77 => self.sexp(.@"redir_read", &.{pass[1]}),
-            78 => self.sexp(.@"redir_read_fd", &.{pass[0], pass[1]}),
-            79 => self.sexp(.@"redir_write", &.{pass[1]}),
-            80 => self.sexp(.@"redir_write_fd", &.{pass[0], pass[1]}),
-            81 => self.sexp(.@"redir_append", &.{pass[1]}),
-            82 => self.sexp(.@"redir_both", &.{pass[1]}),
-            83 => self.sexp(.@"redir_both_append", &.{pass[1]}),
-            84 => self.sexp(.@"redir_dup_out", &.{pass[0]}),
-            85 => self.sexp(.@"redir_dup_in", &.{pass[0]}),
-            86 => self.sexp(.@"redir_heredoc", &.{pass[0], pass[1]}),
-            87 => self.sexp(.@"redir_heredoc_lit", &.{pass[0], pass[1]}),
-            88 => self.list(pass),
+            72 => self.sexp(.@"body", &.{pass[1]}),
+            73 => self.sexp(.@"while", &.{pass[1], pass[2]}),
+            74 => self.sexp(.@"for", &.{pass[1], pass[3], pass[4]}),
+            75 => self.sexp(.@"match", &.{pass[1], pass[2]}),
+            76 => self.sexpSpread(.@"match_arms", pass[1]),
+            77 => self.sexpSpread(.@"match_arms", pass[1]),
+            78 => self.spreadList(pass[0], pass[1]),
+            79 => .{ .list = &[_]Sexp{} },
+            80 => blk: { var out: std.ArrayListUnmanaged(Sexp) = .empty; out.append(self.allocator(), pass[0]) catch break :blk .nil; if (pass[1] == .list) for (pass[1].list) |item| out.append(self.allocator(), item) catch break :blk .nil; while (out.items.len > 0 and out.items[out.items.len - 1] == .nil) _ = out.pop(); break :blk .{ .list = out.toOwnedSlice(self.allocator()) catch &[_]Sexp{} }; },
+            81 => pass[1],
+            82 => .nil,
+            83 => self.sexp(.@"match_arm", &.{pass[0], pass[1]}),
+            84 => self.sexp(.@"cmd_def", &.{pass[1], pass[2]}),
+            85 => self.spreadList(pass[0], pass[1]),
+            86 => self.sexpSpread(.@"words", pass[0]),
+            87 => self.sexp(.@"redir_read", &.{pass[1]}),
+            88 => self.sexp(.@"redir_read_fd", &.{pass[0], pass[1]}),
+            89 => self.sexp(.@"redir_write", &.{pass[1]}),
+            90 => self.sexp(.@"redir_write_fd", &.{pass[0], pass[1]}),
+            91 => self.sexp(.@"redir_append", &.{pass[1]}),
+            92 => self.sexp(.@"redir_both", &.{pass[1]}),
+            93 => self.sexp(.@"redir_both_append", &.{pass[1]}),
+            94 => self.sexp(.@"redir_dup_out", &.{pass[0]}),
+            95 => self.sexp(.@"redir_dup_in", &.{pass[0]}),
+            96 => self.sexp(.@"redir_heredoc", &.{pass[0], pass[1]}),
+            97 => self.sexp(.@"redir_heredoc_lit", &.{pass[0], pass[1]}),
+            98 => self.list(pass),
             else => .nil,
         };
     }
@@ -723,42 +733,42 @@ pub const Parser = struct {
         return switch (token.cat) {
             .@"eof" => 1,
             .@"ident" => self.identToSymbol(token),
-            .@"semi" => 32,
-            .@"and_and" => 33,
-            .@"or_or" => 34,
-            .@"amp" => 35,
-            .@"pipe" => 38,
-            .@"lparen" => 39,
-            .@"rparen" => 40,
-            .@"lbrace" => 41,
-            .@"rbrace" => 42,
-            .@"name_eq" => 48,
-            .@"lbracket" => 49,
-            .@"rbracket" => 50,
-            .@"integer" => 53,
-            .@"string_sq" => 54,
-            .@"string_dq" => 55,
-            .@"variable" => 56,
-            .@"var_braced" => 57,
-            .@"dollar_paren" => 58,
-            .@"at_paren" => 59,
-            .@"proc_sub_in" => 60,
-            .@"proc_sub_out" => 61,
-            .@"assign" => 62,
-            .@"indent" => 65,
-            .@"outdent" => 66,
-            .@"lt" => 72,
-            .@"fd_lt" => 73,
-            .@"gt" => 74,
-            .@"fd_gt" => 75,
-            .@"gt_gt" => 76,
-            .@"amp_gt" => 77,
-            .@"amp_gt_gt" => 78,
-            .@"fd_dup_out" => 79,
-            .@"fd_dup_in" => 80,
-            .@"heredoc_open" => 81,
-            .@"heredoc_body" => 82,
-            .@"heredoc_open_lit" => 83,
+            .@"semi" => 37,
+            .@"and_and" => 38,
+            .@"or_or" => 39,
+            .@"amp" => 40,
+            .@"pipe" => 43,
+            .@"lparen" => 44,
+            .@"rparen" => 45,
+            .@"lbrace" => 46,
+            .@"rbrace" => 47,
+            .@"name_eq" => 53,
+            .@"lbracket" => 54,
+            .@"rbracket" => 55,
+            .@"integer" => 58,
+            .@"string_sq" => 59,
+            .@"string_dq" => 60,
+            .@"variable" => 61,
+            .@"var_braced" => 62,
+            .@"dollar_paren" => 63,
+            .@"at_paren" => 64,
+            .@"proc_sub_in" => 65,
+            .@"proc_sub_out" => 66,
+            .@"assign" => 67,
+            .@"indent" => 70,
+            .@"outdent" => 71,
+            .@"lt" => 79,
+            .@"fd_lt" => 80,
+            .@"gt" => 81,
+            .@"fd_gt" => 82,
+            .@"gt_gt" => 83,
+            .@"amp_gt" => 84,
+            .@"amp_gt_gt" => 85,
+            .@"fd_dup_out" => 86,
+            .@"fd_dup_in" => 87,
+            .@"heredoc_open" => 88,
+            .@"heredoc_body" => 89,
+            .@"heredoc_open_lit" => 90,
             else => 2, // error
         };
     }
@@ -797,211 +807,230 @@ pub const Parser = struct {
 
 // Symbol IDs
 const SYM_program: u16 = 3;
-const SYM_program_START: u16 = 84;
-const symIdent: u16 = 52;
+const SYM_program_START: u16 = 91;
+const symIdent: u16 = 57;
 
 // Mapping from slash.KeywordId to grammar symbol IDs (computed at comptime)
 const keywordToSymbol = blk: {
     var arr: [512]u16 = .{0} ** 512;
-    if (@hasField(slash.KeywordId, "SEMI")) arr[@intFromEnum(slash.KeywordId.SEMI)] = 32;
-    if (@hasField(slash.KeywordId, "AND_AND")) arr[@intFromEnum(slash.KeywordId.AND_AND)] = 33;
-    if (@hasField(slash.KeywordId, "OR_OR")) arr[@intFromEnum(slash.KeywordId.OR_OR)] = 34;
-    if (@hasField(slash.KeywordId, "AMP")) arr[@intFromEnum(slash.KeywordId.AMP)] = 35;
-    if (@hasField(slash.KeywordId, "PIPE")) arr[@intFromEnum(slash.KeywordId.PIPE)] = 38;
-    if (@hasField(slash.KeywordId, "LPAREN")) arr[@intFromEnum(slash.KeywordId.LPAREN)] = 39;
-    if (@hasField(slash.KeywordId, "RPAREN")) arr[@intFromEnum(slash.KeywordId.RPAREN)] = 40;
-    if (@hasField(slash.KeywordId, "LBRACE")) arr[@intFromEnum(slash.KeywordId.LBRACE)] = 41;
-    if (@hasField(slash.KeywordId, "RBRACE")) arr[@intFromEnum(slash.KeywordId.RBRACE)] = 42;
-    if (@hasField(slash.KeywordId, "NAME_EQ")) arr[@intFromEnum(slash.KeywordId.NAME_EQ)] = 48;
-    if (@hasField(slash.KeywordId, "LBRACKET")) arr[@intFromEnum(slash.KeywordId.LBRACKET)] = 49;
-    if (@hasField(slash.KeywordId, "RBRACKET")) arr[@intFromEnum(slash.KeywordId.RBRACKET)] = 50;
-    if (@hasField(slash.KeywordId, "IDENT")) arr[@intFromEnum(slash.KeywordId.IDENT)] = 52;
-    if (@hasField(slash.KeywordId, "INTEGER")) arr[@intFromEnum(slash.KeywordId.INTEGER)] = 53;
-    if (@hasField(slash.KeywordId, "STRING_SQ")) arr[@intFromEnum(slash.KeywordId.STRING_SQ)] = 54;
-    if (@hasField(slash.KeywordId, "STRING_DQ")) arr[@intFromEnum(slash.KeywordId.STRING_DQ)] = 55;
-    if (@hasField(slash.KeywordId, "VARIABLE")) arr[@intFromEnum(slash.KeywordId.VARIABLE)] = 56;
-    if (@hasField(slash.KeywordId, "VAR_BRACED")) arr[@intFromEnum(slash.KeywordId.VAR_BRACED)] = 57;
-    if (@hasField(slash.KeywordId, "DOLLAR_PAREN")) arr[@intFromEnum(slash.KeywordId.DOLLAR_PAREN)] = 58;
-    if (@hasField(slash.KeywordId, "AT_PAREN")) arr[@intFromEnum(slash.KeywordId.AT_PAREN)] = 59;
-    if (@hasField(slash.KeywordId, "PROC_SUB_IN")) arr[@intFromEnum(slash.KeywordId.PROC_SUB_IN)] = 60;
-    if (@hasField(slash.KeywordId, "PROC_SUB_OUT")) arr[@intFromEnum(slash.KeywordId.PROC_SUB_OUT)] = 61;
-    if (@hasField(slash.KeywordId, "ASSIGN")) arr[@intFromEnum(slash.KeywordId.ASSIGN)] = 62;
-    if (@hasField(slash.KeywordId, "IF")) arr[@intFromEnum(slash.KeywordId.IF)] = 63;
-    if (@hasField(slash.KeywordId, "ELSE")) arr[@intFromEnum(slash.KeywordId.ELSE)] = 64;
-    if (@hasField(slash.KeywordId, "INDENT")) arr[@intFromEnum(slash.KeywordId.INDENT)] = 65;
-    if (@hasField(slash.KeywordId, "OUTDENT")) arr[@intFromEnum(slash.KeywordId.OUTDENT)] = 66;
-    if (@hasField(slash.KeywordId, "WHILE")) arr[@intFromEnum(slash.KeywordId.WHILE)] = 67;
-    if (@hasField(slash.KeywordId, "FOR")) arr[@intFromEnum(slash.KeywordId.FOR)] = 68;
-    if (@hasField(slash.KeywordId, "IN")) arr[@intFromEnum(slash.KeywordId.IN)] = 69;
-    if (@hasField(slash.KeywordId, "CMD")) arr[@intFromEnum(slash.KeywordId.CMD)] = 70;
-    if (@hasField(slash.KeywordId, "LT")) arr[@intFromEnum(slash.KeywordId.LT)] = 72;
-    if (@hasField(slash.KeywordId, "FD_LT")) arr[@intFromEnum(slash.KeywordId.FD_LT)] = 73;
-    if (@hasField(slash.KeywordId, "GT")) arr[@intFromEnum(slash.KeywordId.GT)] = 74;
-    if (@hasField(slash.KeywordId, "FD_GT")) arr[@intFromEnum(slash.KeywordId.FD_GT)] = 75;
-    if (@hasField(slash.KeywordId, "GT_GT")) arr[@intFromEnum(slash.KeywordId.GT_GT)] = 76;
-    if (@hasField(slash.KeywordId, "AMP_GT")) arr[@intFromEnum(slash.KeywordId.AMP_GT)] = 77;
-    if (@hasField(slash.KeywordId, "AMP_GT_GT")) arr[@intFromEnum(slash.KeywordId.AMP_GT_GT)] = 78;
-    if (@hasField(slash.KeywordId, "FD_DUP_OUT")) arr[@intFromEnum(slash.KeywordId.FD_DUP_OUT)] = 79;
-    if (@hasField(slash.KeywordId, "FD_DUP_IN")) arr[@intFromEnum(slash.KeywordId.FD_DUP_IN)] = 80;
-    if (@hasField(slash.KeywordId, "HEREDOC_OPEN")) arr[@intFromEnum(slash.KeywordId.HEREDOC_OPEN)] = 81;
-    if (@hasField(slash.KeywordId, "HEREDOC_BODY")) arr[@intFromEnum(slash.KeywordId.HEREDOC_BODY)] = 82;
-    if (@hasField(slash.KeywordId, "HEREDOC_OPEN_LIT")) arr[@intFromEnum(slash.KeywordId.HEREDOC_OPEN_LIT)] = 83;
+    if (@hasField(slash.KeywordId, "SEMI")) arr[@intFromEnum(slash.KeywordId.SEMI)] = 37;
+    if (@hasField(slash.KeywordId, "AND_AND")) arr[@intFromEnum(slash.KeywordId.AND_AND)] = 38;
+    if (@hasField(slash.KeywordId, "OR_OR")) arr[@intFromEnum(slash.KeywordId.OR_OR)] = 39;
+    if (@hasField(slash.KeywordId, "AMP")) arr[@intFromEnum(slash.KeywordId.AMP)] = 40;
+    if (@hasField(slash.KeywordId, "PIPE")) arr[@intFromEnum(slash.KeywordId.PIPE)] = 43;
+    if (@hasField(slash.KeywordId, "LPAREN")) arr[@intFromEnum(slash.KeywordId.LPAREN)] = 44;
+    if (@hasField(slash.KeywordId, "RPAREN")) arr[@intFromEnum(slash.KeywordId.RPAREN)] = 45;
+    if (@hasField(slash.KeywordId, "LBRACE")) arr[@intFromEnum(slash.KeywordId.LBRACE)] = 46;
+    if (@hasField(slash.KeywordId, "RBRACE")) arr[@intFromEnum(slash.KeywordId.RBRACE)] = 47;
+    if (@hasField(slash.KeywordId, "NAME_EQ")) arr[@intFromEnum(slash.KeywordId.NAME_EQ)] = 53;
+    if (@hasField(slash.KeywordId, "LBRACKET")) arr[@intFromEnum(slash.KeywordId.LBRACKET)] = 54;
+    if (@hasField(slash.KeywordId, "RBRACKET")) arr[@intFromEnum(slash.KeywordId.RBRACKET)] = 55;
+    if (@hasField(slash.KeywordId, "IDENT")) arr[@intFromEnum(slash.KeywordId.IDENT)] = 57;
+    if (@hasField(slash.KeywordId, "INTEGER")) arr[@intFromEnum(slash.KeywordId.INTEGER)] = 58;
+    if (@hasField(slash.KeywordId, "STRING_SQ")) arr[@intFromEnum(slash.KeywordId.STRING_SQ)] = 59;
+    if (@hasField(slash.KeywordId, "STRING_DQ")) arr[@intFromEnum(slash.KeywordId.STRING_DQ)] = 60;
+    if (@hasField(slash.KeywordId, "VARIABLE")) arr[@intFromEnum(slash.KeywordId.VARIABLE)] = 61;
+    if (@hasField(slash.KeywordId, "VAR_BRACED")) arr[@intFromEnum(slash.KeywordId.VAR_BRACED)] = 62;
+    if (@hasField(slash.KeywordId, "DOLLAR_PAREN")) arr[@intFromEnum(slash.KeywordId.DOLLAR_PAREN)] = 63;
+    if (@hasField(slash.KeywordId, "AT_PAREN")) arr[@intFromEnum(slash.KeywordId.AT_PAREN)] = 64;
+    if (@hasField(slash.KeywordId, "PROC_SUB_IN")) arr[@intFromEnum(slash.KeywordId.PROC_SUB_IN)] = 65;
+    if (@hasField(slash.KeywordId, "PROC_SUB_OUT")) arr[@intFromEnum(slash.KeywordId.PROC_SUB_OUT)] = 66;
+    if (@hasField(slash.KeywordId, "ASSIGN")) arr[@intFromEnum(slash.KeywordId.ASSIGN)] = 67;
+    if (@hasField(slash.KeywordId, "IF")) arr[@intFromEnum(slash.KeywordId.IF)] = 68;
+    if (@hasField(slash.KeywordId, "ELSE")) arr[@intFromEnum(slash.KeywordId.ELSE)] = 69;
+    if (@hasField(slash.KeywordId, "INDENT")) arr[@intFromEnum(slash.KeywordId.INDENT)] = 70;
+    if (@hasField(slash.KeywordId, "OUTDENT")) arr[@intFromEnum(slash.KeywordId.OUTDENT)] = 71;
+    if (@hasField(slash.KeywordId, "WHILE")) arr[@intFromEnum(slash.KeywordId.WHILE)] = 72;
+    if (@hasField(slash.KeywordId, "FOR")) arr[@intFromEnum(slash.KeywordId.FOR)] = 73;
+    if (@hasField(slash.KeywordId, "IN")) arr[@intFromEnum(slash.KeywordId.IN)] = 74;
+    if (@hasField(slash.KeywordId, "MATCH")) arr[@intFromEnum(slash.KeywordId.MATCH)] = 75;
+    if (@hasField(slash.KeywordId, "CMD")) arr[@intFromEnum(slash.KeywordId.CMD)] = 77;
+    if (@hasField(slash.KeywordId, "LT")) arr[@intFromEnum(slash.KeywordId.LT)] = 79;
+    if (@hasField(slash.KeywordId, "FD_LT")) arr[@intFromEnum(slash.KeywordId.FD_LT)] = 80;
+    if (@hasField(slash.KeywordId, "GT")) arr[@intFromEnum(slash.KeywordId.GT)] = 81;
+    if (@hasField(slash.KeywordId, "FD_GT")) arr[@intFromEnum(slash.KeywordId.FD_GT)] = 82;
+    if (@hasField(slash.KeywordId, "GT_GT")) arr[@intFromEnum(slash.KeywordId.GT_GT)] = 83;
+    if (@hasField(slash.KeywordId, "AMP_GT")) arr[@intFromEnum(slash.KeywordId.AMP_GT)] = 84;
+    if (@hasField(slash.KeywordId, "AMP_GT_GT")) arr[@intFromEnum(slash.KeywordId.AMP_GT_GT)] = 85;
+    if (@hasField(slash.KeywordId, "FD_DUP_OUT")) arr[@intFromEnum(slash.KeywordId.FD_DUP_OUT)] = 86;
+    if (@hasField(slash.KeywordId, "FD_DUP_IN")) arr[@intFromEnum(slash.KeywordId.FD_DUP_IN)] = 87;
+    if (@hasField(slash.KeywordId, "HEREDOC_OPEN")) arr[@intFromEnum(slash.KeywordId.HEREDOC_OPEN)] = 88;
+    if (@hasField(slash.KeywordId, "HEREDOC_BODY")) arr[@intFromEnum(slash.KeywordId.HEREDOC_BODY)] = 89;
+    if (@hasField(slash.KeywordId, "HEREDOC_OPEN_LIT")) arr[@intFromEnum(slash.KeywordId.HEREDOC_OPEN_LIT)] = 90;
     break :blk arr;
 };
 const keywordFallbackSymbol: u16 = 0;
 
-const ruleLhs = [_]u16{ 3, 31, 31, 4, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 7, 36, 36, 37, 7, 8, 9, 9, 10, 10, 11, 11, 43, 43, 44, 12, 45, 45, 13, 13, 46, 46, 47, 14, 15, 16, 17, 17, 51, 51, 18, 19, 19, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 21, 21, 21, 22, 22, 23, 23, 23, 24, 24, 25, 25, 26, 27, 28, 71, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 85 };
-const ruleLen = [_]u8{ 2, 2, 0, 2, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 2, 2, 1, 1, 2, 0, 2, 2, 2, 1, 1, 3, 4, 3, 4, 2, 0, 2, 1, 2, 0, 2, 3, 2, 0, 2, 1, 1, 2, 1, 3, 2, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 3, 1, 1, 1, 3, 4, 1, 3, 3, 2, 2, 3, 3, 3, 5, 3, 2, 1, 2, 2, 2, 2, 2, 2, 2, 1, 1, 2, 2, 2 };
+const ruleLhs = [_]u16{ 3, 36, 36, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 7, 41, 41, 42, 7, 8, 9, 9, 10, 10, 11, 11, 48, 48, 49, 12, 50, 50, 13, 13, 51, 51, 52, 14, 15, 16, 17, 17, 56, 56, 18, 19, 19, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 21, 21, 21, 22, 22, 23, 23, 23, 24, 24, 25, 25, 26, 27, 28, 29, 29, 76, 76, 30, 31, 31, 32, 33, 78, 34, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35, 35, 92 };
+const ruleLen = [_]u8{ 2, 2, 0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 2, 2, 2, 1, 1, 2, 0, 2, 2, 2, 1, 1, 3, 4, 3, 4, 2, 0, 2, 1, 2, 0, 2, 3, 2, 0, 2, 1, 1, 2, 1, 3, 2, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 3, 1, 1, 1, 3, 4, 1, 3, 3, 2, 2, 3, 3, 3, 5, 3, 3, 3, 2, 0, 2, 2, 1, 2, 3, 2, 1, 2, 2, 2, 2, 2, 2, 2, 1, 1, 2, 2, 2 };
 
-// Parse Table: 144 states × 86 symbols
-const numStates = 144;
-const numSymbols = 86;
+// Parse Table: 162 states × 93 symbols
+const numStates = 162;
+const numSymbols = 93;
 
 const sparse = [numStates][]const i16{
-    &.{3,1,84,2},
+    &.{3,1,91,2},
     &.{1,-1},
-    &.{4,34,5,27,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
+    &.{4,37,5,27,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
     &.{1,-1},
-    &.{7,37,9,5,10,7,13,6,14,22,16,10,20,16,23,39,39,14,47,38,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32},
-    &.{1,-19,8,40,32,-19,33,-19,34,-19,35,-19,37,42,38,41,40,-19,41,-19,42,-19,65,-19,66,-19},
-    &.{1,-25,32,-25,33,-25,34,-25,35,-25,38,-25,40,-25,41,-25,42,-25,65,-25,66,-25},
-    &.{1,-26,32,-26,33,-26,34,-26,35,-26,38,-26,40,-26,41,-26,42,-26,65,-26,66,-26},
-    &.{4,43,5,27,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
-    &.{7,37,9,5,10,7,13,6,14,22,16,10,20,16,23,44,39,14,47,38,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32},
-    &.{1,-40,16,46,32,-40,33,-40,34,-40,35,-40,40,-40,42,-40,46,45,48,17,52,-40,53,-40,54,-40,55,-40,56,-40,57,-40,58,-40,59,-40,60,-40,61,-40,66,-40},
-    &.{1,-57,32,-57,33,-57,34,-57,35,-57,38,-57,40,-57,41,-57,42,-57,48,-57,50,-57,52,-57,53,-57,54,-57,55,-57,56,-57,57,-57,58,-57,59,-57,60,-57,61,-57,62,-57,65,-57,66,-57,72,-57,73,-57,74,-57,75,-57,76,-57,77,-57,78,-57,79,-57,80,-57,81,-57,83,-57},
-    &.{4,47,5,27,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
-    &.{4,48,5,27,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
-    &.{4,49,5,27,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
-    &.{1,-6,32,-6,33,-6,34,-6,35,-6,40,-6,42,-6,66,-6},
-    &.{1,-36,19,64,20,56,21,54,30,52,32,-36,33,-36,34,-36,35,-36,38,-36,40,-36,41,-36,42,-36,45,66,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65,65,-36,66,-36,72,50,73,60,74,58,75,59,76,53,77,61,78,55,79,67,80,62,81,63,83,51},
-    &.{17,68,20,56,21,69,48,57,49,70,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65},
-    &.{1,-11,32,-11,33,-11,34,-11,35,-11,40,-11,42,-11,66,-11},
-    &.{52,71},
-    &.{1,-56,32,-56,33,-56,34,-56,35,-56,38,-56,40,-56,41,-56,42,-56,48,-56,50,-56,52,-56,53,-56,54,-56,55,-56,56,-56,57,-56,58,-56,59,-56,60,-56,61,-56,62,-56,65,-56,66,-56,72,-56,73,-56,74,-56,75,-56,76,-56,77,-56,78,-56,79,-56,80,-56,81,-56,83,-56},
-    &.{1,-7,32,-7,33,-7,34,-7,35,-7,40,-7,42,-7,66,-7},
-    &.{20,72,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32},
-    &.{1,-12,32,-12,33,-12,34,-12,35,-12,40,-12,42,-12,66,-12},
-    &.{4,73,5,27,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
-    &.{1,-10,32,-10,33,-10,34,-10,35,-10,40,-10,42,-10,66,-10},
-    &.{1,-9,32,-9,33,-9,34,-9,35,-9,40,-9,42,-9,66,-9},
-    &.{1,-4,6,76,31,79,32,78,33,75,34,74,35,77,40,-4,42,-4,66,-4},
-    &.{1,-8,32,-8,33,-8,34,-8,35,-8,40,-8,42,-8,66,-8},
-    &.{52,80},
-    &.{1,-53,32,-53,33,-53,34,-53,35,-53,38,-53,40,-53,41,-53,42,-53,48,-53,50,-53,52,-53,53,-53,54,-53,55,-53,56,-53,57,-53,58,-53,59,-53,60,-53,61,-53,62,-53,65,-53,66,-53,72,-53,73,-53,74,-53,75,-53,76,-53,77,-53,78,-53,79,-53,80,-53,81,-53,83,-53},
-    &.{1,-55,32,-55,33,-55,34,-55,35,-55,38,-55,40,-55,41,-55,42,-55,48,-55,50,-55,52,-55,53,-55,54,-55,55,-55,56,-55,57,-55,58,-55,59,-55,60,-55,61,-55,62,-55,65,-55,66,-55,72,-55,73,-55,74,-55,75,-55,76,-55,77,-55,78,-55,79,-55,80,-55,81,-55,83,-55},
-    &.{4,81,5,27,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
-    &.{1,-52,32,-52,33,-52,34,-52,35,-52,38,-52,40,-52,41,-52,42,-52,48,-52,50,-52,52,-52,53,-52,54,-52,55,-52,56,-52,57,-52,58,-52,59,-52,60,-52,61,-52,62,-52,65,-52,66,-52,72,-52,73,-52,74,-52,75,-52,76,-52,77,-52,78,-52,79,-52,80,-52,81,-52,83,-52},
+    &.{7,40,9,5,10,7,13,6,14,19,16,8,20,16,23,41,44,38,52,39,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32},
+    &.{1,-20,8,42,37,-20,38,-20,39,-20,40,-20,42,43,43,44,45,-20,46,-20,47,-20,70,-20,71,-20},
+    &.{1,-26,37,-26,38,-26,39,-26,40,-26,43,-26,45,-26,46,-26,47,-26,70,-26,71,-26},
+    &.{1,-27,37,-27,38,-27,39,-27,40,-27,43,-27,45,-27,46,-27,47,-27,70,-27,71,-27},
+    &.{1,-41,16,46,37,-41,38,-41,39,-41,40,-41,45,-41,47,-41,51,45,53,30,57,-41,58,-41,59,-41,60,-41,61,-41,62,-41,63,-41,64,-41,65,-41,66,-41,71,-41},
+    &.{1,-53,37,-53,38,-53,39,-53,40,-53,43,-53,45,-53,46,-53,47,-53,53,-53,55,-53,57,-53,58,-53,59,-53,60,-53,61,-53,62,-53,63,-53,64,-53,65,-53,66,-53,67,-53,70,-53,71,-53,79,-53,80,-53,81,-53,82,-53,83,-53,84,-53,85,-53,86,-53,87,-53,88,-53,90,-53},
+    &.{1,-54,37,-54,38,-54,39,-54,40,-54,43,-54,45,-54,46,-54,47,-54,53,-54,55,-54,57,-54,58,-54,59,-54,60,-54,61,-54,62,-54,63,-54,64,-54,65,-54,66,-54,67,-54,70,-54,71,-54,79,-54,80,-54,81,-54,82,-54,83,-54,84,-54,85,-54,86,-54,87,-54,88,-54,90,-54},
+    &.{4,47,5,27,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
+    &.{4,48,5,27,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
+    &.{4,49,5,27,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
+    &.{1,-56,37,-56,38,-56,39,-56,40,-56,43,-56,45,-56,46,-56,47,-56,53,-56,55,-56,57,-56,58,-56,59,-56,60,-56,61,-56,62,-56,63,-56,64,-56,65,-56,66,-56,67,-56,70,-56,71,-56,79,-56,80,-56,81,-56,82,-56,83,-56,84,-56,85,-56,86,-56,87,-56,88,-56,90,-56},
+    &.{1,-6,37,-6,38,-6,39,-6,40,-6,45,-6,47,-6,71,-6},
+    &.{1,-37,19,65,20,56,21,53,35,52,37,-37,38,-37,39,-37,40,-37,43,-37,45,-37,46,-37,47,-37,50,64,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51,70,-37,71,-37,79,67,80,61,81,62,82,66,83,50,84,58,85,63,86,57,87,59,88,54,90,55},
+    &.{1,-12,37,-12,38,-12,39,-12,40,-12,45,-12,47,-12,71,-12},
+    &.{7,40,9,5,10,7,13,6,14,19,16,8,20,16,23,68,44,38,52,39,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32},
+    &.{20,69,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32},
+    &.{1,-7,37,-7,38,-7,39,-7,40,-7,45,-7,47,-7,71,-7},
+    &.{57,70},
+    &.{1,-10,37,-10,38,-10,39,-10,40,-10,45,-10,47,-10,71,-10},
+    &.{20,56,21,71,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51},
+    &.{1,-55,37,-55,38,-55,39,-55,40,-55,43,-55,45,-55,46,-55,47,-55,53,-55,55,-55,57,-55,58,-55,59,-55,60,-55,61,-55,62,-55,63,-55,64,-55,65,-55,66,-55,67,-55,70,-55,71,-55,79,-55,80,-55,81,-55,82,-55,83,-55,84,-55,85,-55,86,-55,87,-55,88,-55,90,-55},
+    &.{1,-11,37,-11,38,-11,39,-11,40,-11,45,-11,47,-11,71,-11},
+    &.{1,-9,37,-9,38,-9,39,-9,40,-9,45,-9,47,-9,71,-9},
+    &.{1,-4,6,74,36,76,37,77,38,75,39,73,40,72,45,-4,47,-4,71,-4},
+    &.{1,-8,37,-8,38,-8,39,-8,40,-8,45,-8,47,-8,71,-8},
+    &.{57,78},
+    &.{17,79,20,56,21,80,53,60,54,81,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51},
+    &.{1,-57,37,-57,38,-57,39,-57,40,-57,43,-57,45,-57,46,-57,47,-57,53,-57,55,-57,57,-57,58,-57,59,-57,60,-57,61,-57,62,-57,63,-57,64,-57,65,-57,66,-57,67,-57,70,-57,71,-57,79,-57,80,-57,81,-57,82,-57,83,-57,84,-57,85,-57,86,-57,87,-57,88,-57,90,-57},
+    &.{4,82,5,27,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
+    &.{1,-58,37,-58,38,-58,39,-58,40,-58,43,-58,45,-58,46,-58,47,-58,53,-58,55,-58,57,-58,58,-58,59,-58,60,-58,61,-58,62,-58,63,-58,64,-58,65,-58,66,-58,67,-58,70,-58,71,-58,79,-58,80,-58,81,-58,82,-58,83,-58,84,-58,85,-58,86,-58,87,-58,88,-58,90,-58},
+    &.{4,83,5,27,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
+    &.{1,-13,37,-13,38,-13,39,-13,40,-13,45,-13,47,-13,71,-13},
+    &.{1,-44,37,-44,38,-44,39,-44,40,-44,45,-44,47,-44,57,-43,58,-43,59,-43,60,-43,61,-43,62,-43,63,-43,64,-43,65,-43,66,-43,71,-44},
     &.{1,-2},
-    &.{1,-43,32,-43,33,-43,34,-43,35,-43,40,-43,42,-43,52,-42,53,-42,54,-42,55,-42,56,-42,57,-42,58,-42,59,-42,60,-42,61,-42,66,-43},
-    &.{1,-54,32,-54,33,-54,34,-54,35,-54,38,-54,40,-54,41,-54,42,-54,48,-54,50,-54,52,-54,53,-54,54,-54,55,-54,56,-54,57,-54,58,-54,59,-54,60,-54,61,-54,62,-54,65,-54,66,-54,72,-54,73,-54,74,-54,75,-54,76,-54,77,-54,78,-54,79,-54,80,-54,81,-54,83,-54},
-    &.{33,-67,34,-67,41,-67,65,-67},
-    &.{52,-42,53,-42,54,-42,55,-42,56,-42,57,-42,58,-42,59,-42,60,-42,61,-42},
-    &.{25,85,33,83,34,82,41,86,65,84},
-    &.{1,-21,8,87,32,-21,33,-21,34,-21,35,-21,36,88,38,41,40,-21,41,-21,42,-21,65,-21,66,-21},
-    &.{9,89,10,7,13,6,14,22,16,10,20,16,39,14,47,38,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32},
-    &.{1,-23,32,-23,33,-23,34,-23,35,-23,40,-23,41,-23,42,-23,65,-23,66,-23},
-    &.{42,90},
-    &.{25,91,33,83,34,82,41,86,65,84},
-    &.{1,-41,32,-41,33,-41,34,-41,35,-41,40,-41,42,-41,52,-41,53,-41,54,-41,55,-41,56,-41,57,-41,58,-41,59,-41,60,-41,61,-41,66,-41},
-    &.{1,-40,16,46,32,-40,33,-40,34,-40,35,-40,40,-40,42,-40,46,92,48,17,52,-40,53,-40,54,-40,55,-40,56,-40,57,-40,58,-40,59,-40,60,-40,61,-40,66,-40},
-    &.{40,93},
-    &.{40,94},
-    &.{40,95},
-    &.{20,56,21,96,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65},
-    &.{82,97},
-    &.{1,-51,32,-51,33,-51,34,-51,35,-51,38,-51,40,-51,41,-51,42,-51,48,-51,52,-51,53,-51,54,-51,55,-51,56,-51,57,-51,58,-51,59,-51,60,-51,61,-51,62,-51,65,-51,66,-51,72,-51,73,-51,74,-51,75,-51,76,-51,77,-51,78,-51,79,-51,80,-51,81,-51,83,-51},
-    &.{20,56,21,98,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65},
-    &.{1,-50,32,-50,33,-50,34,-50,35,-50,38,-50,40,-50,41,-50,42,-50,48,-50,52,-50,53,-50,54,-50,55,-50,56,-50,57,-50,58,-50,59,-50,60,-50,61,-50,62,-50,65,-50,66,-50,72,-50,73,-50,74,-50,75,-50,76,-50,77,-50,78,-50,79,-50,80,-50,81,-50,83,-50},
-    &.{20,56,21,99,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65},
-    &.{1,-62,32,-62,33,-62,34,-62,35,-62,38,-62,40,-62,41,-62,42,-62,48,-62,50,-62,52,-62,53,-62,54,-62,55,-62,56,-62,57,-62,58,-62,59,-62,60,-62,61,-62,62,-62,65,-62,66,-62,72,-62,73,-62,74,-62,75,-62,76,-62,77,-62,78,-62,79,-62,80,-62,81,-62,83,-62},
-    &.{1,-63,32,-63,33,-63,34,-63,35,-63,38,-63,40,-63,41,-63,42,-63,48,-63,50,-63,52,-63,53,-63,54,-63,55,-63,56,-63,57,-63,58,-63,59,-63,60,-63,61,-63,62,-63,65,-63,66,-63,72,-63,73,-63,74,-63,75,-63,76,-63,77,-63,78,-63,79,-63,80,-63,81,-63,83,-63},
-    &.{20,56,21,100,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65},
-    &.{20,56,21,101,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65},
-    &.{20,56,21,102,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65},
-    &.{20,56,21,103,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65},
-    &.{1,-87,32,-87,33,-87,34,-87,35,-87,38,-87,40,-87,41,-87,42,-87,48,-87,52,-87,53,-87,54,-87,55,-87,56,-87,57,-87,58,-87,59,-87,60,-87,61,-87,62,-87,65,-87,66,-87,72,-87,73,-87,74,-87,75,-87,76,-87,77,-87,78,-87,79,-87,80,-87,81,-87,83,-87},
-    &.{82,104},
-    &.{1,-36,19,64,20,56,21,54,30,52,32,-36,33,-36,34,-36,35,-36,38,-36,40,-36,41,-36,42,-36,45,105,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65,65,-36,66,-36,72,50,73,60,74,58,75,59,76,53,77,61,78,55,79,67,80,62,81,63,83,51},
-    &.{1,-64,32,-64,33,-64,34,-64,35,-64,38,-64,40,-64,41,-64,42,-64,48,-64,50,-64,52,-64,53,-64,54,-64,55,-64,56,-64,57,-64,58,-64,59,-64,60,-64,61,-64,62,-64,65,-64,66,-64,72,-64,73,-64,74,-64,75,-64,76,-64,77,-64,78,-64,79,-64,80,-64,81,-64,83,-64},
-    &.{1,-37,32,-37,33,-37,34,-37,35,-37,38,-37,40,-37,41,-37,42,-37,65,-37,66,-37},
-    &.{1,-86,32,-86,33,-86,34,-86,35,-86,38,-86,40,-86,41,-86,42,-86,48,-86,52,-86,53,-86,54,-86,55,-86,56,-86,57,-86,58,-86,59,-86,60,-86,61,-86,62,-86,65,-86,66,-86,72,-86,73,-86,74,-86,75,-86,76,-86,77,-86,78,-86,79,-86,80,-86,81,-86,83,-86},
-    &.{1,-44,32,-44,33,-44,34,-44,35,-44,40,-44,42,-44,48,-44,52,-44,53,-44,54,-44,55,-44,56,-44,57,-44,58,-44,59,-44,60,-44,61,-44,66,-44},
-    &.{1,-45,32,-45,33,-45,34,-45,35,-45,40,-45,42,-45,48,-45,52,-45,53,-45,54,-45,55,-45,56,-45,57,-45,58,-45,59,-45,60,-45,61,-45,66,-45},
-    &.{18,108,20,56,21,106,48,57,50,-48,51,107,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65},
-    &.{69,109},
-    &.{1,-36,19,64,20,56,21,54,30,52,32,-36,33,-36,34,-36,35,-36,38,-36,40,-36,41,-36,42,-36,45,110,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65,65,-36,66,-36,72,50,73,60,74,58,75,59,76,53,77,61,78,55,79,67,80,62,81,63,83,51},
-    &.{40,111},
-    &.{5,112,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
-    &.{5,113,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
-    &.{1,-4,6,76,31,114,32,78,33,75,34,74,35,77,40,-4,42,-4,66,-4},
-    &.{1,-18,5,115,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,32,-18,33,-18,34,-18,35,-18,39,14,40,-18,41,8,42,-18,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,66,-18,67,4,68,19,70,29},
-    &.{1,-14,5,116,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,32,-14,33,-14,34,-14,35,-14,39,14,40,-14,41,8,42,-14,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,66,-14,67,4,68,19,70,29},
-    &.{1,-5,40,-5,42,-5,66,-5},
-    &.{25,117,41,86,65,84},
-    &.{40,118},
-    &.{7,119,9,5,10,7,13,6,14,22,16,10,20,16,39,14,47,38,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32},
-    &.{7,120,9,5,10,7,13,6,14,22,16,10,20,16,39,14,47,38,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32},
-    &.{4,121,5,27,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
-    &.{1,-74,32,-74,33,-74,34,-74,35,-74,40,-74,42,-74,66,-74},
-    &.{4,122,5,27,7,15,9,5,10,7,11,25,13,6,14,22,15,18,16,10,20,16,22,21,26,28,27,26,28,23,39,14,41,8,47,35,48,17,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,63,9,67,4,68,19,70,29},
-    &.{1,-21,8,87,32,-21,33,-21,34,-21,35,-21,36,123,38,41,40,-21,41,-21,42,-21,65,-21,66,-21},
-    &.{1,-22,32,-22,33,-22,34,-22,35,-22,40,-22,41,-22,42,-22,65,-22,66,-22},
-    &.{1,-24,32,-24,33,-24,34,-24,35,-24,38,-24,40,-24,41,-24,42,-24,65,-24,66,-24},
-    &.{1,-29,12,125,30,124,32,-29,33,-29,34,-29,35,-29,40,-29,42,-29,44,126,66,-29,72,50,73,60,74,58,75,59,76,53,77,61,78,55,79,67,80,62,81,63,83,51},
-    &.{1,-65,24,127,32,-65,33,-65,34,-65,35,-65,40,-65,42,-65,64,128,66,-65},
-    &.{1,-39,32,-39,33,-39,34,-39,35,-39,40,-39,42,-39,52,-39,53,-39,54,-39,55,-39,56,-39,57,-39,58,-39,59,-39,60,-39,61,-39,66,-39},
-    &.{1,-58,32,-58,33,-58,34,-58,35,-58,38,-58,40,-58,41,-58,42,-58,48,-58,50,-58,52,-58,53,-58,54,-58,55,-58,56,-58,57,-58,58,-58,59,-58,60,-58,61,-58,62,-58,65,-58,66,-58,72,-58,73,-58,74,-58,75,-58,76,-58,77,-58,78,-58,79,-58,80,-58,81,-58,83,-58},
-    &.{1,-60,32,-60,33,-60,34,-60,35,-60,38,-60,40,-60,41,-60,42,-60,48,-60,50,-60,52,-60,53,-60,54,-60,55,-60,56,-60,57,-60,58,-60,59,-60,60,-60,61,-60,62,-60,65,-60,66,-60,72,-60,73,-60,74,-60,75,-60,76,-60,77,-60,78,-60,79,-60,80,-60,81,-60,83,-60},
-    &.{1,-27,12,129,30,124,32,-27,33,-27,34,-27,35,-27,38,-27,40,-27,41,-27,42,-27,44,126,65,-27,66,-27,72,50,73,60,74,58,75,59,76,53,77,61,78,55,79,67,80,62,81,63,83,51},
-    &.{1,-79,32,-79,33,-79,34,-79,35,-79,38,-79,40,-79,41,-79,42,-79,48,-79,52,-79,53,-79,54,-79,55,-79,56,-79,57,-79,58,-79,59,-79,60,-79,61,-79,62,-79,65,-79,66,-79,72,-79,73,-79,74,-79,75,-79,76,-79,77,-79,78,-79,79,-79,80,-79,81,-79,83,-79},
-    &.{1,-89,32,-89,33,-89,34,-89,35,-89,38,-89,40,-89,41,-89,42,-89,48,-89,52,-89,53,-89,54,-89,55,-89,56,-89,57,-89,58,-89,59,-89,60,-89,61,-89,62,-89,65,-89,66,-89,72,-89,73,-89,74,-89,75,-89,76,-89,77,-89,78,-89,79,-89,80,-89,81,-89,83,-89},
-    &.{1,-83,32,-83,33,-83,34,-83,35,-83,38,-83,40,-83,41,-83,42,-83,48,-83,52,-83,53,-83,54,-83,55,-83,56,-83,57,-83,58,-83,59,-83,60,-83,61,-83,62,-83,65,-83,66,-83,72,-83,73,-83,74,-83,75,-83,76,-83,77,-83,78,-83,79,-83,80,-83,81,-83,83,-83},
-    &.{1,-85,32,-85,33,-85,34,-85,35,-85,38,-85,40,-85,41,-85,42,-85,48,-85,52,-85,53,-85,54,-85,55,-85,56,-85,57,-85,58,-85,59,-85,60,-85,61,-85,62,-85,65,-85,66,-85,72,-85,73,-85,74,-85,75,-85,76,-85,77,-85,78,-85,79,-85,80,-85,81,-85,83,-85},
-    &.{1,-81,32,-81,33,-81,34,-81,35,-81,38,-81,40,-81,41,-81,42,-81,48,-81,52,-81,53,-81,54,-81,55,-81,56,-81,57,-81,58,-81,59,-81,60,-81,61,-81,62,-81,65,-81,66,-81,72,-81,73,-81,74,-81,75,-81,76,-81,77,-81,78,-81,79,-81,80,-81,81,-81,83,-81},
-    &.{1,-82,32,-82,33,-82,34,-82,35,-82,38,-82,40,-82,41,-82,42,-82,48,-82,52,-82,53,-82,54,-82,55,-82,56,-82,57,-82,58,-82,59,-82,60,-82,61,-82,62,-82,65,-82,66,-82,72,-82,73,-82,74,-82,75,-82,76,-82,77,-82,78,-82,79,-82,80,-82,81,-82,83,-82},
-    &.{1,-80,32,-80,33,-80,34,-80,35,-80,38,-80,40,-80,41,-80,42,-80,48,-80,52,-80,53,-80,54,-80,55,-80,56,-80,57,-80,58,-80,59,-80,60,-80,61,-80,62,-80,65,-80,66,-80,72,-80,73,-80,74,-80,75,-80,76,-80,77,-80,78,-80,79,-80,80,-80,81,-80,83,-80},
-    &.{1,-84,32,-84,33,-84,34,-84,35,-84,38,-84,40,-84,41,-84,42,-84,48,-84,52,-84,53,-84,54,-84,55,-84,56,-84,57,-84,58,-84,59,-84,60,-84,61,-84,62,-84,65,-84,66,-84,72,-84,73,-84,74,-84,75,-84,76,-84,77,-84,78,-84,79,-84,80,-84,81,-84,83,-84},
-    &.{1,-88,32,-88,33,-88,34,-88,35,-88,38,-88,40,-88,41,-88,42,-88,48,-88,52,-88,53,-88,54,-88,55,-88,56,-88,57,-88,58,-88,59,-88,60,-88,61,-88,62,-88,65,-88,66,-88,72,-88,73,-88,74,-88,75,-88,76,-88,77,-88,78,-88,79,-88,80,-88,81,-88,83,-88},
-    &.{1,-35,32,-35,33,-35,34,-35,35,-35,38,-35,40,-35,41,-35,42,-35,65,-35,66,-35},
-    &.{20,56,21,106,41,-48,48,57,50,-48,51,130,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65,65,-48},
-    &.{50,-49},
-    &.{50,131},
-    &.{20,56,21,133,29,134,48,57,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65,71,132},
-    &.{1,-38,32,-38,33,-38,34,-38,35,-38,38,-38,40,-38,41,-38,42,-38,65,-38,66,-38},
-    &.{1,-59,32,-59,33,-59,34,-59,35,-59,38,-59,40,-59,41,-59,42,-59,48,-59,50,-59,52,-59,53,-59,54,-59,55,-59,56,-59,57,-59,58,-59,59,-59,60,-59,61,-59,62,-59,65,-59,66,-59,72,-59,73,-59,74,-59,75,-59,76,-59,77,-59,78,-59,79,-59,80,-59,81,-59,83,-59},
-    &.{1,-16,32,-16,33,-16,34,-16,35,-16,40,-16,42,-16,66,-16},
-    &.{1,-15,32,-15,33,-15,34,-15,35,-15,40,-15,42,-15,66,-15},
-    &.{1,-3,40,-3,42,-3,66,-3},
-    &.{1,-17,32,-17,33,-17,34,-17,35,-17,40,-17,42,-17,66,-17},
-    &.{1,-13,32,-13,33,-13,34,-13,35,-13,40,-13,42,-13,66,-13},
-    &.{1,-76,32,-76,33,-76,34,-76,35,-76,40,-76,42,-76,66,-76},
-    &.{1,-61,32,-61,33,-61,34,-61,35,-61,38,-61,40,-61,41,-61,42,-61,48,-61,50,-61,52,-61,53,-61,54,-61,55,-61,56,-61,57,-61,58,-61,59,-61,60,-61,61,-61,62,-61,65,-61,66,-61,72,-61,73,-61,74,-61,75,-61,76,-61,77,-61,78,-61,79,-61,80,-61,81,-61,83,-61},
-    &.{33,-69,34,-69,41,-69,65,-69},
-    &.{33,-68,34,-68,41,-68,65,-68},
-    &.{66,135},
-    &.{42,136},
-    &.{1,-20,32,-20,33,-20,34,-20,35,-20,40,-20,41,-20,42,-20,65,-20,66,-20},
-    &.{1,-32,30,137,32,-32,33,-32,34,-32,35,-32,38,-32,40,-32,41,-32,42,-32,43,138,65,-32,66,-32,72,50,73,60,74,58,75,59,76,53,77,61,78,55,79,67,80,62,81,63,83,51},
-    &.{1,-30,32,-30,33,-30,34,-30,35,-30,40,-30,42,-30,66,-30},
-    &.{1,-34,32,-34,33,-34,34,-34,35,-34,38,-34,40,-34,41,-34,42,-34,65,-34,66,-34},
-    &.{1,-66,32,-66,33,-66,34,-66,35,-66,40,-66,42,-66,66,-66},
-    &.{22,140,25,139,41,86,63,9,65,84},
-    &.{1,-28,32,-28,33,-28,34,-28,35,-28,38,-28,40,-28,41,-28,42,-28,65,-28,66,-28},
-    &.{41,-47,50,-47,65,-47},
-    &.{1,-46,32,-46,33,-46,34,-46,35,-46,40,-46,42,-46,48,-46,52,-46,53,-46,54,-46,55,-46,56,-46,57,-46,58,-46,59,-46,60,-46,61,-46,66,-46},
-    &.{41,-78,65,-78},
-    &.{20,56,21,106,41,-48,48,57,51,141,52,33,53,30,54,36,55,31,56,20,57,11,58,12,59,24,60,13,61,32,62,65,65,-48},
-    &.{25,142,41,86,65,84},
-    &.{1,-73,32,-73,33,-73,34,-73,35,-73,40,-73,42,-73,64,-73,66,-73},
-    &.{1,-72,32,-72,33,-72,34,-72,35,-72,40,-72,42,-72,64,-72,66,-72},
-    &.{1,-32,30,137,32,-32,33,-32,34,-32,35,-32,38,-32,40,-32,41,-32,42,-32,43,143,65,-32,66,-32,72,50,73,60,74,58,75,59,76,53,77,61,78,55,79,67,80,62,81,63,83,51},
-    &.{1,-33,32,-33,33,-33,34,-33,35,-33,38,-33,40,-33,41,-33,42,-33,65,-33,66,-33},
-    &.{1,-70,32,-70,33,-70,34,-70,35,-70,40,-70,42,-70,66,-70},
-    &.{1,-71,32,-71,33,-71,34,-71,35,-71,40,-71,42,-71,66,-71},
-    &.{41,-77,65,-77},
-    &.{1,-75,32,-75,33,-75,34,-75,35,-75,40,-75,42,-75,66,-75},
-    &.{1,-31,32,-31,33,-31,34,-31,35,-31,38,-31,40,-31,41,-31,42,-31,65,-31,66,-31},
+    &.{4,84,5,27,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
+    &.{57,-43,58,-43,59,-43,60,-43,61,-43,62,-43,63,-43,64,-43,65,-43,66,-43},
+    &.{38,-68,39,-68,46,-68,70,-68},
+    &.{25,86,38,87,39,85,46,88,70,89},
+    &.{1,-22,8,90,37,-22,38,-22,39,-22,40,-22,41,91,43,44,45,-22,46,-22,47,-22,70,-22,71,-22},
+    &.{1,-24,37,-24,38,-24,39,-24,40,-24,45,-24,46,-24,47,-24,70,-24,71,-24},
+    &.{9,92,10,7,13,6,14,19,16,8,20,16,44,38,52,39,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32},
+    &.{1,-42,37,-42,38,-42,39,-42,40,-42,45,-42,47,-42,57,-42,58,-42,59,-42,60,-42,61,-42,62,-42,63,-42,64,-42,65,-42,66,-42,71,-42},
+    &.{1,-41,16,46,37,-41,38,-41,39,-41,40,-41,45,-41,47,-41,51,93,53,30,57,-41,58,-41,59,-41,60,-41,61,-41,62,-41,63,-41,64,-41,65,-41,66,-41,71,-41},
+    &.{45,94},
+    &.{45,95},
+    &.{45,96},
+    &.{20,56,21,97,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51},
+    &.{1,-65,37,-65,38,-65,39,-65,40,-65,43,-65,45,-65,46,-65,47,-65,53,-65,55,-65,57,-65,58,-65,59,-65,60,-65,61,-65,62,-65,63,-65,64,-65,65,-65,66,-65,67,-65,70,-65,71,-65,79,-65,80,-65,81,-65,82,-65,83,-65,84,-65,85,-65,86,-65,87,-65,88,-65,90,-65},
+    &.{1,-52,37,-52,38,-52,39,-52,40,-52,43,-52,45,-52,46,-52,47,-52,53,-52,57,-52,58,-52,59,-52,60,-52,61,-52,62,-52,63,-52,64,-52,65,-52,66,-52,67,-52,70,-52,71,-52,79,-52,80,-52,81,-52,82,-52,83,-52,84,-52,85,-52,86,-52,87,-52,88,-52,90,-52},
+    &.{1,-51,37,-51,38,-51,39,-51,40,-51,43,-51,45,-51,46,-51,47,-51,53,-51,57,-51,58,-51,59,-51,60,-51,61,-51,62,-51,63,-51,64,-51,65,-51,66,-51,67,-51,70,-51,71,-51,79,-51,80,-51,81,-51,82,-51,83,-51,84,-51,85,-51,86,-51,87,-51,88,-51,90,-51},
+    &.{89,98},
+    &.{89,99},
+    &.{1,-63,37,-63,38,-63,39,-63,40,-63,43,-63,45,-63,46,-63,47,-63,53,-63,55,-63,57,-63,58,-63,59,-63,60,-63,61,-63,62,-63,63,-63,64,-63,65,-63,66,-63,67,-63,70,-63,71,-63,79,-63,80,-63,81,-63,82,-63,83,-63,84,-63,85,-63,86,-63,87,-63,88,-63,90,-63},
+    &.{1,-96,37,-96,38,-96,39,-96,40,-96,43,-96,45,-96,46,-96,47,-96,53,-96,57,-96,58,-96,59,-96,60,-96,61,-96,62,-96,63,-96,64,-96,65,-96,66,-96,67,-96,70,-96,71,-96,79,-96,80,-96,81,-96,82,-96,83,-96,84,-96,85,-96,86,-96,87,-96,88,-96,90,-96},
+    &.{20,56,21,100,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51},
+    &.{1,-97,37,-97,38,-97,39,-97,40,-97,43,-97,45,-97,46,-97,47,-97,53,-97,57,-97,58,-97,59,-97,60,-97,61,-97,62,-97,63,-97,64,-97,65,-97,66,-97,67,-97,70,-97,71,-97,79,-97,80,-97,81,-97,82,-97,83,-97,84,-97,85,-97,86,-97,87,-97,88,-97,90,-97},
+    &.{1,-64,37,-64,38,-64,39,-64,40,-64,43,-64,45,-64,46,-64,47,-64,53,-64,55,-64,57,-64,58,-64,59,-64,60,-64,61,-64,62,-64,63,-64,64,-64,65,-64,66,-64,67,-64,70,-64,71,-64,79,-64,80,-64,81,-64,82,-64,83,-64,84,-64,85,-64,86,-64,87,-64,88,-64,90,-64},
+    &.{20,56,21,101,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51},
+    &.{20,56,21,102,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51},
+    &.{20,56,21,103,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51},
+    &.{1,-38,37,-38,38,-38,39,-38,40,-38,43,-38,45,-38,46,-38,47,-38,70,-38,71,-38},
+    &.{1,-37,19,65,20,56,21,53,35,52,37,-37,38,-37,39,-37,40,-37,43,-37,45,-37,46,-37,47,-37,50,104,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51,70,-37,71,-37,79,67,80,61,81,62,82,66,83,50,84,58,85,63,86,57,87,59,88,54,90,55},
+    &.{20,56,21,105,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51},
+    &.{20,56,21,106,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51},
+    &.{25,107,38,87,39,85,46,88,70,89},
+    &.{1,-37,19,65,20,56,21,53,35,52,37,-37,38,-37,39,-37,40,-37,43,-37,45,-37,46,-37,47,-37,50,108,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51,70,-37,71,-37,79,67,80,61,81,62,82,66,83,50,84,58,85,63,86,57,87,59,88,54,90,55},
+    &.{74,109},
+    &.{29,110,46,111,70,112},
+    &.{1,-19,5,113,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,37,-19,38,-19,39,-19,40,-19,44,38,45,-19,46,34,47,-19,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,71,-19,72,4,73,21,75,23,77,29},
+    &.{5,114,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
+    &.{1,-4,6,74,36,115,37,77,38,75,39,73,40,72,45,-4,47,-4,71,-4},
+    &.{5,116,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
+    &.{1,-5,45,-5,47,-5,71,-5},
+    &.{1,-15,5,117,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,37,-15,38,-15,39,-15,40,-15,44,38,45,-15,46,34,47,-15,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,71,-15,72,4,73,21,75,23,77,29},
+    &.{25,118,46,88,70,89},
+    &.{1,-45,37,-45,38,-45,39,-45,40,-45,45,-45,47,-45,53,-45,57,-45,58,-45,59,-45,60,-45,61,-45,62,-45,63,-45,64,-45,65,-45,66,-45,71,-45},
+    &.{1,-46,37,-46,38,-46,39,-46,40,-46,45,-46,47,-46,53,-46,57,-46,58,-46,59,-46,60,-46,61,-46,62,-46,63,-46,64,-46,65,-46,66,-46,71,-46},
+    &.{18,120,20,56,21,119,53,60,55,-49,56,121,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51},
+    &.{45,122},
+    &.{47,123},
+    &.{45,124},
+    &.{7,125,9,5,10,7,13,6,14,19,16,8,20,16,44,38,52,39,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32},
+    &.{1,-75,37,-75,38,-75,39,-75,40,-75,45,-75,47,-75,71,-75},
+    &.{7,126,9,5,10,7,13,6,14,19,16,8,20,16,44,38,52,39,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32},
+    &.{4,127,5,27,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
+    &.{4,128,5,27,7,15,9,5,10,7,11,25,13,6,14,19,15,17,16,8,20,16,22,20,26,28,27,26,28,22,33,35,44,38,46,34,52,36,53,30,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,68,18,72,4,73,21,75,23,77,29},
+    &.{1,-22,8,90,37,-22,38,-22,39,-22,40,-22,41,129,43,44,45,-22,46,-22,47,-22,70,-22,71,-22},
+    &.{1,-23,37,-23,38,-23,39,-23,40,-23,45,-23,46,-23,47,-23,70,-23,71,-23},
+    &.{1,-25,37,-25,38,-25,39,-25,40,-25,43,-25,45,-25,46,-25,47,-25,70,-25,71,-25},
+    &.{1,-40,37,-40,38,-40,39,-40,40,-40,45,-40,47,-40,57,-40,58,-40,59,-40,60,-40,61,-40,62,-40,63,-40,64,-40,65,-40,66,-40,71,-40},
+    &.{1,-59,37,-59,38,-59,39,-59,40,-59,43,-59,45,-59,46,-59,47,-59,53,-59,55,-59,57,-59,58,-59,59,-59,60,-59,61,-59,62,-59,63,-59,64,-59,65,-59,66,-59,67,-59,70,-59,71,-59,79,-59,80,-59,81,-59,82,-59,83,-59,84,-59,85,-59,86,-59,87,-59,88,-59,90,-59},
+    &.{1,-60,37,-60,38,-60,39,-60,40,-60,43,-60,45,-60,46,-60,47,-60,53,-60,55,-60,57,-60,58,-60,59,-60,60,-60,61,-60,62,-60,63,-60,64,-60,65,-60,66,-60,67,-60,70,-60,71,-60,79,-60,80,-60,81,-60,82,-60,83,-60,84,-60,85,-60,86,-60,87,-60,88,-60,90,-60},
+    &.{1,-61,37,-61,38,-61,39,-61,40,-61,43,-61,45,-61,46,-61,47,-61,53,-61,55,-61,57,-61,58,-61,59,-61,60,-61,61,-61,62,-61,63,-61,64,-61,65,-61,66,-61,67,-61,70,-61,71,-61,79,-61,80,-61,81,-61,82,-61,83,-61,84,-61,85,-61,86,-61,87,-61,88,-61,90,-61},
+    &.{1,-93,37,-93,38,-93,39,-93,40,-93,43,-93,45,-93,46,-93,47,-93,53,-93,57,-93,58,-93,59,-93,60,-93,61,-93,62,-93,63,-93,64,-93,65,-93,66,-93,67,-93,70,-93,71,-93,79,-93,80,-93,81,-93,82,-93,83,-93,84,-93,85,-93,86,-93,87,-93,88,-93,90,-93},
+    &.{1,-98,37,-98,38,-98,39,-98,40,-98,43,-98,45,-98,46,-98,47,-98,53,-98,57,-98,58,-98,59,-98,60,-98,61,-98,62,-98,63,-98,64,-98,65,-98,66,-98,67,-98,70,-98,71,-98,79,-98,80,-98,81,-98,82,-98,83,-98,84,-98,85,-98,86,-98,87,-98,88,-98,90,-98},
+    &.{1,-99,37,-99,38,-99,39,-99,40,-99,43,-99,45,-99,46,-99,47,-99,53,-99,57,-99,58,-99,59,-99,60,-99,61,-99,62,-99,63,-99,64,-99,65,-99,66,-99,67,-99,70,-99,71,-99,79,-99,80,-99,81,-99,82,-99,83,-99,84,-99,85,-99,86,-99,87,-99,88,-99,90,-99},
+    &.{1,-94,37,-94,38,-94,39,-94,40,-94,43,-94,45,-94,46,-94,47,-94,53,-94,57,-94,58,-94,59,-94,60,-94,61,-94,62,-94,63,-94,64,-94,65,-94,66,-94,67,-94,70,-94,71,-94,79,-94,80,-94,81,-94,82,-94,83,-94,84,-94,85,-94,86,-94,87,-94,88,-94,90,-94},
+    &.{1,-90,37,-90,38,-90,39,-90,40,-90,43,-90,45,-90,46,-90,47,-90,53,-90,57,-90,58,-90,59,-90,60,-90,61,-90,62,-90,63,-90,64,-90,65,-90,66,-90,67,-90,70,-90,71,-90,79,-90,80,-90,81,-90,82,-90,83,-90,84,-90,85,-90,86,-90,87,-90,88,-90,90,-90},
+    &.{1,-91,37,-91,38,-91,39,-91,40,-91,43,-91,45,-91,46,-91,47,-91,53,-91,57,-91,58,-91,59,-91,60,-91,61,-91,62,-91,63,-91,64,-91,65,-91,66,-91,67,-91,70,-91,71,-91,79,-91,80,-91,81,-91,82,-91,83,-91,84,-91,85,-91,86,-91,87,-91,88,-91,90,-91},
+    &.{1,-95,37,-95,38,-95,39,-95,40,-95,43,-95,45,-95,46,-95,47,-95,53,-95,57,-95,58,-95,59,-95,60,-95,61,-95,62,-95,63,-95,64,-95,65,-95,66,-95,67,-95,70,-95,71,-95,79,-95,80,-95,81,-95,82,-95,83,-95,84,-95,85,-95,86,-95,87,-95,88,-95,90,-95},
+    &.{1,-36,37,-36,38,-36,39,-36,40,-36,43,-36,45,-36,46,-36,47,-36,70,-36,71,-36},
+    &.{1,-92,37,-92,38,-92,39,-92,40,-92,43,-92,45,-92,46,-92,47,-92,53,-92,57,-92,58,-92,59,-92,60,-92,61,-92,62,-92,63,-92,64,-92,65,-92,66,-92,67,-92,70,-92,71,-92,79,-92,80,-92,81,-92,82,-92,83,-92,84,-92,85,-92,86,-92,87,-92,88,-92,90,-92},
+    &.{1,-89,37,-89,38,-89,39,-89,40,-89,43,-89,45,-89,46,-89,47,-89,53,-89,57,-89,58,-89,59,-89,60,-89,61,-89,62,-89,63,-89,64,-89,65,-89,66,-89,67,-89,70,-89,71,-89,79,-89,80,-89,81,-89,82,-89,83,-89,84,-89,85,-89,86,-89,87,-89,88,-89,90,-89},
+    &.{1,-66,24,130,37,-66,38,-66,39,-66,40,-66,45,-66,47,-66,69,131,71,-66},
+    &.{1,-39,37,-39,38,-39,39,-39,40,-39,43,-39,45,-39,46,-39,47,-39,70,-39,71,-39},
+    &.{20,56,21,133,34,132,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51,78,134},
+    &.{1,-77,37,-77,38,-77,39,-77,40,-77,45,-77,47,-77,71,-77},
+    &.{20,56,21,133,30,136,32,137,34,135,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51,78,134},
+    &.{20,56,21,133,30,138,32,137,34,135,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51,78,134},
+    &.{1,-18,37,-18,38,-18,39,-18,40,-18,45,-18,47,-18,71,-18},
+    &.{1,-17,37,-17,38,-17,39,-17,40,-17,45,-17,47,-17,71,-17},
+    &.{1,-3,45,-3,47,-3,71,-3},
+    &.{1,-16,37,-16,38,-16,39,-16,40,-16,45,-16,47,-16,71,-16},
+    &.{1,-14,37,-14,38,-14,39,-14,40,-14,45,-14,47,-14,71,-14},
+    &.{1,-86,37,-86,38,-86,39,-86,40,-86,45,-86,47,-86,71,-86},
+    &.{20,56,21,119,46,-49,53,60,55,-49,56,139,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51,70,-49},
+    &.{55,140},
+    &.{55,-50},
+    &.{1,-62,37,-62,38,-62,39,-62,40,-62,43,-62,45,-62,46,-62,47,-62,53,-62,55,-62,57,-62,58,-62,59,-62,60,-62,61,-62,62,-62,63,-62,64,-62,65,-62,66,-62,67,-62,70,-62,71,-62,79,-62,80,-62,81,-62,82,-62,83,-62,84,-62,85,-62,86,-62,87,-62,88,-62,90,-62},
+    &.{1,-30,12,143,35,141,37,-30,38,-30,39,-30,40,-30,45,-30,47,-30,49,142,71,-30,79,67,80,61,81,62,82,66,83,50,84,58,85,63,86,57,87,59,88,54,90,55},
+    &.{1,-28,12,144,35,141,37,-28,38,-28,39,-28,40,-28,43,-28,45,-28,46,-28,47,-28,49,142,70,-28,71,-28,79,67,80,61,81,62,82,66,83,50,84,58,85,63,86,57,87,59,88,54,90,55},
+    &.{38,-70,39,-70,46,-70,70,-70},
+    &.{38,-69,39,-69,46,-69,70,-69},
+    &.{47,145},
+    &.{71,146},
+    &.{1,-21,37,-21,38,-21,39,-21,40,-21,45,-21,46,-21,47,-21,70,-21,71,-21},
+    &.{1,-67,37,-67,38,-67,39,-67,40,-67,45,-67,47,-67,71,-67},
+    &.{22,148,25,147,46,88,68,18,70,89},
+    &.{25,149,46,88,70,89},
+    &.{20,56,21,119,46,-49,53,60,56,150,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51,70,-49},
+    &.{46,-88,70,-88},
+    &.{25,151,46,88,70,89},
+    &.{47,152},
+    &.{31,153,37,155,47,-81,71,-81,76,154},
+    &.{71,156},
+    &.{46,-48,55,-48,70,-48},
+    &.{1,-47,37,-47,38,-47,39,-47,40,-47,45,-47,47,-47,53,-47,57,-47,58,-47,59,-47,60,-47,61,-47,62,-47,63,-47,64,-47,65,-47,66,-47,71,-47},
+    &.{1,-33,35,157,37,-33,38,-33,39,-33,40,-33,43,-33,45,-33,46,-33,47,-33,48,158,70,-33,71,-33,79,67,80,61,81,62,82,66,83,50,84,58,85,63,86,57,87,59,88,54,90,55},
+    &.{1,-35,37,-35,38,-35,39,-35,40,-35,43,-35,45,-35,46,-35,47,-35,70,-35,71,-35},
+    &.{1,-31,37,-31,38,-31,39,-31,40,-31,45,-31,47,-31,71,-31},
+    &.{1,-29,37,-29,38,-29,39,-29,40,-29,43,-29,45,-29,46,-29,47,-29,70,-29,71,-29},
+    &.{1,-73,37,-73,38,-73,39,-73,40,-73,45,-73,47,-73,69,-73,71,-73},
+    &.{1,-74,37,-74,38,-74,39,-74,40,-74,45,-74,47,-74,69,-74,71,-74},
+    &.{1,-71,37,-71,38,-71,39,-71,40,-71,45,-71,47,-71,71,-71},
+    &.{1,-72,37,-72,38,-72,39,-72,40,-72,45,-72,47,-72,71,-72},
+    &.{1,-76,37,-76,38,-76,39,-76,40,-76,45,-76,47,-76,71,-76},
+    &.{46,-87,70,-87},
+    &.{37,-85,47,-85,71,-85},
+    &.{1,-78,37,-78,38,-78,39,-78,40,-78,45,-78,47,-78,71,-78},
+    &.{31,153,37,155,47,-81,71,-81,76,159},
+    &.{47,-82,71,-82},
+    &.{20,56,21,133,32,160,34,135,37,-84,47,-84,53,60,57,9,58,10,59,24,60,14,61,31,62,33,63,11,64,12,65,13,66,32,67,51,71,-84,78,134},
+    &.{1,-79,37,-79,38,-79,39,-79,40,-79,45,-79,47,-79,71,-79},
+    &.{1,-33,35,157,37,-33,38,-33,39,-33,40,-33,43,-33,45,-33,46,-33,47,-33,48,161,70,-33,71,-33,79,67,80,61,81,62,82,66,83,50,84,58,85,63,86,57,87,59,88,54,90,55},
+    &.{1,-34,37,-34,38,-34,39,-34,40,-34,43,-34,45,-34,46,-34,47,-34,70,-34,71,-34},
+    &.{47,-80,71,-80},
+    &.{37,-83,47,-83,71,-83},
+    &.{1,-32,37,-32,38,-32,39,-32,40,-32,43,-32,45,-32,46,-32,47,-32,70,-32,71,-32},
 };
 
 const parseTable = blk: {
@@ -1040,7 +1069,7 @@ fn getStartState(startSym: u16) u16 {
     return 0;
 }
 
-const acceptRules = [_]u16{ 88 };
+const acceptRules = [_]u16{ 98 };
 
 fn isAcceptRule(ruleId: u16) bool {
     for (acceptRules) |ar| if (ruleId == ar) return true;

@@ -110,6 +110,7 @@ fn evalProgram(
         .conditional => |c| try evalConditional(c, session, ctx, sink),
         .@"while" => |w| try evalWhile(w, session, ctx, sink),
         .@"for" => |f| try evalFor(f, session, ctx, sink),
+        .@"match" => |m| try evalMatch(m, session, ctx, sink),
         .define => |d| try evalDefine(d, session, ctx, sink),
     };
     // `$?` reflects the most recent command result. Every program node
@@ -1206,6 +1207,36 @@ fn evalWhile(
         },
         .expression_result = last_result,
     };
+}
+
+/// `match SUBJECT { arms... }` — expand the subject to one scalar, then
+/// try each arm in source order; first arm whose pattern set matches the
+/// subject runs its body. With no matching arm, exit 1 and run nothing
+/// (PLAN §12). The non-zero exit is intentional: a missing default is
+/// almost always a forgotten case, and Slash prefers to surface that
+/// in `$?` / `&&` / `||` rather than swallow it. Users who want
+/// silent no-op on no match write an explicit `* { true }` arm.
+fn evalMatch(
+    m: program_mod.Match,
+    session: *Session,
+    ctx: EvalContext,
+    sink: ?Sink,
+) anyerror!EvalOutcome {
+    const subject = expandWordToScalar(m.subject, session, ctx.scratch, sink) catch |err| {
+        return err;
+    };
+
+    for (m.arms) |arm| {
+        for (arm.patterns) |pat| {
+            if (fnmatchComponent(pat, subject)) {
+                return try evalProgram(arm.body, session, ctx, sink);
+            }
+        }
+    }
+
+    const j = try session.jobs.create(true, false, "<match>");
+    session.jobs.completeZeroChild(j, .{ .exited = 1 });
+    return .{ .job = j, .expression_result = .{ .exited = 1 } };
 }
 
 fn evalFor(

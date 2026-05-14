@@ -152,13 +152,16 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
     var pending = std.ArrayListUnmanaged(u8).empty;
     defer pending.deinit(alloc);
 
-    var prompt_buf: [1024]u8 = undefined;
+    var prompt_buf: [4096]u8 = undefined;
     while (true) {
         const prompt_text = if (pending.items.len == 0)
-            renderPrompt(&prompt_buf, session)
+            slashPrompt(&prompt_buf, session)
         else
             "... ";
-        const prompt = zigline.Prompt.plain(prompt_text);
+        const prompt = zigline.Prompt{
+            .bytes = prompt_text,
+            .width = promptDisplayWidth(prompt_text),
+        };
 
         const result = editor.readLine(prompt) catch |err| {
             std.debug.print("slash: readLine error: {s}\n", .{@errorName(err)});
@@ -399,20 +402,42 @@ fn highlightHook(
     allocator: Allocator,
     request: zigline.HighlightRequest,
 ) anyerror![]zigline.HighlightSpan {
-    _ = ctx_ptr;
-    const buffer = request.buffer;
+    const hooks: *SlashHooks = @ptrCast(@alignCast(ctx_ptr));
+    const palette = pickPalette(hooks.session);
+    return highlightBuffer(allocator, request.buffer, request.cursor_byte, palette);
+}
 
-    // Bracket matching: when the cursor is on (or just past) a closing
-    // bracket, find the matching opener and emit a bold span over it
-    // instead of the normal dim-white bracket style. The cursor-side
-    // bracket keeps its normal style — the visual cue is a single
-    // emphasized character at the matching opener. (zigline's renderer
-    // drops overlapping spans with the longer-on-equal-start tie-break,
-    // so we don't emit two spans for the same bracket; we substitute.)
-    const match_pos = findMatchingBracket(buffer, request.cursor_byte);
+/// The highlighter core, separated from the hook entry so tests can
+/// invoke it with an explicit palette and cursor without faking a
+/// `SlashHooks` context.
+///
+/// Walks `parser.BaseLexer` tokens left-to-right, tracking a small
+/// "command position" flag so non-keyword `.ident` tokens at the
+/// start of a command get colored as commands and subsequent idents
+/// get colored as arguments. The flag resets to true after any
+/// command-starter (`;`, `|`, `&&`, `||`, `&`, `{`, `(`, `[`) and
+/// after a control-flow keyword like `if`/`while`/`for`/`cmd`.
+///
+/// Bracket matching: when the cursor is on (or just past) a closing
+/// bracket, find the matching opener and emit a styled span over it
+/// instead of the normal operator style. (zigline's renderer drops
+/// overlapping spans with a longer-on-equal-start tie-break, so we
+/// substitute the bracket's own span rather than layering a second.)
+fn highlightBuffer(
+    allocator: Allocator,
+    buffer: []const u8,
+    cursor_byte: usize,
+    palette: Palette,
+) anyerror![]zigline.HighlightSpan {
+    const match_pos = findMatchingBracket(buffer, cursor_byte);
 
     var spans: std.ArrayListUnmanaged(zigline.HighlightSpan) = .empty;
     errdefer spans.deinit(allocator);
+
+    // Command-position tracker: true iff the next non-keyword `.ident`
+    // is the start of a new command (not an argument). Starts true
+    // (start of input is command position).
+    var at_command_pos = true;
 
     var lex = parser.BaseLexer.init(buffer);
     while (true) {
@@ -425,22 +450,74 @@ fn highlightHook(
         if (end <= start) continue;
 
         if (tok.cat == .string_dq) {
-            try emitDqSpans(allocator, &spans, buffer, start, end);
+            try emitDqSpans(allocator, &spans, buffer, start, end, palette);
+            at_command_pos = false;
             continue;
         }
         if (match_pos != null and match_pos.? == start and isOpenBracketTok(tok.cat)) {
             try spans.append(allocator, .{
                 .start = start,
                 .end = end,
-                .style = .{ .bold = true },
+                .style = .{ .fg = palette.bracket_match, .bold = true },
             });
+            at_command_pos = isCommandStarter(tok.cat);
             continue;
         }
-        const style = styleFor(tok, buffer[start..end]) orelse continue;
-        try spans.append(allocator, .{ .start = start, .end = end, .style = style });
+
+        // Special handling for `.ident`: distinguish keyword / command /
+        // argument by current position.
+        if (tok.cat == .ident) {
+            const span_bytes = buffer[start..end];
+            if (slash.keywordAs(span_bytes) != null) {
+                try spans.append(allocator, .{
+                    .start = start,
+                    .end = end,
+                    .style = .{ .fg = palette.keyword, .bold = true },
+                });
+                // Most slash keywords introduce another command (the
+                // test of an `if`, the body of `for`, the name of `cmd`).
+                // After a keyword, the next ident is again at command
+                // position.
+                at_command_pos = true;
+                continue;
+            }
+            const fg = if (at_command_pos) palette.command else palette.argument;
+            try spans.append(allocator, .{
+                .start = start,
+                .end = end,
+                .style = .{ .fg = fg },
+            });
+            at_command_pos = false;
+            continue;
+        }
+
+        const style_opt = styleFor(tok, buffer[start..end], palette);
+        if (style_opt) |style| {
+            try spans.append(allocator, .{ .start = start, .end = end, .style = style });
+        }
+        at_command_pos = isCommandStarter(tok.cat);
     }
 
     return spans.toOwnedSlice(allocator);
+}
+
+/// Tokens after which the next `.ident` returns to command position.
+/// Note: `lparen`/`lbrace`/`lbracket` count as starters because slash
+/// uses them to introduce subshells, blocks, and groupings — each
+/// contains a fresh sequence of commands.
+fn isCommandStarter(cat: parser.TokenCat) bool {
+    return switch (cat) {
+        .pipe,
+        .semi,
+        .and_and,
+        .or_or,
+        .amp,
+        .lbrace,
+        .lparen,
+        .lbracket,
+        => true,
+        else => false,
+    };
 }
 
 fn isOpenBracketTok(cat: parser.TokenCat) bool {
@@ -533,16 +610,105 @@ fn isCloseBracketByte(b: u8) bool {
     return b == '}' or b == ')' or b == ']';
 }
 
-fn styleFor(tok: parser.Token, span_bytes: []const u8) ?zigline.Style {
+// -----------------------------------------------------------------------------
+// Highlighter color palettes
+// -----------------------------------------------------------------------------
+//
+// Slash uses 24-bit truecolor for the highlighter rather than the ANSI
+// 8-color named palette so the rendered shade is identical regardless
+// of the user's terminal theme. (Named colors get mapped to whatever
+// the iTerm2 / Terminal.app / etc. profile defines, which can be
+// anything from teal-instead-of-cyan to a near-invisible muddy gold.)
+//
+// Two palettes ship: `palette_dark` (Tokyonight-inspired, designed
+// for dark terminal backgrounds) and `palette_light` (Solarized Light-
+// inspired, designed for light backgrounds). Selection is via the
+// `THEME` shell variable: `THEME=light` picks the light palette;
+// anything else (including unset) picks dark.
+//
+// To customize, copy the constant body and tweak the RGB values, or
+// set `THEME=light` in `~/.slashrc`. Per-token color customization
+// (a hash from token category → color) is a slash 1.2 candidate.
+
+const Palette = struct {
+    keyword: zigline.Color,
+    /// Color for command names (the first non-keyword ident at command
+    /// position — start of input, or after `;`, `|`, `&&`, `||`, `&`,
+    /// `{`, `(`, `[`, or a keyword like `if`/`while`).
+    command: zigline.Color,
+    /// Color for argument idents (any ident NOT at command position).
+    argument: zigline.Color,
+    integer: zigline.Color,
+    string_literal: zigline.Color,
+    variable: zigline.Color,
+    heredoc_body: zigline.Color,
+    operator: zigline.Color,
+    comment: zigline.Color,
+    err: zigline.Color,
+    bracket_match: zigline.Color,
+};
+
+fn rgb(r: u8, g: u8, b: u8) zigline.Color {
+    return .{ .rgb = .{ .r = r, .g = g, .b = b } };
+}
+
+/// Tokyonight-inspired dark palette. Designed against terminal
+/// backgrounds in the `#1a1b26 .. #2c2e3e` range. Foreground accents
+/// stay legible on near-black without being blinding.
+const palette_dark: Palette = .{
+    .keyword = rgb(0xbb, 0x9a, 0xf7), //  soft purple
+    .command = rgb(0x73, 0xda, 0xca), //  teal — distinct from keyword/string/operator
+    .argument = rgb(0x9a, 0xa5, 0xce), //  muted blue-gray — readable but recedes
+    .integer = rgb(0xff, 0x9e, 0x64), //  warm orange
+    .string_literal = rgb(0x9e, 0xce, 0x6a), //  green
+    .variable = rgb(0xe0, 0xaf, 0x68), //  amber
+    .heredoc_body = rgb(0x9e, 0xce, 0x6a), //  same as string
+    .operator = rgb(0x89, 0xdd, 0xff), //  cyan-blue (legible against dark)
+    .comment = rgb(0x56, 0x5f, 0x89), //  muted slate
+    .err = rgb(0xf7, 0x76, 0x8e), //  rose
+    .bracket_match = rgb(0xe0, 0xaf, 0x68), //  amber, same as variable
+};
+
+/// Solarized Light-inspired palette. Designed against backgrounds in
+/// the `#fdf6e3 .. #eee8d5` range (cream / paper). Accents pick the
+/// darker Solarized hues so they read as text-with-emphasis, not as
+/// neon overlays.
+const palette_light: Palette = .{
+    .keyword = rgb(0x26, 0x8b, 0xd2), //  blue
+    .command = rgb(0x2a, 0xa1, 0x98), //  Solarized cyan — distinct from blue
+    .argument = rgb(0x65, 0x7b, 0x83), //  base00 — slightly darker than slate
+    .integer = rgb(0xcb, 0x4b, 0x16), //  orange
+    .string_literal = rgb(0x85, 0x99, 0x00), //  green
+    .variable = rgb(0xb5, 0x89, 0x00), //  yellow / dark gold
+    .heredoc_body = rgb(0x85, 0x99, 0x00), //  green
+    .operator = rgb(0x58, 0x6e, 0x75), //  base01 — slate
+    .comment = rgb(0x93, 0xa1, 0xa1), //  base1 — pale gray
+    .err = rgb(0xdc, 0x32, 0x2f), //  red
+    .bracket_match = rgb(0xb5, 0x89, 0x00), //  yellow, same as variable
+};
+
+/// Look up `THEME` from the session and return the matching palette.
+/// Unknown / unset values fall back to dark.
+fn pickPalette(session: *const session_mod.Session) Palette {
+    if (session.vars.get("THEME")) |v| switch (v.value) {
+        .scalar => |s| {
+            if (std.mem.eql(u8, s, "light")) return palette_light;
+        },
+        .list => {},
+    };
+    return palette_dark;
+}
+
+fn styleFor(tok: parser.Token, span_bytes: []const u8, p: Palette) ?zigline.Style {
     return switch (tok.cat) {
         .ident => if (slash.keywordAs(span_bytes) != null)
-            zigline.Style{ .fg = .{ .basic = .cyan }, .bold = true }
+            zigline.Style{ .fg = p.keyword, .bold = true }
         else
             null,
-        .integer => zigline.Style{ .fg = .{ .basic = .yellow } },
-        .string_sq => zigline.Style{ .fg = .{ .basic = .green } },
-        .variable, .var_braced, .dollar_paren, .at_paren => zigline.Style{ .fg = .{ .basic = .yellow } },
-        .heredoc_body => zigline.Style{ .fg = .{ .basic = .green } },
+        .integer => zigline.Style{ .fg = p.integer },
+        .string_sq => zigline.Style{ .fg = p.string_literal },
+        .variable, .var_braced, .dollar_paren, .at_paren => zigline.Style{ .fg = p.variable },
+        .heredoc_body => zigline.Style{ .fg = p.heredoc_body },
         .pipe,
         .lt,
         .gt,
@@ -567,9 +733,9 @@ fn styleFor(tok: parser.Token, span_bytes: []const u8) ?zigline.Style {
         .and_and,
         .or_or,
         .amp,
-        .comment,
-        => zigline.Style{ .fg = .{ .basic = .white }, .dim = true },
-        .err => zigline.Style{ .fg = .{ .basic = .red }, .bold = true, .underline = true },
+        => zigline.Style{ .fg = p.operator },
+        .comment => zigline.Style{ .fg = p.comment, .italic = true },
+        .err => zigline.Style{ .fg = p.err, .bold = true, .underline = true },
         else => null,
     };
 }
@@ -586,9 +752,10 @@ fn emitDqSpans(
     buffer: []const u8,
     start: usize,
     end: usize,
+    p: Palette,
 ) !void {
-    const green = zigline.Style{ .fg = .{ .basic = .green } };
-    const yellow = zigline.Style{ .fg = .{ .basic = .yellow } };
+    const green = zigline.Style{ .fg = p.string_literal };
+    const yellow = zigline.Style{ .fg = p.variable };
 
     // The token covers `"..."` (or `"...` when the closing quote is
     // missing). Walk the interior; emit a green span up to each `$var`
@@ -913,7 +1080,8 @@ fn resolveHistoryPath(allocator: Allocator) !?[]u8 {
 // Shared parse/lower/run helpers
 // =============================================================================
 
-/// Parse + lower + run the buffered source. Three outcomes:
+/// Parse + lower + run the buffered source. Four outcomes:
+///   - whitespace-only buffer → no-op, clear and return current status
 ///   - parse succeeds → run, clear buffer, return the result status
 ///   - parse fails AT EOF → buffer is incomplete; keep accumulating
 ///   - parse fails before EOF → real error; render and clear buffer
@@ -922,6 +1090,19 @@ fn evaluatePending(
     alloc: Allocator,
     pending: *std.ArrayListUnmanaged(u8),
 ) !u8 {
+    // Whitespace-only input: pressing Enter on an empty (or all-blanks)
+    // prompt is a real-world no-op. Without this short-circuit, the
+    // parser sees end-of-input where a statement was expected, emits
+    // a diagnostic at the very end of the buffer, and `isIncompleteParse`
+    // misreads that as "needs more input" — putting the REPL into the
+    // `... ` continuation prompt forever. Match bash/sh: empty Enter
+    // returns to a fresh prompt with no side effects.
+    const trimmed = std.mem.trim(u8, pending.items, " \t\n\r");
+    if (trimmed.len == 0) {
+        pending.clearRetainingCapacity();
+        return session.last_status;
+    }
+
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1024,11 +1205,71 @@ fn isStdinTty() bool {
 // Prompt rendering
 // =============================================================================
 //
-// Default prompt: home-collapsed PWD, optional non-zero last status,
-// then `$ ` (or `# ` for root). Pure ASCII bytes — no embedded ANSI —
-// so `Prompt.plain` (which sets `width = bytes.len`) is correct.
+// Two paths:
+//
+//   1. **User-defined `$PROMPT`** — set in `~/.slashrc` or interactively.
+//      The string is treated as a *format template* with `%`-substitutions
+//      (see `expandPromptFormat`). Embedded ANSI escape sequences (`\e[...m`)
+//      are honored verbatim — `displayWidth` strips them when computing
+//      the wrap-aware column count zigline needs.
+//
+//   2. **Built-in default** — home-collapsed PWD + ` [N]` for nonzero
+//      last-status + ` $ ` (or ` # ` for root). Pure ASCII bytes; width
+//      equals byte length.
+//
+// `slashPrompt` dispatches between the two; `runRaw` calls it once per
+// prompt boundary and constructs the `zigline.Prompt` directly so the
+// `width` field reflects display columns (not bytes).
+//
+// Format codes for user `$PROMPT`:
+//
+//     %u  / %n        username (from $USER, or getuid+getpwuid)
+//     %h  / %m        hostname (short — truncated at first dot)
+//     %H              hostname (full FQDN)
+//     %w  / %~        cwd, home-collapsed (`~/Code/slash`)
+//     %W              cwd basename (`slash`)
+//     %d              date as `Mon Apr 27`
+//     %t              time as `HH:MM:SS`
+//     %T              time as `HH:MM`
+//     %D{strftime}    time with user-supplied strftime format
+//     %$              `$` for normal users, `#` for root
+//     %?              last command's exit status as a raw integer
+//     %%              literal `%`
+//
+// Color codes (zsh-style; emit ANSI SGR transparently):
+//
+//     %F{#ecede8}     foreground = 24-bit truecolor RGB
+//     %F{red}         foreground = ANSI 8-color name
+//     %F{}  / %f      reset foreground to terminal default
+//     %K{#43669d}     background = 24-bit truecolor RGB
+//     %K{cyan}        background = ANSI 8-color name
+//     %K{}  / %k      reset background to terminal default
+//
+// Names accepted: black, red, green, yellow, blue, magenta, cyan, white.
+//
+// Anything else (including `%` followed by an unknown code) emits
+// literally so users can mix arbitrary text without escaping noise.
 
-fn renderPrompt(buf: []u8, session: *const session_mod.Session) []const u8 {
+extern fn gethostname(buf: [*]u8, sz: usize) c_int;
+extern fn time(out: ?*c_long) c_long;
+// `struct tm` isn't surfaced by `std.c` in Zig 0.16; we treat it as
+// opaque since slash never reads its fields directly.
+const Tm = opaque {};
+extern fn localtime(t: *const c_long) ?*const Tm;
+extern fn strftime(buf: [*]u8, sz: usize, fmt: [*:0]const u8, tm: *const Tm) usize;
+
+/// Top-level entry: dispatch to user-defined `$PROMPT` if set, else
+/// the built-in default. Returns a slice into `buf`.
+fn slashPrompt(buf: []u8, session: *const session_mod.Session) []const u8 {
+    if (session.vars.get("PROMPT")) |v| switch (v.value) {
+        .scalar => |raw| return expandPromptFormat(buf, session, raw),
+        .list => {},
+    };
+    return renderDefaultPrompt(buf, session);
+}
+
+/// Built-in default prompt. Pure ASCII; byte length == display width.
+fn renderDefaultPrompt(buf: []u8, session: *const session_mod.Session) []const u8 {
     var w = std.Io.Writer.fixed(buf);
 
     var cwd_buf: [4096]u8 = undefined;
@@ -1056,6 +1297,296 @@ fn renderPrompt(buf: []u8, session: *const session_mod.Session) []const u8 {
     w.writeAll(suffix) catch return "$ ";
 
     return w.buffered();
+}
+
+/// Expand `%`-codes in `raw` against the current shell state, writing
+/// the result into `buf`. Embedded ANSI escapes (`\e[...m` etc.) pass
+/// through verbatim. Unknown `%X` codes emit literally.
+///
+/// Codes that take a `{...}` argument (`%F`, `%K`, `%D`) are parsed
+/// before the simple-code switch; if the closing brace is missing, the
+/// `%X{` is emitted literally.
+fn expandPromptFormat(buf: []u8, session: *const session_mod.Session, raw: []const u8) []const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    var i: usize = 0;
+    while (i < raw.len) {
+        const c = raw[i];
+        if (c != '%' or i + 1 >= raw.len) {
+            w.writeByte(c) catch return w.buffered();
+            i += 1;
+            continue;
+        }
+        const code = raw[i + 1];
+
+        // Codes that take a {...} argument.
+        if (code == 'F' or code == 'K' or code == 'D') {
+            if (parseBraces(raw, i + 2)) |b| {
+                switch (code) {
+                    'F' => {
+                        if (parsePromptColor(b.content)) |col| writePromptFg(&w, col);
+                    },
+                    'K' => {
+                        if (parsePromptColor(b.content)) |col| writePromptBg(&w, col);
+                    },
+                    'D' => {
+                        var fmt_buf: [128]u8 = undefined;
+                        if (b.content.len + 1 <= fmt_buf.len) {
+                            @memcpy(fmt_buf[0..b.content.len], b.content);
+                            fmt_buf[b.content.len] = 0;
+                            const fmt_z: [*:0]const u8 = @ptrCast(&fmt_buf);
+                            writePromptTimeFmt(&w, fmt_z);
+                        }
+                    },
+                    else => unreachable,
+                }
+                i = b.end;
+                continue;
+            }
+            // No closing brace → emit `%X` literally and resume.
+            w.writeByte('%') catch return w.buffered();
+            w.writeByte(code) catch return w.buffered();
+            i += 2;
+            continue;
+        }
+
+        // Simple no-argument codes.
+        i += 2;
+        switch (code) {
+            '%' => w.writeByte('%') catch return w.buffered(),
+            'u', 'n' => writePromptUsername(&w),
+            'h', 'm' => writePromptHostname(&w, .short),
+            'H' => writePromptHostname(&w, .full),
+            'w', '~' => writePromptCwd(&w, .home_collapsed),
+            'W' => writePromptCwd(&w, .basename),
+            'd' => writePromptTimeFmt(&w, "%a %b %d"),
+            't' => writePromptTimeFmt(&w, "%H:%M:%S"),
+            'T' => writePromptTimeFmt(&w, "%H:%M"),
+            '$' => {
+                const ch: u8 = if (std.c.getuid() == 0) '#' else '$';
+                w.writeByte(ch) catch return w.buffered();
+            },
+            '?' => {
+                w.print("{d}", .{session.last_status}) catch return w.buffered();
+            },
+            'f' => w.writeAll("\x1b[39m") catch return w.buffered(),
+            'k' => w.writeAll("\x1b[49m") catch return w.buffered(),
+            else => {
+                // Unknown code: emit `%X` literally so users can include
+                // stray `%` signs without escaping every one.
+                w.writeByte('%') catch return w.buffered();
+                w.writeByte(code) catch return w.buffered();
+            },
+        }
+    }
+    return w.buffered();
+}
+
+// -----------------------------------------------------------------------------
+// Color parsing for %F{...} / %K{...}
+// -----------------------------------------------------------------------------
+
+const PromptColor = union(enum) {
+    /// 24-bit truecolor RGB (used for `%F{#xxxxxx}` / `%K{#xxxxxx}`).
+    rgb: struct { r: u8, g: u8, b: u8 },
+    /// ANSI 8-color name (`%F{red}` / `%K{cyan}` etc.). Stored as 0..7.
+    named: u3,
+    /// `%F{}` / `%K{}` — reset to terminal default.
+    default,
+};
+
+/// Locate `{...}` starting at `start`. Returns the inner content slice
+/// and the byte offset just past the closing `}`. Returns null when
+/// `start` doesn't point at `{` or no closing brace is found.
+fn parseBraces(raw: []const u8, start: usize) ?struct { content: []const u8, end: usize } {
+    if (start >= raw.len or raw[start] != '{') return null;
+    const close = std.mem.indexOfScalarPos(u8, raw, start + 1, '}') orelse return null;
+    return .{ .content = raw[start + 1 .. close], .end = close + 1 };
+}
+
+fn parsePromptColor(content: []const u8) ?PromptColor {
+    const trimmed = std.mem.trim(u8, content, " \t");
+    if (trimmed.len == 0) return .default;
+
+    if (trimmed[0] == '#' and trimmed.len == 7) {
+        const r = std.fmt.parseInt(u8, trimmed[1..3], 16) catch return null;
+        const g = std.fmt.parseInt(u8, trimmed[3..5], 16) catch return null;
+        const b = std.fmt.parseInt(u8, trimmed[5..7], 16) catch return null;
+        return PromptColor{ .rgb = .{ .r = r, .g = g, .b = b } };
+    }
+
+    const named = colorByName(trimmed) orelse return null;
+    return PromptColor{ .named = named };
+}
+
+fn colorByName(name: []const u8) ?u3 {
+    if (std.mem.eql(u8, name, "black")) return 0;
+    if (std.mem.eql(u8, name, "red")) return 1;
+    if (std.mem.eql(u8, name, "green")) return 2;
+    if (std.mem.eql(u8, name, "yellow")) return 3;
+    if (std.mem.eql(u8, name, "blue")) return 4;
+    if (std.mem.eql(u8, name, "magenta")) return 5;
+    if (std.mem.eql(u8, name, "cyan")) return 6;
+    if (std.mem.eql(u8, name, "white")) return 7;
+    return null;
+}
+
+fn writePromptFg(w: *std.Io.Writer, color: PromptColor) void {
+    switch (color) {
+        .rgb => |c| w.print("\x1b[38;2;{d};{d};{d}m", .{ c.r, c.g, c.b }) catch {},
+        .named => |n| w.print("\x1b[3{d}m", .{@as(u8, n)}) catch {},
+        .default => w.writeAll("\x1b[39m") catch {},
+    }
+}
+
+fn writePromptBg(w: *std.Io.Writer, color: PromptColor) void {
+    switch (color) {
+        .rgb => |c| w.print("\x1b[48;2;{d};{d};{d}m", .{ c.r, c.g, c.b }) catch {},
+        .named => |n| w.print("\x1b[4{d}m", .{@as(u8, n)}) catch {},
+        .default => w.writeAll("\x1b[49m") catch {},
+    }
+}
+
+fn writePromptUsername(w: *std.Io.Writer) void {
+    if (std.c.getenv("USER")) |u| {
+        w.writeAll(std.mem.span(u)) catch {};
+        return;
+    }
+    if (std.c.getenv("LOGNAME")) |u| {
+        w.writeAll(std.mem.span(u)) catch {};
+        return;
+    }
+    w.writeAll("?") catch {};
+}
+
+const HostKind = enum { short, full };
+
+fn writePromptHostname(w: *std.Io.Writer, kind: HostKind) void {
+    var hostbuf: [256]u8 = undefined;
+    if (gethostname(&hostbuf, hostbuf.len) != 0) {
+        w.writeAll("?") catch {};
+        return;
+    }
+    const z: [*:0]const u8 = @ptrCast(&hostbuf);
+    const full = std.mem.span(z);
+    if (kind == .short) {
+        const dot = std.mem.indexOfScalar(u8, full, '.');
+        const short = if (dot) |d| full[0..d] else full;
+        w.writeAll(short) catch {};
+    } else {
+        w.writeAll(full) catch {};
+    }
+}
+
+const CwdKind = enum { home_collapsed, basename };
+
+fn writePromptCwd(w: *std.Io.Writer, kind: CwdKind) void {
+    var cwd_buf: [4096]u8 = undefined;
+    const got = std.c.getcwd(&cwd_buf, cwd_buf.len);
+    if (got == null) {
+        w.writeAll("?") catch {};
+        return;
+    }
+    const len = std.mem.len(@as([*:0]u8, @ptrCast(got)));
+    var cwd: []const u8 = cwd_buf[0..len];
+
+    if (kind == .basename) {
+        if (std.mem.lastIndexOfScalar(u8, cwd, '/')) |i| {
+            const base = cwd[i + 1 ..];
+            const display = if (base.len == 0) cwd else base;
+            w.writeAll(display) catch {};
+        } else {
+            w.writeAll(cwd) catch {};
+        }
+        return;
+    }
+
+    if (std.c.getenv("HOME")) |home_env| {
+        const home = std.mem.span(home_env);
+        if (home.len > 0 and std.mem.startsWith(u8, cwd, home)) {
+            w.writeAll("~") catch return;
+            cwd = cwd[home.len..];
+        }
+    }
+    w.writeAll(cwd) catch {};
+}
+
+fn writePromptTimeFmt(w: *std.Io.Writer, fmt: [*:0]const u8) void {
+    var t: c_long = time(null);
+    const tm = localtime(&t) orelse {
+        w.writeAll("?") catch {};
+        return;
+    };
+    var buf: [64]u8 = undefined;
+    const n = strftime(&buf, buf.len, fmt, tm);
+    if (n == 0) return;
+    w.writeAll(buf[0..n]) catch {};
+}
+
+/// ANSI-aware display width: walks `bytes` and counts printable
+/// columns, skipping CSI (`\x1b[...{letter}`), SS3 (`\x1bO{letter}`),
+/// and OSC (`\x1b]...{BEL or ST}`) escape sequences entirely.
+///
+/// For the printable portion, this counts bytes (one column per byte)
+/// — which is correct for ASCII prompts and undercounts wide characters
+/// (CJK, most emoji). zigline's renderer applies its own grapheme-aware
+/// width on the buffer; the prompt width only needs to be roughly right
+/// for prompts that stay within the ASCII range. v1.0 acceptable; a
+/// follow-on would route printable spans through zigline's grapheme
+/// helper.
+fn promptDisplayWidth(bytes: []const u8) usize {
+    var i: usize = 0;
+    var w: usize = 0;
+    while (i < bytes.len) {
+        const c = bytes[i];
+        if (c == 0x1b and i + 1 < bytes.len) {
+            const next = bytes[i + 1];
+            if (next == '[') {
+                // CSI: skip until a final byte in 0x40..0x7e.
+                i += 2;
+                while (i < bytes.len) {
+                    const b = bytes[i];
+                    i += 1;
+                    if (b >= 0x40 and b <= 0x7e) break;
+                }
+                continue;
+            }
+            if (next == 'O') {
+                // SS3: one final byte.
+                i += 3;
+                continue;
+            }
+            if (next == ']') {
+                // OSC: skip until BEL (0x07) or ST (ESC \\).
+                i += 2;
+                while (i < bytes.len) {
+                    const b = bytes[i];
+                    if (b == 0x07) {
+                        i += 1;
+                        break;
+                    }
+                    if (b == 0x1b and i + 1 < bytes.len and bytes[i + 1] == '\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            // Unknown escape: skip the next byte too.
+            i += 2;
+            continue;
+        }
+        // Printable byte. Skip multi-byte UTF-8 continuation bytes so
+        // we count one column per UTF-8 codepoint rather than per byte.
+        // (Wide-cell content like CJK is undercounted; see comment above.)
+        if (c >= 0x80 and c < 0xc0) {
+            i += 1;
+            continue;
+        }
+        w += 1;
+        i += 1;
+    }
+    return w;
 }
 
 // =============================================================================
@@ -1120,64 +1651,74 @@ fn sourceRcFile(session: *session_mod.Session, alloc: Allocator) !void {
 /// tests that exercise cursor-sensitive features (bracket matching), use
 /// `highlightHookAt` directly with an explicit cursor byte.
 fn highlightHookEnd(alloc: Allocator, buffer: []const u8) anyerror![]zigline.HighlightSpan {
-    return highlightHook(@ptrFromInt(0xdeadbeef), alloc, .{
-        .buffer = buffer,
-        .cursor_byte = buffer.len,
-    });
+    return highlightBuffer(alloc, buffer, buffer.len, palette_dark);
 }
 
 fn highlightHookAt(alloc: Allocator, buffer: []const u8, cursor_byte: usize) anyerror![]zigline.HighlightSpan {
-    return highlightHook(@ptrFromInt(0xdeadbeef), alloc, .{
-        .buffer = buffer,
-        .cursor_byte = cursor_byte,
-    });
+    return highlightBuffer(alloc, buffer, cursor_byte, palette_dark);
 }
 
-test "highlight: keywords get cyan + bold span" {
+test "highlight: keywords get keyword-color + bold span" {
     const alloc = std.testing.allocator;
     const spans = try highlightHookEnd(alloc, "if true { echo hi }");
     defer alloc.free(spans);
 
-    var saw_keyword = false;
-    var saw_dim = false;
+    // The `if` keyword should be a bold span whose fg matches the
+    // dark palette's keyword color. Brackets `{` and `}` should be
+    // styled too (operator color), but no specific assertion needed
+    // beyond "they exist."
+    var saw_keyword_bold = false;
+    var saw_operator = false;
     for (spans) |s| {
         if (s.style.bold) {
             if (s.style.fg) |fg| {
-                if (fg == .basic and fg.basic == .cyan) saw_keyword = true;
+                if (fg == .rgb and fg.rgb.r == palette_dark.keyword.rgb.r and
+                    fg.rgb.g == palette_dark.keyword.rgb.g and
+                    fg.rgb.b == palette_dark.keyword.rgb.b) saw_keyword_bold = true;
             }
         }
-        if (s.style.dim) saw_dim = true;
+        if (s.style.fg) |fg| {
+            if (fg == .rgb and fg.rgb.r == palette_dark.operator.rgb.r) saw_operator = true;
+        }
     }
-    try std.testing.expect(saw_keyword);
-    try std.testing.expect(saw_dim);
+    try std.testing.expect(saw_keyword_bold);
+    try std.testing.expect(saw_operator);
 }
 
-test "highlight: dq with embedded $var emits alternating green/yellow spans" {
+test "highlight: dq with embedded $var emits string + variable colors" {
     const alloc = std.testing.allocator;
     const spans = try highlightHookEnd(alloc, "echo \"hi $name\"");
     defer alloc.free(spans);
 
-    var has_green = false;
-    var has_yellow = false;
+    var has_string = false;
+    var has_variable = false;
     for (spans) |s| {
         if (s.style.fg) |fg| {
-            if (fg == .basic and fg.basic == .green) has_green = true;
-            if (fg == .basic and fg.basic == .yellow) has_yellow = true;
+            if (fg == .rgb) {
+                if (fg.rgb.r == palette_dark.string_literal.rgb.r and
+                    fg.rgb.g == palette_dark.string_literal.rgb.g and
+                    fg.rgb.b == palette_dark.string_literal.rgb.b) has_string = true;
+                if (fg.rgb.r == palette_dark.variable.rgb.r and
+                    fg.rgb.g == palette_dark.variable.rgb.g and
+                    fg.rgb.b == palette_dark.variable.rgb.b) has_variable = true;
+            }
         }
     }
-    try std.testing.expect(has_green);
-    try std.testing.expect(has_yellow);
+    try std.testing.expect(has_string);
+    try std.testing.expect(has_variable);
 }
 
-test "highlight: comment is dim" {
+test "highlight: comment is italicized with comment-color" {
     const alloc = std.testing.allocator;
     const spans = try highlightHookEnd(alloc, "echo a # trailing");
     defer alloc.free(spans);
-    var saw_dim = false;
-    for (spans) |s| if (s.style.dim) {
-        saw_dim = true;
+    var saw_comment = false;
+    for (spans) |s| if (s.style.italic) {
+        if (s.style.fg) |fg| {
+            if (fg == .rgb and fg.rgb.r == palette_dark.comment.rgb.r) saw_comment = true;
+        }
     };
-    try std.testing.expect(saw_dim);
+    try std.testing.expect(saw_comment);
 }
 
 // -----------------------------------------------------------------------------

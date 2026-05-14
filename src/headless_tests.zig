@@ -617,6 +617,168 @@ const cases: []const Case = &.{
         .expect = .{ .exit_code = 1 },
     },
 
+    // ---- job control: kill / disown / fg / bg ---------------------------
+    //
+    // `kill -SIG TARGET...` accepts named signals (with or without `SIG`
+    // prefix), numeric signals, and either `pid` or `%N` targets. `kill
+    // -l` lists every signal slash recognizes. `disown` removes a job
+    // from the JobTable; the underlying process keeps running. `fg`/`bg`
+    // resume stopped jobs by sending `SIGCONT` to the process group.
+    //
+    // These cases assert the user-visible behavior; deeper interactions
+    // with terminal handoff (`tcsetpgrp`) are exercised in the PTY tests.
+
+    .{
+        .name = "kill: -l lists known signals",
+        .source = "kill -l",
+        .expect = .{ .exit_code = 0, .stdout = "HUP", .stdout_contains = true },
+    },
+    .{
+        .name = "kill: -INVALID is a usage error",
+        .source = "kill -ZAP 1",
+        .expect = .{ .exit_code = 2 },
+    },
+    .{
+        .name = "kill: missing target is a usage error",
+        .source = "kill -TERM",
+        .expect = .{ .exit_code = 2 },
+    },
+    .{
+        .name = "kill: bad pid spec",
+        .source = "kill -TERM not-a-pid",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "kill: bad %N spec",
+        .source = "kill -TERM %nope",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "kill: nonexistent job id",
+        .source = "kill -TERM %99",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "disown: no current job is an error",
+        .source = "disown",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "kill: signals a real backgrounded job via %N",
+        .source = "sleep 5 >/dev/null 2>&1 & kill -TERM %1; wait %1; echo done",
+        .expect = .{ .exit_code = 0, .stdout = "done\n", .stdout_contains = true },
+    },
+    .{
+        .name = "disown: removes a backgrounded job",
+        // After disown, the orphan keeps running its (short) sleep then
+        // exits naturally. We don't reap it from the table — that's the
+        // whole point of disown.
+        .source = "sleep 1 >/dev/null 2>&1 & disown; jobs; echo gone",
+        .expect = .{ .exit_code = 0, .stdout = "gone\n", .stdout_contains = true },
+    },
+    .{
+        .name = "disown: %N variant",
+        .source = "sleep 1 >/dev/null 2>&1 & disown %1; jobs; echo ok",
+        .expect = .{ .exit_code = 0, .stdout = "ok\n", .stdout_contains = true },
+    },
+    .{
+        .name = "disown: -a clears all backgrounded jobs",
+        .source = "sleep 1 >/dev/null 2>&1 & sleep 1 >/dev/null 2>&1 & disown -a; jobs; echo cleared",
+        .expect = .{ .exit_code = 0, .stdout = "cleared\n", .stdout_contains = true },
+    },
+
+    .{
+        .name = "type: kill / fg / bg / disown are builtins",
+        .source = "type kill; type fg; type bg; type disown",
+        .expect = .{ .exit_code = 0, .stdout = "kill is a shell builtin\nfg is a shell builtin\nbg is a shell builtin\ndisown is a shell builtin\n" },
+    },
+
+    // ---- match: pattern dispatch (PLAN §12) ------------------------------
+    //
+    // `match SUBJECT { arms... }` runs the body of the first arm whose
+    // pattern matches. Subject is one Word expanded at runtime; patterns
+    // are literal grammar atoms (no $var, no command substitution). With
+    // no matching arm, exit 0.
+
+    .{
+        .name = "match: literal pattern hit",
+        .source = "match alpha { alpha { echo got-alpha }; beta { echo got-beta }; * { echo other } }",
+        .expect = .{ .exit_code = 0, .stdout = "got-alpha\n" },
+    },
+    .{
+        .name = "match: literal pattern miss falls through to *",
+        .source = "match wibble { alpha { echo a }; beta { echo b }; * { echo other } }",
+        .expect = .{ .exit_code = 0, .stdout = "other\n" },
+    },
+    .{
+        .name = "match: glob arm",
+        .source = "match readme.md { *.md { echo doc }; *.txt { echo text }; * { echo other } }",
+        .expect = .{ .exit_code = 0, .stdout = "doc\n" },
+    },
+    .{
+        .name = "match: multi-pattern arm",
+        .source = "match push { init status { echo control }; push pull { echo network }; * { echo none } }",
+        .expect = .{ .exit_code = 0, .stdout = "network\n" },
+    },
+    .{
+        .name = "match: variable subject",
+        .source = "x=hi; match $x { hi { echo found }; * { echo missed } }",
+        .expect = .{ .exit_code = 0, .stdout = "found\n" },
+    },
+    .{
+        .name = "match: no arm matches => exit 1, runs nothing",
+        // PLAN §12: missing default surfaces as a non-zero status so
+        // `&&`/`||` can distinguish "matched a no-op" from "no arm
+        // matched". Users who want silent no-op write `* { true }`.
+        .source = "match nope { alpha { echo a } }; echo done=$?",
+        .expect = .{ .exit_code = 0, .stdout = "done=1\n" },
+    },
+    .{
+        .name = "match: explicit `* { true }` opts into silent no-op",
+        .source = "match nope { alpha { echo a }; * { true } }; echo done=$?",
+        .expect = .{ .exit_code = 0, .stdout = "done=0\n" },
+    },
+    .{
+        .name = "match: first match wins",
+        .source = "match all { * { echo first }; * { echo second } }",
+        .expect = .{ .exit_code = 0, .stdout = "first\n" },
+    },
+    .{
+        .name = "match: brace-form body with sequenced statements",
+        .source = "match go { go { echo a; echo b } }",
+        .expect = .{ .exit_code = 0, .stdout = "a\nb\n" },
+    },
+    .{
+        .name = "match: indent form",
+        .source = "match alpha\n  alpha { echo from-indent }\n  beta { echo nope }\n",
+        .expect = .{ .exit_code = 0, .stdout = "from-indent\n" },
+    },
+    .{
+        .name = "match: subcommand router inside cmd",
+        .source = "cmd dispatch {\n  match $1 {\n    init { echo doing-init }\n    status { echo all-good }\n    * { echo unknown }\n  }\n}\ndispatch init\ndispatch status\ndispatch wat",
+        .expect = .{ .exit_code = 0, .stdout = "doing-init\nall-good\nunknown\n" },
+    },
+    .{
+        .name = "match: runtime-generated pattern rejected at lower",
+        .source = "p=hi; match hi { $p { echo nope } }",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "match: command-substitution pattern rejected",
+        .source = "match hi { $(echo hi) { echo nope } }",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "match: body's exit status propagates",
+        .source = "match hit { hit { false } }",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "match: arm with quoted pattern (literal text)",
+        .source = "match ab { 'ab' { echo q-yes }; * { echo q-no } }",
+        .expect = .{ .exit_code = 0, .stdout = "q-yes\n" },
+    },
+
     // ---- cmd user-defined commands (PLAN §7 Rule 26) ---------------------
     //
     // `cmd name { body }` registers a session-scoped command body.
@@ -1050,24 +1212,28 @@ fn runHeadless(alloc: std.mem.Allocator, source_text: []const u8) !RunOutput {
         exec.closeFd(err_pipe[0]);
     }
 
-    // Run the eval.
+    // Run the eval. Parse and lower failures map to exit code 1 — this
+    // matches what the REPL does in the same situation, so headless and
+    // interactive paths both surface bad-program failures as exit 1.
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const a = arena.allocator();
     const source = diag.Source{ .name = "<test>", .text = source_text };
-    const parsed = try shape.parse(source, a, null);
-    const ctx = program.LowerContext{ .alloc = a, .source = source };
-    const prog = try program.lower(parsed.root, &ctx, null);
+    const exit_code = blk: {
+        const parsed = shape.parse(source, a, null) catch break :blk @as(u8, 1);
+        const ctx = program.LowerContext{ .alloc = a, .source = source };
+        const prog = program.lower(parsed.root, &ctx, null) catch break :blk @as(u8, 1);
 
-    const envp_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(environ));
-    var session = try session_mod.Session.init(alloc, envp_ptr, false);
-    defer session.deinit();
-    builtins.installSession(&session);
+        const envp_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(environ));
+        var session = try session_mod.Session.init(alloc, envp_ptr, false);
+        defer session.deinit();
+        builtins.installSession(&session);
 
-    const result = try eval.runForeground(prog, &session, a, null);
-    eval.fireExitTrap(&session, a, null) catch {};
-    const final = session.exit_request orelse result;
-    const exit_code = final.toStatusByte();
+        const result = try eval.runForeground(prog, &session, a, null);
+        eval.fireExitTrap(&session, a, null) catch {};
+        const final = session.exit_request orelse result;
+        break :blk final.toStatusByte();
+    };
 
     // Restore originals (this also closes our write-end of fd 1 and 2).
     _ = std.c.dup2(saved_out, 1);

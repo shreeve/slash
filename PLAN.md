@@ -48,6 +48,8 @@ It optimizes for, in order:
 
 Everything else — syntax sugar, tooling, AI, UX polish — is downstream of those four.
 
+Slash also commits to first-class **interactive UX** — autosuggestions, abbreviations, syntax highlighting as you type, intelligent completions, rich prompts, smart history. Interactive UX is downstream of the four priorities above, never a fifth priority. It is judged at the keystroke moment by §14: it must improve `Command` clarity for the user typing it. It must not introduce language semantics, runtime behavior, or shell-level mutation. Interactive features that would only make sense as a programming language (templates, expression evaluation, event handlers running shell code) are out, regardless of how nice they look in a demo.
+
 ---
 
 ## 2. Core Philosophy
@@ -680,7 +682,7 @@ These are the rules Slash commits to. When in doubt, this list wins.
 16. **`while` exit status** is the last body result if the loop ran, else zero.
 17. **`for` exit status** is the last body result if any iteration ran, else zero.
 18. **There is no `set -e` or hidden abort-on-error mode.** Control flow is explicit via `&&`, `||`, `if`, and loop structure.
-19. **Builtins that mutate shell state affect the shell only in shell context.** In a pipeline, subshell, or detached child, they affect only that child context. A shell-context builtin still executes as a `Job` for uniform reporting and sequencing, but may not spawn a child process: its `Job` has `processes.len = 0` and transitions directly to `.done(...)`. `Job` is not synonymous with "external process group". **Builtins never call `exec`.** A builtin's observable semantics (stdout, stderr, exit status, redirect handling, argv interpretation) must be identical regardless of execution context; only the *scope* of its state mutation differs between shell context and child context.
+19. **Builtins that mutate shell state affect the shell only in shell context.** In a pipeline, subshell, or detached child, they affect only that child context. A shell-context builtin still executes as a `Job` for uniform reporting and sequencing, but may not spawn a child process: its `Job` has `processes.len = 0` and transitions directly to `.done(...)`. `Job` is not synonymous with "external process group". **Builtins never fork a child and call `exec` in it. No builtin except `exec` may call `execve`, `posix_spawn`, or otherwise launch a program.** A builtin's observable semantics (stdout, stderr, exit status, redirect handling, argv interpretation) must be identical regardless of execution context; only the *scope* of its state mutation differs between shell context and child context. **Single carve-out: the `exec` builtin.** When `exec CMD ...` runs as a lone simple command in shell context, it `execve`s the shell process itself — it forks nothing, spawns no child, and does not return. In pipeline, subshell, or detached context, `exec CMD ...` replaces *that child execution context* with `CMD`; it never mutates the parent shell and never creates an extra child. The carve-out exists because `exec` is a Unix control primitive that *replaces* an execution context rather than launching a separate one; it does not violate the no-fork-then-exec rule because it forks nothing.
 20. **Foreground jobs own the terminal; background jobs never do.** The shell regains terminal ownership after foreground exit or stop.
 21. **Interactive shell ignores/handles job-control signals in the parent and restores defaults in children before exec.** Standard discipline; no signal surprises.
 22. **All processes in a pipeline belong to one process group and one `Job`.** Job control operates on groups, not individual pids.
@@ -945,28 +947,52 @@ These are the traps every real shell falls into. Slash must solve them explicitl
 
 ---
 
-## 12. Out of Scope
+## 12. Scope
 
-Slash runs programs. It does not try to be a language. These exclusions are intentional and load-bearing; features that look tempting but sit on the wrong side of this line do not belong in Slash.
+Slash runs programs. It does not try to be a language. These exclusions are intentional and load-bearing; features that look tempting but sit on the wrong side of this line do not belong in Slash. Likewise, the in-scope lists are commitments, not menus — they earn their seat by passing §14.
 
 ### Not part of Slash
+
+Language-shaped features — out:
 
 - Inline arithmetic as a first-class feature (e.g. `= 2 ** 10`, `x = 10 + 4`).
 - `= expr` bare-print evaluation form.
 - `??` as a general-expression default fallback. A narrow `${var ?? default}` form inside quoted strings is acceptable; general expression-level `??` is not.
 - Expression-level comparisons and math operators — these are not shell operators.
-- Pattern matching as a value-level language construct. If pattern dispatch appears, it dispatches to `Program`s only, not values.
+- `let`, `(( … ))`, `[[ … ]]` — no expression language, no arithmetic context, no extended-test sublanguage.
+- Pattern matching as a value-level language construct. If pattern dispatch appears, it dispatches to `Program`s only, not values (see `match` below).
 - "Language-y" precedence and associativity in the grammar.
+- Standard-library verbs disguised as builtins: `math`, `string`, `argparse`, and similar. Slash routes those needs to real programs (`bc`, `awk`, `getopt`, etc.).
+- `eval` — violates §7 Rule 30 (expansion happens exactly once per word; the `Word → argv` boundary is one-way). No textual re-evaluation, ever.
+- `function` with named/typed parameters, default values, or return values. The single command-definition mechanism is `cmd` (positional only — see §7 Rule 26).
+- `alias` — `cmd` is the one definition mechanism. `cmd ll { ls -lAh $@ }` *is* the alias.
+- Universal / cross-session "magic" variables that persist outside `~/.slashrc` and the explicit shell environment. Persistence belongs in files, not in implicit storage.
+- Fish-style event handlers (`function --on-event`, `--on-signal`, `--on-variable`) and any other mechanism that runs user shell code in response to shell internals. Signal handling is `trap`; everything else is explicit.
 
 ### In scope — as program control, not computation
 
 - Variables (scalar and list).
 - `if` / `unless` / `else`, `while`, `until`, `for`.
+- `match` — pattern-dispatch to `Program`s, not to values. One subject word, glob-pattern arms (using existing glob machinery), multiple patterns per arm, first match wins, brace or indent body, no captures, no regex, no value result. **Arm patterns are literal glob-pattern syntax in the grammar, not expanded shell words: no `$var`, no command substitution, no brace expansion, no runtime-generated patterns.** If no arm matches, `match` exits `1` and runs nothing — Slash treats a missing default as a forgotten case and surfaces it in `$?` / `&&` / `||` rather than silently succeeding (this differs from POSIX `case`, which exits `0` on no match). Users who want silent no-op write an explicit `* { true }` arm. `match` is the **only** surface that exposes glob matching against a string; users do not get `[[ … ]]`, regex operators, or `string match`.
 - `cmd` — user-defined commands, session-scoped, subshell-isolated (see §7 Rule 26).
+- `return N` — control-flow builtin that exits the enclosing `cmd` body with status `N`. Outside a `cmd` body it is a hard error.
 - Heredocs with triple-delimiter form (`'''`, `"""`, ```` ``` ````) and defined dedent policy.
 - Process substitution, subshells, background jobs, redirects, pipes, `and` / `or` / `xor` as contextual keywords.
 - Grammar-driven parsing, argv-safe execution, one-grammar UX.
-- Flat-file history, prompt escapes, directory MRU (e.g. a `j` builtin).
+
+### In scope — as interactive UX
+
+These features live in the REPL and the line editor. They never affect script semantics, never alter expansion, never run user shell code at unexpected moments, and never introduce language constructs. Each item below is constrained to those rails.
+
+- **Autosuggestions.** Dim "ghost text" predicted from history (and optionally completion sources). Visible only in the editor, accepted only by an explicit keystroke. Never expanded, never executed unless accepted as ordinary input.
+- **Abbreviations.** Editor-only token-or-phrase rewrites that fire on space/enter and are visible before the line is accepted. **Strictly** literal text → literal text. No variable expansion, no command substitution, no positional placeholders, no conditional logic, no template language, no context conditions ("only in git repos", "only after command X"), no dynamic RHS sourced from a command/file/provider, no recursive or chained expansion (a single keystroke produces a single rewrite), no hidden accept-and-run behavior. Abbreviation expansion is a one-shot rewrite of the visible buffer **before** parsing; the RHS is inserted as if typed by the user and is then parsed normally only if the line is accepted. The abbreviation mechanism itself performs zero shell expansion and runs zero code — a literal RHS *containing* `$x` or `$(cmd)` is fine, because that's just the same text the user could have typed; the shell expands it at the usual time, not at expansion-time. Equivalent in spirit to fish abbreviations, deliberately less powerful than them.
+- **Syntax highlighting as you type.** Driven by the same grammar that parses the line, never by a second tokenizer or regex set.
+- **Intelligent tab completions.** Driven by parse context plus per-command completion specs (e.g., subcommand sets, file-path filters, flag definitions). Specs are declarative data, not user shell code; no completion script ever runs arbitrary expressions.
+- **Rich prompts.** Built from a fixed set of prompt providers / escapes (cwd, last-status, jobs count, git context, virtualenv, host/user, time). Prompt content is data, not a user-written shell function. No fish-style "prompt is a function that runs every keystroke."
+- **Smart history.** Per-cwd recall, frecency ranking, dedup, fuzzy reverse-search (Ctrl-R style). Pure data and indexing; no behavioral hooks.
+- **Keybindings.** Bind editor actions (motion, deletion, history, completion, abbreviation expansion, accept-line). Do **not** bind "run this slash code on this key" — that path leads back to event handlers.
+
+Out of scope at the UX layer for the same reason: theming engines, web/GUI config tools, plugin systems that load arbitrary code, and any "extension API" that lets third parties run code at editor events.
 
 ### Program-level helpers
 
@@ -1013,6 +1039,12 @@ When designing any feature, ask:
 If not:
 
 > **Do not build it.**
+
+### Interactive UX corollary
+
+A keystroke-time feature passes §14 if it improves `Command` clarity at the moment of typing — autosuggestions, abbreviations, completion descriptions, syntax highlighting, smart history all qualify. A feature that only changes how the editor *looks* (theming, color palettes), how it is *configured* (web UIs, settings explorers), or how it is *extended by users running code at editor events* (plugin APIs, event handlers) does not earn a seat in the kernel. Those things stay downstream of the shell, in user config files or out-of-tree tooling.
+
+A keystroke-time feature also forfeits its seat the moment it begins to add language semantics. If "abbreviations" grow placeholders, "completions" grow conditionals, "prompts" grow control flow, or "keybindings" grow scripted actions, they have crossed the line and §14 rejects them. Constrain the feature, or do not ship it.
 
 ---
 

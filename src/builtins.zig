@@ -90,6 +90,10 @@ pub fn init(alloc: Allocator) !BuiltinSet {
     try set.table.put(alloc, "type", .{ .name = "type", .run = typeFn });
     try set.table.put(alloc, "jobs", .{ .name = "jobs", .run = jobsFn });
     try set.table.put(alloc, "wait", .{ .name = "wait", .run = waitFn });
+    try set.table.put(alloc, "fg", .{ .name = "fg", .run = fgFn });
+    try set.table.put(alloc, "bg", .{ .name = "bg", .run = bgFn });
+    try set.table.put(alloc, "kill", .{ .name = "kill", .run = killFn });
+    try set.table.put(alloc, "disown", .{ .name = "disown", .run = disownFn });
     try set.table.put(alloc, "trap", .{ .name = "trap", .run = trapFn });
     return set;
 }
@@ -1041,4 +1045,365 @@ fn trapSignalHandler(sig_id: std.c.SIG) callconv(.c) void {
         else => return,
     };
     s.traps.markPending(sig);
+}
+
+// =============================================================================
+// fg / bg / kill / disown
+// =============================================================================
+//
+// Job-control surface (PLAN §7 Rule 22, §19, §20.3 "Job control operates on
+// groups, not individual pids"). All four operate against the session's
+// JobTable; `kill` also accepts raw pids for ad-hoc signaling.
+//
+// `fg` and `bg` send `SIGCONT` to the target job's process group via
+// `kill(-pgid, SIGCONT)` and update Job state. `fg` then blocks via
+// `job.service(.foreground, target)` until the job is `done` or `stopped`
+// again. Terminal handoff (`tcsetpgrp`) is a separate surface — without it
+// a resumed job that reads the controlling tty may receive `SIGTTIN`. The
+// resume + reap mechanics are correct in either case.
+//
+// `kill -SIG TARGET...` parses the signal as a name (`-INT`, `-HUP`,
+// `-CONT`, ...) or a number (`-9`, `-15`); default is `TERM`. Targets are
+// `pid` (positive integer; the kernel routes negative pids to process
+// groups but slash makes that explicit via `%N` instead) or `%N` (job id).
+//
+// `disown` removes a job from `Session.jobs` without signaling it. The
+// underlying process group keeps running; the shell simply forgets it.
+// `disown -a` removes every detached job; `disown` (no args) targets the
+// current background job (most recent detached job that isn't done).
+
+/// Most-recent eligible job for `fg`/`bg`/`disown` with no args. Picks
+/// the highest-id job that is detached or stopped.
+fn pickCurrentJob(session: *session_mod.Session) ?*job_mod.Job {
+    const list = session.jobs.list();
+    var i: usize = list.len;
+    while (i > 0) {
+        i -= 1;
+        const j = list[i];
+        switch (j.state) {
+            .done => continue,
+            .stopped => return j,
+            .running, .pending => if (j.detached) return j,
+        }
+    }
+    return null;
+}
+
+/// Resolve a `%N`/`N` job spec or fall back to the current job. Emits
+/// the matching error to stderr and returns null on failure.
+fn resolveJobArg(
+    session: *session_mod.Session,
+    builtin_name: []const u8,
+    arg: ?[]const u8,
+) ?*job_mod.Job {
+    if (arg) |a| {
+        const id = parseJobSpec(a) orelse {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s}: invalid job id `{s}`\n", .{ builtin_name, a }) catch "";
+            _ = std.c.write(2, msg.ptr, msg.len);
+            return null;
+        };
+        return session.jobs.lookup(id) orelse {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s}: no such job {d}\n", .{ builtin_name, id }) catch "";
+            _ = std.c.write(2, msg.ptr, msg.len);
+            return null;
+        };
+    }
+    return pickCurrentJob(session) orelse {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s}: no current job\n", .{builtin_name}) catch "";
+        _ = std.c.write(2, msg.ptr, msg.len);
+        return null;
+    };
+}
+
+/// `kill(-pgid, sig)` — POSIX form for "signal every process in this
+/// process group." Returns true if the syscall reported success.
+fn signalGroup(pgid: std.c.pid_t, sig: std.c.SIG) bool {
+    if (pgid <= 0) return false;
+    return std.c.kill(-pgid, sig) == 0;
+}
+
+fn signalProcess(pid: std.c.pid_t, sig: std.c.SIG) bool {
+    return std.c.kill(pid, sig) == 0;
+}
+
+fn fgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    _ = io;
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+    const arg: ?[]const u8 = if (argv.len >= 2) argv[1] else null;
+    const j = resolveJobArg(session, "fg", arg) orelse return .{ .exited = 1 };
+    if (j.state == .done) {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "fg: job {d} already done\n", .{j.id}) catch "fg: job done\n";
+        _ = std.c.write(2, msg.ptr, msg.len);
+        return .{ .exited = 1 };
+    }
+
+    // Echo the resumed command so the user sees what came back to the
+    // foreground (matches bash/zsh behavior).
+    if (j.command_text) |t| {
+        _ = std.c.write(1, t.ptr, t.len);
+        _ = std.c.write(1, "\n", 1);
+    }
+
+    // Resume any stopped processes; if the job was already running in
+    // the background, SIGCONT is a no-op for already-running children.
+    if (j.state == .stopped) {
+        for (j.processes) |*p| switch (p.state) {
+            .stopped => p.state = .running,
+            else => {},
+        };
+        j.state = .running;
+        _ = signalGroup(j.pgid, .CONT);
+    }
+    j.detached = false;
+    j.foreground = true;
+
+    try job_mod.service(&session.jobs, .foreground, j);
+    return j.result orelse Result{ .exited = 0 };
+}
+
+fn bgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    _ = io;
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+    const arg: ?[]const u8 = if (argv.len >= 2) argv[1] else null;
+    const j = resolveJobArg(session, "bg", arg) orelse return .{ .exited = 1 };
+    if (j.state == .done) {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "bg: job {d} already done\n", .{j.id}) catch "bg: job done\n";
+        _ = std.c.write(2, msg.ptr, msg.len);
+        return .{ .exited = 1 };
+    }
+
+    if (j.state == .stopped) {
+        for (j.processes) |*p| switch (p.state) {
+            .stopped => p.state = .running,
+            else => {},
+        };
+        j.state = .running;
+        _ = signalGroup(j.pgid, .CONT);
+    }
+    j.detached = true;
+    j.foreground = false;
+
+    var buf: [256]u8 = undefined;
+    const text = j.command_text orelse "<job>";
+    const msg = std.fmt.bufPrint(&buf, "[{d}] {s} &\n", .{ j.id, text }) catch "";
+    _ = std.c.write(1, msg.ptr, msg.len);
+    return .{ .exited = 0 };
+}
+
+/// Map a textual signal name (`HUP`, `SIGHUP`, `INT`, ...) or a numeric
+/// string (`9`, `15`) to a `std.c.SIG`. Returns null on unknown names or
+/// numbers without a matching enum value.
+fn parseSignalName(arg: []const u8) ?std.c.SIG {
+    var name = arg;
+    if (name.len >= 3 and std.ascii.eqlIgnoreCase(name[0..3], "SIG"))
+        name = name[3..];
+
+    if (std.ascii.isDigit(name[0])) {
+        const n = std.fmt.parseInt(c_int, name, 10) catch return null;
+        return signalFromNumber(n);
+    }
+
+    var upper_buf: [16]u8 = undefined;
+    if (name.len >= upper_buf.len) return null;
+    for (name, 0..) |ch, i| upper_buf[i] = std.ascii.toUpper(ch);
+    const upper = upper_buf[0..name.len];
+
+    const Map = struct { n: []const u8, s: std.c.SIG };
+    const table = [_]Map{
+        .{ .n = "HUP", .s = .HUP },
+        .{ .n = "INT", .s = .INT },
+        .{ .n = "QUIT", .s = .QUIT },
+        .{ .n = "ILL", .s = .ILL },
+        .{ .n = "TRAP", .s = .TRAP },
+        .{ .n = "ABRT", .s = .ABRT },
+        .{ .n = "BUS", .s = .BUS },
+        .{ .n = "FPE", .s = .FPE },
+        .{ .n = "KILL", .s = .KILL },
+        .{ .n = "USR1", .s = .USR1 },
+        .{ .n = "SEGV", .s = .SEGV },
+        .{ .n = "USR2", .s = .USR2 },
+        .{ .n = "PIPE", .s = .PIPE },
+        .{ .n = "ALRM", .s = .ALRM },
+        .{ .n = "TERM", .s = .TERM },
+        .{ .n = "CONT", .s = .CONT },
+        .{ .n = "STOP", .s = .STOP },
+        .{ .n = "TSTP", .s = .TSTP },
+        .{ .n = "TTIN", .s = .TTIN },
+        .{ .n = "TTOU", .s = .TTOU },
+        .{ .n = "CHLD", .s = .CHLD },
+    };
+    for (table) |m| {
+        if (std.mem.eql(u8, upper, m.n)) return m.s;
+    }
+    return null;
+}
+
+fn signalFromNumber(n: c_int) ?std.c.SIG {
+    inline for (@typeInfo(std.c.SIG).@"enum".fields) |f| {
+        if (f.value == n) return @as(std.c.SIG, @enumFromInt(f.value));
+    }
+    return null;
+}
+
+fn killFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    const session_opt: ?*session_mod.Session = switch (ctx) {
+        .shell => |s| s,
+        .child => null,
+    };
+
+    var sig: std.c.SIG = .TERM;
+    var i: usize = 1;
+
+    if (i < argv.len and argv[i].len >= 2 and argv[i][0] == '-') {
+        const flag = argv[i][1..];
+        if (std.mem.eql(u8, flag, "l")) {
+            const list_str =
+                "HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 " ++
+                "PIPE ALRM TERM CONT STOP TSTP TTIN TTOU CHLD\n";
+            _ = writeAllToFd(io.stdout, list_str);
+            return .{ .exited = 0 };
+        }
+        sig = parseSignalName(flag) orelse {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "kill: {s}: invalid signal\n", .{flag}) catch "kill: invalid signal\n";
+            _ = writeAllToFd(io.stderr, msg);
+            return .{ .exited = 2 };
+        };
+        i += 1;
+    }
+
+    if (i >= argv.len) {
+        _ = writeAllToFd(io.stderr, "kill: usage: kill [-SIG] PID|%JOB ...\n");
+        return .{ .exited = 2 };
+    }
+
+    var any_failed = false;
+    while (i < argv.len) : (i += 1) {
+        const target = argv[i];
+        if (target.len >= 1 and target[0] == '%') {
+            const session = session_opt orelse {
+                _ = writeAllToFd(io.stderr, "kill: %job not valid in non-shell context\n");
+                any_failed = true;
+                continue;
+            };
+            const id = parseJobSpec(target) orelse {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "kill: invalid job id `{s}`\n", .{target}) catch "";
+                _ = writeAllToFd(io.stderr, msg);
+                any_failed = true;
+                continue;
+            };
+            const j = session.jobs.lookup(id) orelse {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "kill: no such job {d}\n", .{id}) catch "";
+                _ = writeAllToFd(io.stderr, msg);
+                any_failed = true;
+                continue;
+            };
+            if (!signalGroup(j.pgid, sig)) any_failed = true;
+        } else {
+            const pid = std.fmt.parseInt(std.c.pid_t, target, 10) catch {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "kill: invalid pid `{s}`\n", .{target}) catch "";
+                _ = writeAllToFd(io.stderr, msg);
+                any_failed = true;
+                continue;
+            };
+            if (!signalProcess(pid, sig)) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "kill: ({d}) failed\n", .{pid}) catch "";
+                _ = writeAllToFd(io.stderr, msg);
+                any_failed = true;
+            }
+        }
+    }
+    return .{ .exited = if (any_failed) 1 else 0 };
+}
+
+fn disownFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    _ = io;
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+
+    // `disown -a` clears every disownable job (detached or stopped) —
+    // crucially **not** zero-child shell-context jobs (including the
+    // disown call itself, which is still held by the eval frame). No
+    // arg removes the current job; `%N` / `N` removes a specific job
+    // and rejects targets that aren't disownable.
+    var remove_all = false;
+    var arg: ?[]const u8 = null;
+    if (argv.len >= 2) {
+        if (std.mem.eql(u8, argv[1], "-a")) {
+            remove_all = true;
+        } else {
+            arg = argv[1];
+        }
+    }
+
+    if (remove_all) {
+        var i: usize = session.jobs.jobs.items.len;
+        while (i > 0) {
+            i -= 1;
+            const j = session.jobs.jobs.items[i];
+            if (!isDisownable(j)) continue;
+            removeJobAt(session, i);
+        }
+        return .{ .exited = 0 };
+    }
+
+    const j = resolveJobArg(session, "disown", arg) orelse return .{ .exited = 1 };
+    if (!isDisownable(j)) {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "disown: job {d} not disownable\n", .{j.id}) catch "";
+        _ = std.c.write(2, msg.ptr, msg.len);
+        return .{ .exited = 1 };
+    }
+    const idx = jobIndex(session, j) orelse return .{ .exited = 1 };
+    removeJobAt(session, idx);
+    return .{ .exited = 0 };
+}
+
+/// A job is disownable only if it's a real backgrounded process group
+/// (detached or stopped). Zero-child shell-context jobs are runtime
+/// bookkeeping — disowning one would yank the rug out from under the
+/// builtin currently using it.
+fn isDisownable(j: *job_mod.Job) bool {
+    if (j.processes.len == 0) return false;
+    return switch (j.state) {
+        .stopped => true,
+        .running, .pending => j.detached,
+        .done => false,
+    };
+}
+
+fn jobIndex(session: *session_mod.Session, target: *job_mod.Job) ?usize {
+    for (session.jobs.jobs.items, 0..) |j, i| {
+        if (j == target) return i;
+    }
+    return null;
+}
+
+/// Free a job's owned memory and remove it from the table. Does NOT
+/// signal the underlying process group — `disown` leaves the children
+/// running; the shell just forgets them.
+fn removeJobAt(session: *session_mod.Session, idx: usize) void {
+    const t = &session.jobs;
+    const j = t.jobs.items[idx];
+    t.alloc.free(j.processes);
+    if (j.command_text) |txt| t.alloc.free(txt);
+    t.alloc.destroy(j);
+    _ = t.jobs.orderedRemove(idx);
 }

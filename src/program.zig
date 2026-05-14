@@ -130,6 +130,26 @@ pub const Define = struct {
     span: Span,
 };
 
+/// `match SUBJECT { arms... }` — first-arm-wins glob-pattern dispatch.
+/// Subject is one Word that expands to a single scalar at evaluation
+/// time. Each arm has one or more literal glob patterns and a body
+/// `Program`. With no matching arm, evaluation returns exited(0) and
+/// runs nothing. Patterns are stored as raw bytes (not Words) because
+/// PLAN §12 forbids `$var` / command substitution / runtime-generated
+/// patterns — the lowerer enforces this and rejects any pattern Word
+/// whose parts aren't pure literal/glob text.
+pub const MatchArm = struct {
+    patterns: []const []const u8,
+    body: *const Program,
+    span: Span,
+};
+
+pub const Match = struct {
+    subject: Word,
+    arms: []const MatchArm,
+    span: Span,
+};
+
 // =============================================================================
 // Program union
 // =============================================================================
@@ -161,6 +181,7 @@ pub const Program = union(enum) {
     conditional: Conditional,
     @"while": While,
     @"for": For,
+    @"match": Match,
     define: Define,
 
     pub fn span(self: Program) Span {
@@ -175,6 +196,7 @@ pub const Program = union(enum) {
             .conditional => |c| c.span,
             .@"while" => |w| w.span,
             .@"for" => |f| f.span,
+            .@"match" => |m| m.span,
             .define => |d| d.span,
         };
     }
@@ -215,6 +237,7 @@ fn lowerShape(shape: shape_mod.Shape, ctx: *const LowerContext, sink: ?Sink) any
         .conditional => |c| try lowerConditional(c, ctx, sink),
         .@"while" => |w| try lowerWhile(w, ctx, sink),
         .@"for" => |f| try lowerFor(f, ctx, sink),
+        .@"match" => |m| try lowerMatch(m, ctx, sink),
         .cmd_def => |d| try lowerCmdDef(d, ctx, sink),
         .word => {
             try diag.emit(sink, diag.make(
@@ -355,6 +378,56 @@ fn lowerCmdDef(d: shape_mod.CmdDefShape, ctx: *const LowerContext, sink: ?Sink) 
         .body = body,
         .span = d.span,
     } });
+}
+
+fn lowerMatch(m: shape_mod.MatchShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
+    const subject = try word_mod.lowerWord(m.subject, ctx);
+
+    var arms = try ctx.alloc.alloc(MatchArm, m.arms.len);
+    for (m.arms, 0..) |arm_shape, ai| {
+        var pats = try ctx.alloc.alloc([]const u8, arm_shape.patterns.len);
+        for (arm_shape.patterns, 0..) |pat_shape, pi| {
+            const lowered = try word_mod.lowerWord(pat_shape, ctx);
+            pats[pi] = try literalPattern(lowered, ctx, sink, pat_shape.span);
+        }
+        const body = try lowerShape(arm_shape.body.*, ctx, sink);
+        arms[ai] = .{ .patterns = pats, .body = body, .span = arm_shape.span };
+    }
+
+    return put(ctx.alloc, .{ .@"match" = .{
+        .subject = subject,
+        .arms = arms,
+        .span = m.span,
+    } });
+}
+
+/// Validate that a pattern Word resolves to a single literal/glob string
+/// at lowering time (PLAN §12: arm patterns are grammar literals, not
+/// expanded shell words). Concatenates the `.text` and `.glob` parts; any
+/// other part type is a hard error.
+fn literalPattern(
+    w: Word,
+    ctx: *const LowerContext,
+    sink: ?Sink,
+    span: Span,
+) ![]const u8 {
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(ctx.alloc);
+    for (w.parts) |part| {
+        switch (part) {
+            .text => |t| try buf.appendSlice(ctx.alloc, t),
+            .glob => |g| try buf.appendSlice(ctx.alloc, g),
+            else => {
+                try diag.emit(sink, diag.make(
+                    .lower, .@"error", "LW0010",
+                    "match pattern must be a literal pattern (no $var, command substitution, or runtime-generated patterns)",
+                    ctx.source, span,
+                ));
+                return error.InvalidShape;
+            },
+        }
+    }
+    return buf.toOwnedSlice(ctx.alloc);
 }
 
 fn lowerEnvBind(b: shape_mod.EnvBindShape, ctx: *const LowerContext) !EnvBind {
@@ -508,6 +581,23 @@ pub fn clone(p: *const Program, alloc: Allocator) anyerror!*const Program {
             .redirects = try cloneRedirects(x.redirects, alloc),
             .span = x.span,
         } },
+        .@"match" => |m| blk: {
+            var arms = try alloc.alloc(MatchArm, m.arms.len);
+            for (m.arms, 0..) |arm, i| {
+                var pats = try alloc.alloc([]const u8, arm.patterns.len);
+                for (arm.patterns, 0..) |p2, pi| pats[pi] = try alloc.dupe(u8, p2);
+                arms[i] = .{
+                    .patterns = pats,
+                    .body = try clone(arm.body, alloc),
+                    .span = arm.span,
+                };
+            }
+            break :blk .{ .@"match" = .{
+                .subject = try cloneWord(m.subject, alloc),
+                .arms = arms,
+                .span = m.span,
+            } };
+        },
         .define => |d| .{ .define = .{
             .name = try alloc.dupe(u8, d.name),
             .body = try clone(d.body, alloc),
@@ -638,6 +728,7 @@ fn dumpProgram(source: Source, p: *const Program, depth: u32, w: *Writer, opts: 
         .conditional => |c| try dumpConditional(source, c, depth, w, opts),
         .@"while" => |x| try dumpWhile(source, x, depth, w, opts),
         .@"for" => |x| try dumpFor(source, x, depth, w, opts),
+        .@"match" => |x| try dumpMatch(source, x, depth, w, opts),
         .define => |d| try dumpDefine(source, d, depth, w, opts),
     }
 }
@@ -817,6 +908,28 @@ fn dumpDefine(source: Source, d: Define, depth: u32, w: *Writer, opts: DumpOptio
     try maybeSpan(d.span, w, opts);
     try w.writeByte('\n');
     try dumpProgram(source, d.body, depth + 1, w, opts);
+}
+
+fn dumpMatch(source: Source, m: Match, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.writeAll("match");
+    try maybeSpan(m.span, w, opts);
+    try w.writeByte('\n');
+    try indent(w, depth + 1);
+    try w.writeAll("subject\n");
+    try dumpWordParts(m.subject, depth + 2, w);
+    for (m.arms) |arm| {
+        try indent(w, depth + 1);
+        try w.writeAll("arm\n");
+        try indent(w, depth + 2);
+        try w.writeAll("patterns\n");
+        for (arm.patterns) |p| {
+            try indent(w, depth + 3);
+            try w.print("pattern {s}\n", .{p});
+        }
+        try indent(w, depth + 2);
+        try w.writeAll("body\n");
+        try dumpProgram(source, arm.body, depth + 3, w, opts);
+    }
 }
 
 fn dumpRedirect(r: Redirect, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {

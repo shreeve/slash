@@ -71,6 +71,9 @@ pub const Tag = enum(u8) {
     @"while",
     @"for",
     cmd_def,
+    @"match",
+    match_arms,
+    match_arm,
 
     // ---- Redirects ----
     redir_read,
@@ -102,6 +105,7 @@ pub const KeywordId = enum(u16) {
     FOR,
     IN,
     CMD,
+    MATCH,
 };
 
 const keyword_map = std.StaticStringMap(KeywordId).initComptime(.{
@@ -111,6 +115,7 @@ const keyword_map = std.StaticStringMap(KeywordId).initComptime(.{
     .{ "for", .FOR },
     .{ "in", .IN },
     .{ "cmd", .CMD },
+    .{ "match", .MATCH },
 });
 
 pub fn keywordAs(text: []const u8) ?KeywordId {

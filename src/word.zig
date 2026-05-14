@@ -191,6 +191,7 @@ fn parseDefaultWord(
                 'n' => '\n',
                 't' => '\t',
                 'r' => '\r',
+                'e' => 0x1b, // ESC — for ANSI escape sequences
                 '0' => 0,
                 else => {
                     try text_buf.append(alloc, c);
@@ -229,6 +230,7 @@ fn parseDefaultWord(
                         'n' => '\n',
                         't' => '\t',
                         'r' => '\r',
+                        'e' => 0x1b, // ESC — for ANSI escape sequences
                         '0' => 0,
                         else => {
                             try text_buf.append(alloc, text[i]);
@@ -378,6 +380,7 @@ fn decodeDouble(alloc: Allocator, bytes: []const u8) ![]u8 {
                 't' => '\t',
                 'r' => '\r',
                 '$' => '$',
+                'e' => 0x1b, // ESC — for ANSI escape sequences
                 '0' => 0,
                 else => {
                     out[w] = c;

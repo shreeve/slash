@@ -51,6 +51,21 @@ for x in alpha beta gamma { echo $x }
 
 while test -f /tmp/lock { sleep 1 }
 
+# pattern dispatch — first arm wins, glob arms, no captures, no regex
+match $1
+  init                { repo-init       }
+  status diff         { repo-$1         }
+  push pull           { repo-sync $1    }
+  *.md *.txt          { open-doc $1     }
+  *                   { echo unknown; return 1 }
+
+# user-defined commands — positional only, body sees $1..$N / $@ / $#
+cmd ll { ls -lAh $@ }
+cmd deploy
+  git pull
+  npm ci
+  npm run build
+
 # env-prefix on commands
 NODE_ENV=production npm start
 
@@ -58,12 +73,24 @@ NODE_ENV=production npm start
 grep zig **/*.md | head -20 > hits.txt || echo no matches
 (cd /tmp && /bin/ls) > listing
 sleep 60 &
+jobs; fg %1
 ```
 
 ## Builtins
 
 `echo`, `true`, `false`, `pwd`, `cd`, `export`, `unset`, `test` (`[`),
-`printf`, `exit`.
+`printf`, `exit`, `read`, `shift`, `type`, `command`, `source` (`.`),
+`exec`, `return`, `break`, `continue`, `trap`, `jobs`, `fg`, `bg`,
+`wait`, `kill`, `disown`.
+
+## Coming next: interactive UX
+
+Slash commits to fish-class interactive UX without becoming a
+programming language: autosuggestions, abbreviations (literal-only),
+syntax highlighting as you type, intelligent completions, rich prompts,
+smart history (per-cwd, frecency, dedup). The line editor is
+[zigline](https://github.com/shreeve/zigline). See [`PLAN.md`](./PLAN.md)
+§12 for the in-scope/out-of-scope split.
 
 ## Design
 

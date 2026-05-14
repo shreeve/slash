@@ -185,6 +185,7 @@ sequence_item   = pipeline
                 | conditional
                 | while_loop
                 | for_loop
+                | match_stmt
                 | block_stmt
                 | assigns
                 | cmd_def
@@ -307,6 +308,29 @@ block_form      = LBRACE sequence RBRACE                → (body 2)
 while_loop      = WHILE cond_chain block_form           → (while 2 3)
 
 for_loop        = FOR IDENT IN word_atoms block_form    → (for 2 4 5)
+
+# ------------------------------------------------------------------------------
+# Pattern dispatch
+# ------------------------------------------------------------------------------
+#
+# `match VALUE { arms }` — first-arm-wins glob-pattern dispatch over a
+# single subject word. Arms are `pattern... { body }` pairs; patterns
+# are literal grammar atoms (no $var, no command substitution, no
+# runtime-generated patterns — see PLAN §12). `*` is a glob, so the
+# usual "default" arm is just `* { body }`. With no matching arm,
+# `match` exits 0 and runs nothing.
+
+match_stmt      = MATCH word_atom match_block          → (match 2 3)
+
+match_block     = LBRACE match_arms RBRACE             → (match_arms ...2)
+                | INDENT match_arms OUTDENT            → (match_arms ...2)
+
+match_arms      = match_arm match_arm_tail*            → (1 ...2)
+
+match_arm_tail  = SEMI match_arm                       → 2
+                | SEMI                                 → _
+
+match_arm       = word_atoms block_form                → (match_arm 1 2)
 
 # ------------------------------------------------------------------------------
 # User-defined commands
