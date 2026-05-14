@@ -89,12 +89,14 @@ fn runCooked(session: *session_mod.Session, alloc: Allocator) !u8 {
             if (pending.items.len == 0) {
                 const status = session.last_status;
                 eval.fireExitTrap(session, alloc, null) catch {};
+                uninstallChildEventHandler();
                 eval.hangupRemainingJobs(session);
                 _ = std.c.write(1, "\n", 1);
                 return status;
             }
             try pending.append(alloc, '\n');
             _ = try evaluatePending(session, alloc, &pending);
+            uninstallChildEventHandler();
             eval.hangupRemainingJobs(session);
             return session.last_status;
         }
@@ -107,6 +109,7 @@ fn runCooked(session: *session_mod.Session, alloc: Allocator) !u8 {
 
         if (session.exit_request) |req| {
             eval.fireExitTrap(session, alloc, null) catch {};
+            uninstallChildEventHandler();
             eval.hangupRemainingJobs(session);
             return req.toStatusByte();
         }
@@ -187,6 +190,7 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
 
                 if (session.exit_request) |req| {
                     eval.fireExitTrap(session, alloc, null) catch {};
+                    uninstallChildEventHandler();
                     eval.hangupRemainingJobs(session);
                     return req.toStatusByte();
                 }
@@ -199,6 +203,7 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
                 if (pending.items.len == 0) {
                     const status = session.last_status;
                     eval.fireExitTrap(session, alloc, null) catch {};
+                    uninstallChildEventHandler();
                     eval.hangupRemainingJobs(session);
                     return status;
                 }
@@ -1407,6 +1412,20 @@ fn installChildEventHandler() void {
         .handler = .{ .handler = sigchldHandler },
         .mask = std.posix.sigemptyset(),
         .flags = std.c.SA.RESTART,
+    };
+    std.posix.sigaction(.CHLD, &sa, null);
+}
+
+/// Restore SIGCHLD to its default disposition. Called from REPL exit
+/// paths just before `session.deinit` so a SIGCHLD arriving in the
+/// teardown window doesn't dispatch through `currentSession()` to a
+/// half-freed Session. The default disposition is harmless (kernel
+/// reaps the child or leaves it as a zombie for the caller's wait).
+pub fn uninstallChildEventHandler() void {
+    var sa: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.c.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
     };
     std.posix.sigaction(.CHLD, &sa, null);
 }

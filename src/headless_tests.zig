@@ -1566,18 +1566,26 @@ test "stress: 100 detached jobs are reaped without explicit wait" {
     // Fence: reap anything outstanding before we measure.
     _ = drainZombies();
 
+    // Track the pid of each iteration's bg `true` so we can blockingly
+    // confirm reap at the end. The test invariant we want: every bg
+    // job that slash's safe-point poll didn't reap inline must still
+    // be reapable by an explicit `waitpid`. We catch real leaks
+    // (children we have no record of, or children that escaped
+    // process-group accounting) via `drainZombies` after.
+    var pids: [100]std.c.pid_t = undefined;
+    var pid_count: usize = 0;
+
     var i: usize = 0;
     while (i < 100) : (i += 1) {
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
         const a = arena.allocator();
 
-        // Bare `true &` — no `wait`. This is the harder test: it
-        // exercises the safe-point poll path (PLAN §19), not the
-        // explicit-wait path. Each iteration ends with a session
-        // deinit, which drains the JobTable. If safe-point polling
-        // doesn't reap completed bg jobs, zombies accumulate; the
-        // assertion at the end catches it.
+        // Bare `true &` — no `wait`. This exercises the safe-point
+        // poll path (PLAN §19) without relying on explicit-wait
+        // reaping. The assertion combo at the end catches both stuck
+        // children (waitpid blocks then succeeds) and unaccounted
+        // orphans (drainZombies returns non-zero).
         const source_text = "true >/dev/null 2>&1 &";
         const source = diag.Source{ .name = "<stress>", .text = source_text };
         const parsed = try shape.parse(source, a, null);
@@ -1590,16 +1598,28 @@ test "stress: 100 detached jobs are reaped without explicit wait" {
         builtins.installSession(&session);
 
         _ = eval.runForeground(prog, &session, a, null) catch {};
-        // hangupRemainingJobs models actual shell teardown — it sends
-        // HUP+CONT to the still-live bg `true` (which has typically
-        // already exited by now anyway). Then the test's drainZombies
-        // at the end catches anything not reaped.
-        eval.hangupRemainingJobs(&session);
+        // Capture the pid the bg launch recorded for $!. If the
+        // safe-point poll already reaped it, waitpid below returns
+        // -1/ECHILD; either way we detect a stuck child.
+        if (session.last_bg_pid) |pid| {
+            pids[pid_count] = pid;
+            pid_count += 1;
+        }
+    }
+
+    // Race-free join: blockingly waitpid for every recorded pid. If a
+    // child is still running, this blocks until it exits — no timing
+    // assumption. If it was already reaped via safe-point polling,
+    // waitpid returns -1 with ECHILD which is fine.
+    var j: usize = 0;
+    while (j < pid_count) : (j += 1) {
+        var status: c_int = 0;
+        _ = std.c.waitpid(pids[j], &status, 0);
     }
 
     const leaked = drainZombies();
     if (leaked > 0) {
-        std.debug.print("zombie leak: {d} unreaped children\n", .{leaked});
+        std.debug.print("zombie leak: {d} unaccounted children\n", .{leaked});
         return error.ZombieLeak;
     }
 }

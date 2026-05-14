@@ -653,7 +653,7 @@ fn runExternalSingle(
 /// restore choreography lives in `terminal.zig`; this is a thin alias
 /// kept so eval call sites read clearly.
 fn serviceForeground(session: *Session, j: *Job) !void {
-    return terminal.waitForeground(session, j);
+    return terminal.runForeground(session, j);
 }
 
 // =============================================================================

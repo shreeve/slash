@@ -1201,9 +1201,10 @@ fn fgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
     //
     // The terminal dance lives in `terminal.zig` so both this builtin
     // and eval's foreground-wait sites use one implementation. We
-    // can't use `terminal.waitForeground` directly here because we
-    // need to interleave SIGCONT between handoff and wait.
-    terminal_mod.giveTo(session, j);
+    // can't use `terminal.runForeground` directly here because we
+    // need to interleave SIGCONT between handoff and wait — see the
+    // documented call order in terminal.zig.
+    terminal_mod.giveToJob(session, j);
 
     if (j.state == .stopped) {
         for (j.processes) |*p| switch (p.state) {
@@ -1218,7 +1219,7 @@ fn fgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
 
     try job_mod.service(&session.jobs, .foreground, j);
 
-    terminal_mod.reclaim(session, j);
+    terminal_mod.reclaimForShell(session, j);
     return j.result orelse Result{ .exited = 0 };
 }
 
