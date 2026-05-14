@@ -1253,6 +1253,8 @@ Slash testing is layered. Each layer exists for a different failure mode: parser
 
 [`CHECKLIST.md`](./CHECKLIST.md) is the operational rubric: a line-by-line audit of Slash's runtime behavior against POSIX, APUE, and the Harvard CS61 shell notes. It enumerates the invariants — process groups, terminal ownership, signal discipline, pipe hygiene, EOF semantics, reaping, long-lived shell discipline, races — that distinguish a real Unix shell from a parser with `fork`/`exec`. Use it before every release to audit what's actually shipped against what a correct shell must do. The PLAN says what we want; the CHECKLIST says how to know we got it.
 
+[`VALIDATION.md`](./VALIDATION.md) is the empirical companion: a chronological log of manual interactive validation runs against real interactive software (vim, less, top, ssh, nested shells, Python/node REPLs). Driven by `scripts/validate-interactive.sh`, which walks the operator through CHECKLIST §12 one program at a time and appends results. PTY tests can prove kernel invariants; only this log can credibly answer "does Slash work as someone's actual interactive shell?" Run after any commit touching `exec.zig`, `eval.zig` foreground-wait paths, `builtins.zig` `fg`/`bg`/`kill`, `repl.zig`, or the session pgid/tty/termios state.
+
 ### 17.1 Tree layout
 
 ```text

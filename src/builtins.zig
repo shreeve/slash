@@ -1187,12 +1187,25 @@ fn fgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
         _ = std.c.write(1, "\n", 1);
     }
 
-    // Hand the controlling tty to the resumed pgrp before sending
-    // SIGCONT. Without this a resumed `cat` immediately re-stops with
-    // SIGTTIN trying to read stdin. After the wait, take the tty back
-    // (handled in the deferred restore inside the wait helper).
+    // The terminal-handoff + termios dance below intentionally mirrors
+    // `eval.serviceForeground`. They're duplicated today because
+    // builtins.zig can't import eval.zig without a module cycle; the
+    // right longer-term fix is to lift this helper into a neutral
+    // module (`terminal.zig` or `job_control.zig`) that both eval and
+    // builtins consume. Until then: any change to one MUST be mirrored
+    // to the other.
+    //
+    // Resume-order (per APUE): hand the tty FIRST, THEN restore the
+    // job's saved termios (less raw, vim raw, etc.), THEN SIGCONT.
+    // Without the termios restore, a resumed `less` sees the shell's
+    // cooked mode and instantly falls out of its line discipline.
+    // TCSADRAIN waits for in-flight output to finish so the operator
+    // doesn't see a flicker.
     if (session.controlling_tty_fd) |tty_fd| {
         if (j.pgid > 0) _ = exec_mod.tcSetPgrp(tty_fd, j.pgid);
+        if (j.termios) |t| {
+            std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
+        }
     }
     if (j.state == .stopped) {
         for (j.processes) |*p| switch (p.state) {
@@ -1206,8 +1219,23 @@ fn fgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
     j.foreground = true;
 
     try job_mod.service(&session.jobs, .foreground, j);
+
+    // Post-wait recovery (mirrors serviceForeground): snapshot the
+    // job's termios on stop, then reclaim the tty for the shell, then
+    // restore the shell's saved termios.
     if (session.controlling_tty_fd) |tty_fd| {
+        switch (j.state) {
+            .stopped => {
+                if (std.posix.tcgetattr(tty_fd)) |t| {
+                    j.termios = t;
+                } else |_| {}
+            },
+            else => {},
+        }
         if (session.shell_pgid > 0) _ = exec_mod.tcSetPgrp(tty_fd, session.shell_pgid);
+        if (session.shell_termios) |t| {
+            std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
+        }
     }
     return j.result orelse Result{ .exited = 0 };
 }

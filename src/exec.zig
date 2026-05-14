@@ -23,10 +23,12 @@ const runtime = @import("runtime.zig");
 pub const Fd = std.c.fd_t;
 pub const Pid = std.c.pid_t;
 
-// libc bindings — Zig 0.16's `std.c` doesn't expose `tcsetpgrp`. It's
-// standard POSIX (XSI); declare directly so the job-control handoff
-// in `tcSetPgrp` can call it.
+// libc bindings — Zig 0.16's `std.c` doesn't expose `tcsetpgrp` or
+// `tcgetpgrp`. They're standard POSIX (XSI); declare directly so the
+// job-control handoff in `tcSetPgrp` and the interactive bootstrap in
+// `tcGetPgrp` can call them.
 extern "c" fn tcsetpgrp(fd: Fd, pgid: Pid) c_int;
+extern "c" fn tcgetpgrp(fd: Fd) Pid;
 
 pub const Error = error{
     ForkFailed,
@@ -242,6 +244,14 @@ pub fn tcSetPgrp(fd: Fd, pgid: Pid) bool {
         if (e == .INTR) continue;
         return false;
     }
+}
+
+/// Read the controlling terminal's current foreground process group, or
+/// `null` if the fd has no controlling terminal (ENOTTY / EBADF).
+pub fn tcGetPgrp(fd: Fd) ?Pid {
+    const rc = tcgetpgrp(fd);
+    if (rc < 0) return null;
+    return rc;
 }
 
 /// Reset the disposition of signals the interactive shell typically catches

@@ -648,21 +648,49 @@ fn runExternalSingle(
     return .{ .job = j, .expression_result = result };
 }
 
-/// Block on a foreground job, wrapping the wait in tty handoff so the
-/// resumed/spawned process group owns the controlling terminal for the
-/// duration of the wait. After the job stops or completes, take the
-/// terminal back so the shell's own prompt and readline keep working.
-/// PLAN §11 must-get-right "terminal control".
+/// Block on a foreground job, wrapping the wait in tty handoff plus
+/// terminal-mode save/restore so the resumed/spawned process group owns
+/// the controlling terminal AND has its expected line-discipline
+/// settings for the duration of the wait. After the job stops or
+/// completes, take the terminal back AND restore the shell's saved
+/// termios so vim/less/Python don't leave us in raw mode at the prompt.
+/// PLAN §11 must-get-right "terminal control"; CHECKLIST §5.
 fn serviceForeground(session: *Session, j: *Job) !void {
-    if (session.controlling_tty_fd) |tty_fd| {
+    const tty_fd_opt = session.controlling_tty_fd;
+
+    if (tty_fd_opt) |tty_fd| {
+        // Resume-order: tcsetpgrp first, then restore the job's saved
+        // termios. tcsetattr applies to the terminal (not the pgrp),
+        // but doing tcsetpgrp first matches the APUE shape and keeps
+        // ownership and modes consistent.
         if (j.pgid > 0) _ = exec.tcSetPgrp(tty_fd, j.pgid);
-    }
-    defer {
-        if (session.controlling_tty_fd) |tty_fd| {
-            if (session.shell_pgid > 0) _ = exec.tcSetPgrp(tty_fd, session.shell_pgid);
+        if (j.termios) |t| {
+            std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
         }
     }
+
     try job.service(&session.jobs, .foreground, j);
+
+    // Post-wait recovery. Order: snapshot the job's termios (only
+    // meaningful if it stopped — done jobs may have already closed
+    // their tty handle), reclaim the tty for the shell, then restore
+    // the shell's saved termios so the prompt comes back sane.
+    // TCSADRAIN waits for any in-flight output before the change so
+    // we don't truncate the program's last line.
+    if (tty_fd_opt) |tty_fd| {
+        switch (j.state) {
+            .stopped => {
+                if (std.posix.tcgetattr(tty_fd)) |t| {
+                    j.termios = t;
+                } else |_| {}
+            },
+            else => {},
+        }
+        if (session.shell_pgid > 0) _ = exec.tcSetPgrp(tty_fd, session.shell_pgid);
+        if (session.shell_termios) |t| {
+            std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
+        }
+    }
 }
 
 // =============================================================================

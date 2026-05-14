@@ -35,6 +35,9 @@ const session_mod = @import("session.zig");
 const eval = @import("eval.zig");
 const builtins = @import("builtins.zig");
 const exec = @import("exec.zig");
+
+// libc binding — `std.c` doesn't expose `getpgrp` in Zig 0.16.
+extern "c" fn getpgrp() std.c.pid_t;
 const parser = @import("parser.zig");
 const slash = @import("slash.zig");
 const zigline = @import("zigline");
@@ -51,7 +54,7 @@ pub fn run(
     alloc: Allocator,
     options: Options,
 ) !u8 {
-    installInteractiveSignalHandlers();
+    bootstrapInteractive(session);
     if (!options.norc) try sourceRcFile(session, alloc);
 
     if (isStdinTty()) return runRaw(session, alloc);
@@ -1178,12 +1181,129 @@ fn renderDiagnostics(items: []const diag.Diagnostic) void {
 // stray Ctrl-Z doesn't suspend slash. Children reset to defaults
 // before exec already (see `exec.resetSignalDefaults`).
 
+/// Interactive job-control bootstrap. Modeled after the APUE shell
+/// initialization (CHECKLIST §5):
+///
+///   1. Open a stable handle to the controlling tty (CLOEXEC'd dup of
+///      fd 2). Skipped when stderr isn't a tty — `slash | cat` and
+///      headless runs simply leave `controlling_tty_fd` null.
+///   2. Wait until we're the foreground process group: while
+///      `tcgetpgrp(tty) != getpgrp()`, send SIGTTIN to ourselves so the
+///      kernel suspends us until someone `fg`s our group. Prevents a
+///      background-launched slash from yanking the terminal away from
+///      whatever's currently in the foreground.
+///   3. Install the interactive signal-ignores. SIGTTIN must be ignored
+///      AFTER step 2 (we relied on its default suspend behavior there);
+///      SIGTTOU must be ignored BEFORE the tcsetpgrp in step 5 so the
+///      shell doesn't stop itself trying to set the foreground group
+///      from a now-non-foreground context.
+///   4. `setpgid(0, 0)` — make ourselves our own process-group leader.
+///      Idempotent if we already are.
+///   5. `tcsetpgrp(tty, getpgrp())` — claim the controlling-tty's
+///      foreground group.
+///   6. Update `session.controlling_tty_fd` and `session.shell_pgid`
+///      with the post-bootstrap values, which is what `serviceForeground`
+///      reads when handing the tty to/from foreground jobs.
+fn bootstrapInteractive(session: *session_mod.Session) void {
+    // Step 1: open + CLOEXEC the controlling-tty fd. fd 2 is the
+    // conventional "stays connected to the user even if stdin/stdout
+    // are redirected" fd. We dup it so subsequent `dup2(opened, 2)`
+    // from a `2>file` redirect doesn't lose our handle.
+    var tty_fd: ?std.c.fd_t = null;
+    if (std.c.isatty(2) != 0) {
+        const dup_fd = std.c.dup(2);
+        if (dup_fd >= 0) {
+            // FD_CLOEXEC so the handle doesn't leak across child execs.
+            const flags = std.c.fcntl(dup_fd, std.c.F.GETFD);
+            if (flags >= 0) {
+                _ = std.c.fcntl(dup_fd, std.c.F.SETFD, flags | std.c.FD_CLOEXEC);
+            }
+            tty_fd = dup_fd;
+        }
+    }
+
+    // Step 2: foreground-group acquisition loop. Skipped when there's
+    // no controlling tty (non-interactive shape). Force SIGTTIN to its
+    // DEFAULT disposition first — if we inherited it as IGN from a
+    // parent shell, the loop would spin instead of suspending us.
+    //
+    // The cap is intentionally fatal: if we can't become foreground
+    // within 100 SIGTTIN/resume cycles, something is structurally wrong
+    // (orphaned process group, or our parent never `fg`'d us). Pressing
+    // on with a `tcsetpgrp` despite the mismatch would risk stealing
+    // the terminal from whoever currently owns it. Better to drop the
+    // ctty handle and run as a non-interactive fallback.
+    if (tty_fd) |fd| {
+        var ttin_default: std.posix.Sigaction = .{
+            .handler = .{ .handler = std.c.SIG.DFL },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        std.posix.sigaction(.TTIN, &ttin_default, null);
+
+        var iters: u32 = 0;
+        var acquired = false;
+        while (iters < 100) : (iters += 1) {
+            const fg = exec.tcGetPgrp(fd) orelse {
+                // No controlling-tty foreground group — treat as
+                // already-acquired so we proceed to setpgid/tcsetpgrp.
+                acquired = true;
+                break;
+            };
+            const my = getpgrp();
+            if (fg == my) {
+                acquired = true;
+                break;
+            }
+            _ = std.c.kill(-my, .TTIN);
+        }
+        if (!acquired) {
+            const msg = "slash: could not acquire foreground after 100 attempts; running non-interactive\n";
+            _ = std.c.write(2, msg.ptr, msg.len);
+            _ = std.c.close(fd);
+            tty_fd = null;
+        }
+    }
+
+    // Step 3: now safe to ignore the interactive job-control signals.
+    installInteractiveSignalHandlers();
+
+    // Step 4: become our own process-group leader. Tolerant of EPERM
+    // (already a leader) and any other failure — best-effort.
+    _ = std.c.setpgid(0, 0);
+
+    // Step 5: claim the foreground process group on the controlling
+    // tty. Safe now because SIGTTOU is ignored.
+    if (tty_fd) |fd| {
+        _ = exec.tcSetPgrp(fd, getpgrp());
+    }
+
+    // Step 6: publish the post-bootstrap values onto the session.
+    session.shell_pgid = getpgrp();
+    session.controlling_tty_fd = tty_fd;
+
+    // Step 7: snapshot the shell's terminal modes so they can be
+    // restored after every foreground job. Programs like vim/less/
+    // Python REPL push the tty into raw mode; without this snapshot,
+    // returning to the shell prompt leaves Slash in whatever mode the
+    // last foreground job was using.
+    if (tty_fd) |fd| {
+        if (std.posix.tcgetattr(fd)) |t| {
+            session.shell_termios = t;
+        } else |_| {}
+    }
+}
+
 fn installInteractiveSignalHandlers() void {
     var ignore: std.posix.Sigaction = .{
         .handler = .{ .handler = std.c.SIG.IGN },
         .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
+    // PLAN §18: interactive shell ignores QUIT/TSTP/TTIN/TTOU so the
+    // shell itself can't be stopped or quit by terminal-driven signals.
+    // SIGPIPE is handled separately in `installShellSignalDefaults`
+    // because non-interactive shells need that disposition too.
     const ignored = [_]std.c.SIG{ .QUIT, .TSTP, .TTIN, .TTOU };
     for (ignored) |sig| std.posix.sigaction(sig, &ignore, null);
 
@@ -1193,6 +1313,21 @@ fn installInteractiveSignalHandlers() void {
         .flags = 0,
     };
     std.posix.sigaction(.INT, &int_action, null);
+}
+
+/// Signal dispositions every Slash invocation needs, regardless of
+/// interactivity. Currently: ignore SIGPIPE so a builtin (printf, echo)
+/// writing into a pipeline whose reader has exited doesn't take the
+/// shell with it. Children restore the default disposition in
+/// `exec.runChild` before `execve`, so external programs still see
+/// normal POSIX SIGPIPE semantics.
+pub fn installShellSignalDefaults() void {
+    var ignore: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.c.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.PIPE, &ignore, null);
 }
 
 fn sigintNoop(_: std.c.SIG) callconv(.c) void {}

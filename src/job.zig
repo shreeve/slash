@@ -53,6 +53,13 @@ pub const Job = struct {
     detached: bool,
     /// Display string, owned by the JobTable's allocator if non-null.
     command_text: ?[]const u8,
+    /// Snapshot of the controlling tty's modes taken at the moment
+    /// this job was stopped (typically by SIGTSTP). When the job is
+    /// later resumed via `fg`, these modes are restored so vim/less/
+    /// Python pick up where they left off rather than inheriting the
+    /// shell's cooked-mode settings. `null` for any job that was never
+    /// stopped or that wasn't a foreground job.
+    termios: ?std.posix.termios = null,
 };
 
 // =============================================================================
@@ -97,6 +104,7 @@ pub const JobTable = struct {
             .foreground = foreground,
             .detached = detached,
             .command_text = if (command_text) |t| try self.alloc.dupe(u8, t) else null,
+            .termios = null,
         };
         self.next_id += 1;
         try self.jobs.append(self.alloc, j);

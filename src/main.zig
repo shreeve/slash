@@ -18,6 +18,12 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
+    // Shell-level signal defaults that apply to every entry point
+    // (interactive REPL, `-c`, script). Currently: ignore SIGPIPE so a
+    // builtin writing into a closed pipe doesn't kill the shell. Children
+    // restore the default in `exec.runChild` before execve.
+    repl.installShellSignalDefaults();
+
     var dump_source: ?[]const u8 = null;
     var dump_mode: DumpMode = .sexp;
     var run_source: ?[]const u8 = null;

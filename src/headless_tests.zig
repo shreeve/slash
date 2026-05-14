@@ -734,6 +734,52 @@ const cases: []const Case = &.{
         .expect = .{ .exit_code = 0, .stdout = "kill is a shell builtin\nfg is a shell builtin\nbg is a shell builtin\ndisown is a shell builtin\n" },
     },
 
+    // ---- SIGPIPE / EOF semantics (CHECKLIST §8, §9) ---------------------
+    //
+    // The classic `yes | head` test: head reads a few lines and exits;
+    // its closure of the pipe should make yes's next write fail with
+    // SIGPIPE, terminating the pipeline naturally. The shell itself
+    // must not die. Builtin printf into a closed pipe also exercises
+    // the shell-process SIGPIPE-ignore path (the writing process is
+    // an external `printf`/`yes`, but the case below where we pipe
+    // an *internal* echo through head proves the parent shell isn't
+    // killed when its forked child takes SIGPIPE either).
+
+    .{
+        .name = "yes | head terminates cleanly (pipefail surfaces SIGPIPE)",
+        // With pipefail=on (Slash default), the pipeline result is the
+        // first non-zero/signaled stage. `head` exits 0; `yes` dies of
+        // SIGPIPE → 141. The shell survives, which is what this test
+        // is really asserting; the exit byte is just confirmation that
+        // the SIGPIPE made it back as a typed Result.
+        .source = "yes | head -n 3",
+        .expect = .{ .exit_code = 141, .stdout = "y\ny\ny\n" },
+    },
+    .{
+        .name = "yes | head — shell survives and runs the next statement",
+        .source = "yes | head -n 3; echo survived",
+        .expect = .{ .exit_code = 0, .stdout = "survived\n", .stdout_contains = true },
+    },
+    .{
+        .name = "echo builtin into head does not kill the shell",
+        // Even though `echo` writes only one line and exits 0, this
+        // exercises the path: builtin runs in a forked pipeline child,
+        // head reads, both finish cleanly. Subsequent `echo done` proves
+        // the parent shell survived.
+        .source = "echo upstream | head -n 1; echo done",
+        .expect = .{ .exit_code = 0, .stdout = "upstream\ndone\n" },
+    },
+    .{
+        .name = "external writer into head: shell survives a pipefail-on-SIGPIPE",
+        // /bin/yes runs forever until SIGPIPE; pipefail-on (default)
+        // means the pipeline result is the first non-zero stage. /bin/yes
+        // dying to SIGPIPE counts as non-zero, so the pipeline exits
+        // non-zero — but the shell is still alive to run the next
+        // statement.
+        .source = "yes | head -n 2; echo survived",
+        .expect = .{ .exit_code = 0, .stdout = "y\ny\nsurvived\n", .stdout_contains = true },
+    },
+
     // ---- match: pattern dispatch (PLAN §12) ------------------------------
     //
     // `match SUBJECT { arms... }` runs the body of the first arm whose
