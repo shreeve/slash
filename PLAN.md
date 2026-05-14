@@ -1249,6 +1249,10 @@ Recommended artifacts:
 
 Slash testing is layered. Each layer exists for a different failure mode: parser shape drift, lowering drift, runtime regressions, terminal/job-control bugs, standards alignment, and parser crash resistance. Golden files are explicit, stable artifacts. Updating them is always opt-in and never happens during ordinary `zig build test`.
 
+### 17.0 Operational correctness rubric
+
+[`CHECKLIST.md`](./CHECKLIST.md) is the operational rubric: a line-by-line audit of Slash's runtime behavior against POSIX, APUE, and the Harvard CS61 shell notes. It enumerates the invariants — process groups, terminal ownership, signal discipline, pipe hygiene, EOF semantics, reaping, long-lived shell discipline, races — that distinguish a real Unix shell from a parser with `fork`/`exec`. Use it before every release to audit what's actually shipped against what a correct shell must do. The PLAN says what we want; the CHECKLIST says how to know we got it.
+
 ### 17.1 Tree layout
 
 ```text
