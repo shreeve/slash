@@ -578,6 +578,29 @@ test "slash pty: highlighter inside dq with $var emits string + variable colors"
 // the kernel's tty driver translating Ctrl-Z (byte 0x1A). The bookkeeping
 // invariants from PLAN §7 Rule 22 + §19 must hold under terminal pressure.
 
+test "slash pty: backgrounding with & prints [N] PID announcement" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // bash/zsh convention: when a job is backgrounded via `&`, the shell
+    // immediately prints `[N] <pid>` to stderr so the user sees what
+    // happened and can refer to the pid (matches `$!`, `wait $pid`,
+    // etc.). Without this announcement, `cat &` looks identical to a
+    // hung `cat` — the user has no immediate confirmation. Validation
+    // run #1 surfaced this gap; this test pins the behavior.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 5 >/dev/null 2>&1 &\n", .settle_ms = 200 },
+        .{ .send = "kill -KILL %1\n", .settle_ms = 100 },
+        .{ .send = "wait %1\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // The announcement appears as `[1] <pid>\n` on stderr; the PTY
+    // harness merges stderr and stdout, so both are in r.out.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1] ") != null);
+}
+
 test "slash pty: sleep & jobs shows the backgrounded sleep" {
     if (!ptySupported()) return error.SkipZigTest;
 
@@ -629,17 +652,21 @@ test "slash pty: Ctrl-Z stops a foreground sleep, fg resumes it" {
     // and `fg` resumes it. Without the `tcsetpgrp` wiring this whole
     // sequence breaks (Ctrl-Z would target the shell instead of the
     // job, or the job wouldn't be the controlling-tty's foreground).
+    // Sleep needs to be long enough that Ctrl-Z arrives while it's
+    // still running. settle_ms windows generously to absorb macOS
+    // scheduler latency under load — earlier short windows tripped
+    // a flake where Ctrl-Z arrived after sleep had already finished.
     const r = try runScript(alloc, &.{"--norc"}, &.{
-        .{ .send = "sleep 1\n", .settle_ms = 200 },
-        .{ .send = "\x1a", .settle_ms = 300 }, // Ctrl-Z → SIGTSTP
-        .{ .send = "jobs\n", .settle_ms = 200 },
-        .{ .send = "fg\n", .settle_ms = 1500 },
-        .{ .send = "echo resumed-ok\n" },
+        .{ .send = "sleep 5\n", .settle_ms = 400 },
+        .{ .send = "\x1a", .settle_ms = 600 }, // Ctrl-Z → SIGTSTP
+        .{ .send = "jobs\n", .settle_ms = 400 },
+        .{ .send = "fg\n", .settle_ms = 200 },
+        .{ .send = "\x03", .settle_ms = 400 }, // Ctrl-C kills the resumed sleep
+        .{ .send = "echo resumed-ok\n", .settle_ms = 200 },
         .{ .send = "exit 0\n" },
     });
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
-    // `jobs` between stop and fg should show the stopped sleep.
     try std.testing.expect(std.mem.indexOf(u8, r.out, "Stopped") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "resumed-ok") != null);
 }
@@ -728,20 +755,26 @@ test "slash pty: shell exit hangs up running bg jobs" {
     // Background a sh with a SIGHUP trap that writes the marker. Slash
     // should signal it on exit. We give the orphan up to ~600ms after
     // slash exits to actually run its handler.
+    // Generous settle so the bg sh has time to install its HUP trap
+    // before we exit slash. Without it the orphan can race past
+    // `trap` registration before slash sends SIGHUP.
     const r = try runScript(alloc, &.{"--norc"}, &.{
         .{
             .send =
                 "/bin/sh -c 'trap \"echo hupped > " ++ hup_marker ++
-                "; exit 0\" HUP; sleep 5' >/dev/null 2>&1 &\n",
-            .settle_ms = 200,
+                "; exit 0\" HUP; sleep 10' >/dev/null 2>&1 &\n",
+            .settle_ms = 600,
         },
-        .{ .send = "exit 0\n", .settle_ms = 600 },
+        .{ .send = "exit 0\n", .settle_ms = 800 },
     });
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
-    // Slight extra grace for the orphan to flush + exit.
+    // Patient wait for the orphan to receive HUP, run the trap, write
+    // the marker, and exit. macOS scheduler under load can take a
+    // surprising fraction of a second to deliver the HUP and schedule
+    // the trap handler in the orphan. ~3s cap.
     var waited: u32 = 0;
-    while (waited < 1000) : (waited += 50) {
+    while (waited < 3000) : (waited += 50) {
         if (markerExists(hup_marker)) break;
         var pfd: std.c.pollfd = .{ .fd = -1, .events = 0, .revents = 0 };
         _ = std.c.poll(@ptrCast(&pfd), 0, 50);

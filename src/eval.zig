@@ -1006,16 +1006,34 @@ fn evalDetached(
             const out = try spawnCommandNoWait(&c, session, child_ctx, sink);
             out.job.foreground = false;
             out.job.detached = true;
+            announceBackgroundLaunch(session, out.job);
             return .{ .job = out.job, .expression_result = .{ .exited = 0 } };
         },
         .pipeline => |p| {
             const out = try spawnPipelineNoWait(p, session, child_ctx, sink);
             out.job.foreground = false;
             out.job.detached = true;
+            announceBackgroundLaunch(session, out.job);
             return .{ .job = out.job, .expression_result = .{ .exited = 0 } };
         },
         else => unreachable,
     }
+}
+
+/// Print the bash/zsh-style background-launch announcement (`[1] 12345`)
+/// to stderr when slash is interactive. Matches the convention every
+/// real shell follows: the user sees immediate confirmation of what
+/// was backgrounded and which pid to refer to (the pid line up with
+/// `$!`, `wait $pid`, `kill $pid`, etc.). Skipped in non-interactive
+/// shapes (`-c`, scripts, headless tests) where the announcement
+/// would just be unwanted noise on stderr.
+fn announceBackgroundLaunch(session: *Session, j: *job.Job) void {
+    if (!session.interactive) return;
+    if (j.processes.len == 0) return;
+    const pid = j.processes[j.processes.len - 1].pid;
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "[{d}] {d}\n", .{ j.id, pid }) catch return;
+    _ = std.c.write(2, msg.ptr, msg.len);
 }
 
 fn spawnCommandNoWait(
