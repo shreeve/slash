@@ -89,11 +89,13 @@ fn runCooked(session: *session_mod.Session, alloc: Allocator) !u8 {
             if (pending.items.len == 0) {
                 const status = session.last_status;
                 eval.fireExitTrap(session, alloc, null) catch {};
+                eval.hangupRemainingJobs(session);
                 _ = std.c.write(1, "\n", 1);
                 return status;
             }
             try pending.append(alloc, '\n');
             _ = try evaluatePending(session, alloc, &pending);
+            eval.hangupRemainingJobs(session);
             return session.last_status;
         }
 
@@ -105,6 +107,7 @@ fn runCooked(session: *session_mod.Session, alloc: Allocator) !u8 {
 
         if (session.exit_request) |req| {
             eval.fireExitTrap(session, alloc, null) catch {};
+            eval.hangupRemainingJobs(session);
             return req.toStatusByte();
         }
     }
@@ -184,6 +187,7 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
 
                 if (session.exit_request) |req| {
                     eval.fireExitTrap(session, alloc, null) catch {};
+                    eval.hangupRemainingJobs(session);
                     return req.toStatusByte();
                 }
             },
@@ -195,6 +199,7 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
                 if (pending.items.len == 0) {
                     const status = session.last_status;
                     eval.fireExitTrap(session, alloc, null) catch {};
+                    eval.hangupRemainingJobs(session);
                     return status;
                 }
                 pending.clearRetainingCapacity();
@@ -360,6 +365,21 @@ fn spawnEditor(tmp_path: [:0]const u8) anyerror!u8 {
     const child = std.c.fork();
     if (child < 0) return error.ForkFailed;
     if (child == 0) {
+        // Reset signal dispositions before execve. Ignored signals
+        // (SIG_IGN) survive execve on POSIX — without this, the editor
+        // would inherit the shell's interactive ignores for SIGINT,
+        // SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGPIPE and Ctrl-C/Ctrl-Z
+        // wouldn't work inside vim. (Handlers reset to SIG_DFL across
+        // execve automatically; ignores do not. CHECKLIST §6.)
+        var sa: std.posix.Sigaction = .{
+            .handler = .{ .handler = std.c.SIG.DFL },
+            .mask = std.posix.sigemptyset(),
+            .flags = 0,
+        };
+        const defaults = [_]std.c.SIG{
+            .INT, .QUIT, .TSTP, .TTIN, .TTOU, .PIPE, .CHLD, .HUP,
+        };
+        for (defaults) |sig| std.posix.sigaction(sig, &sa, null);
         _ = execvp(editor_env, &argv);
         std.c._exit(127);
     }

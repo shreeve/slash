@@ -1457,6 +1457,127 @@ fn teardownBuiltinsFixture() void {
 // Tests
 // =============================================================================
 
+// =============================================================================
+// Stress / leak detection (CHECKLIST §11)
+// =============================================================================
+//
+// Long-lived shells must not accumulate fds or zombie processes across
+// command execution. The two stress tests below run a short payload
+// repeatedly and assert the post-state is within a tiny stable delta
+// of the pre-state.
+
+/// Count open file descriptors in this process by probing fcntl(F_GETFD)
+/// across the typical fd range. Cross-platform — no `/proc` walk on
+/// Linux, no `proc_pidinfo` on macOS. Limited to fds < `cap` (1024
+/// covers the default soft limit on every supported platform).
+fn countOpenFds() u32 {
+    const cap: c_int = 1024;
+    var n: u32 = 0;
+    var fd: c_int = 0;
+    while (fd < cap) : (fd += 1) {
+        const rc = std.c.fcntl(fd, std.c.F.GETFD);
+        if (rc >= 0) n += 1;
+    }
+    return n;
+}
+
+/// Drain any zombie children with `waitpid(-1, WNOHANG)`. Returns the
+/// number reaped — should be 0 after a clean run.
+fn drainZombies() u32 {
+    var reaped: u32 = 0;
+    while (true) {
+        var status: c_int = 0;
+        const rc = std.c.waitpid(-1, &status, std.c.W.NOHANG);
+        if (rc <= 0) break;
+        reaped += 1;
+    }
+    return reaped;
+}
+
+test "stress: 200 pipeline iterations leave fd count stable" {
+    const alloc = std.testing.allocator;
+    const baseline = countOpenFds();
+
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        // Mix the most fd-intensive paths: external command, pipeline,
+        // redirect to /dev/null, plus a builtin write. Each iteration
+        // creates pipes, opens files, forks children, reaps them.
+        const source_text = "echo hi | /usr/bin/wc -l >/dev/null; true";
+        const source = diag.Source{ .name = "<stress>", .text = source_text };
+        const parsed = try shape.parse(source, a, null);
+        const ctx = program.LowerContext{ .alloc = a, .source = source };
+        const prog = try program.lower(parsed.root, &ctx, null);
+
+        const envp_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(environ));
+        var session = try session_mod.Session.init(alloc, envp_ptr, false);
+        defer session.deinit();
+        builtins.installSession(&session);
+
+        const saved_out = std.c.dup(1);
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, 1);
+            _ = std.c.close(devnull);
+        }
+        _ = eval.runForeground(prog, &session, a, null) catch {};
+        _ = std.c.dup2(saved_out, 1);
+        _ = std.c.close(saved_out);
+    }
+
+    const after = countOpenFds();
+    // Allow at most a small stable delta (e.g., a heap-grow side
+    // effect from the testing allocator). Anything beyond a couple
+    // of fds is a leak.
+    if (after > baseline + 2) {
+        std.debug.print(
+            "fd leak: baseline={d} after={d} delta={d}\n",
+            .{ baseline, after, after - baseline },
+        );
+        return error.FdLeak;
+    }
+}
+
+test "stress: 100 detached jobs leave no zombies" {
+    const alloc = std.testing.allocator;
+    // Fence: reap anything outstanding before we measure.
+    _ = drainZombies();
+
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        // Backgrounded `true` exits immediately. Without disciplined
+        // reaping, each iteration leaves a zombie. The `wait` builtin
+        // drains the bg job before the iteration's session deinit,
+        // which is the explicit-reap path we want exercised.
+        const source_text = "true >/dev/null 2>&1 & wait $!";
+        const source = diag.Source{ .name = "<stress>", .text = source_text };
+        const parsed = try shape.parse(source, a, null);
+        const ctx = program.LowerContext{ .alloc = a, .source = source };
+        const prog = try program.lower(parsed.root, &ctx, null);
+
+        const envp_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(environ));
+        var session = try session_mod.Session.init(alloc, envp_ptr, false);
+        defer session.deinit();
+        builtins.installSession(&session);
+
+        _ = eval.runForeground(prog, &session, a, null) catch {};
+    }
+
+    const leaked = drainZombies();
+    if (leaked > 0) {
+        std.debug.print("zombie leak: {d} unreaped children\n", .{leaked});
+        return error.ZombieLeak;
+    }
+}
+
 test "memory: 500 iterations leave no allocator leaks" {
     // `std.testing.allocator` is the leak-detecting allocator, so any
     // session/program/job lifetime bug surfaces here directly. The

@@ -873,6 +873,29 @@ pub fn fireExitTrap(session: *Session, scratch: Allocator, sink: ?Sink) !void {
     }
 }
 
+/// Send SIGHUP+SIGCONT to every non-disowned, non-done job before the
+/// shell exits (PLAN §18, CHECKLIST §11). Disowned jobs are already
+/// gone from the table — iterating naturally excludes them. SIGCONT
+/// follows SIGHUP so stopped jobs wake up and actually receive the
+/// hangup; for already-running jobs SIGCONT is a no-op.
+///
+/// Bash's `huponexit` option toggles this; Slash just always does it.
+/// A script-style invocation (`slash file.sh`) that backgrounds work
+/// without explicit `wait` shouldn't leave zombies/orphans hiding from
+/// the parent process.
+pub fn hangupRemainingJobs(session: *Session) void {
+    for (session.jobs.list()) |j| {
+        if (j.processes.len == 0) continue;
+        switch (j.state) {
+            .done => continue,
+            else => {},
+        }
+        if (j.pgid <= 0) continue;
+        _ = std.c.kill(-j.pgid, .HUP);
+        _ = std.c.kill(-j.pgid, .CONT);
+    }
+}
+
 fn shouldRun(prev: Result, op: program_mod.SequenceOp) bool {
     return switch (op) {
         .always => true,

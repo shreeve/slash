@@ -168,10 +168,12 @@ fn runSource(
     const result = eval.runForeground(prog, &session, a, null) catch |err| {
         std.debug.print("slash: eval error: {s}\n", .{@errorName(err)});
         eval.fireExitTrap(&session, a, null) catch {};
+        eval.hangupRemainingJobs(&session);
         return 1;
     };
 
     eval.fireExitTrap(&session, a, null) catch {};
+    eval.hangupRemainingJobs(&session);
     const final = session.exit_request orelse result;
     return final.toStatusByte();
 }

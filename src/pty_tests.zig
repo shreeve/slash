@@ -699,3 +699,218 @@ test "slash pty: disown removes a backgrounded job from the table" {
     try std.testing.expectEqual(@as(u8, 0), r.status);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "after-disown") != null);
 }
+
+// ---- SIGHUP at shell exit (PLAN §18, CHECKLIST §11) -------------------------
+//
+// When Slash exits, every non-disowned, non-done job in the table gets
+// SIGHUP+SIGCONT. Verified by spawning a `/bin/sh` child that traps
+// SIGHUP and writes a marker file before dying. After the slash test
+// process reaps, we check the marker. Disowned jobs are explicitly
+// excluded — second test asserts the disown variant gets NO marker.
+
+const hup_marker = "/tmp/slash-pty-hup-marker";
+const disown_marker = "/tmp/slash-pty-disown-marker";
+
+fn unlinkMarker(path: [:0]const u8) void {
+    _ = std.c.unlink(path);
+}
+
+fn markerExists(path: [:0]const u8) bool {
+    return std.c.access(path, std.c.F_OK) == 0;
+}
+
+test "slash pty: shell exit hangs up running bg jobs" {
+    if (!ptySupported()) return error.SkipZigTest;
+    unlinkMarker(hup_marker);
+    defer unlinkMarker(hup_marker);
+
+    const alloc = std.testing.allocator;
+    // Background a sh with a SIGHUP trap that writes the marker. Slash
+    // should signal it on exit. We give the orphan up to ~600ms after
+    // slash exits to actually run its handler.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{
+            .send =
+                "/bin/sh -c 'trap \"echo hupped > " ++ hup_marker ++
+                "; exit 0\" HUP; sleep 5' >/dev/null 2>&1 &\n",
+            .settle_ms = 200,
+        },
+        .{ .send = "exit 0\n", .settle_ms = 600 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // Slight extra grace for the orphan to flush + exit.
+    var waited: u32 = 0;
+    while (waited < 1000) : (waited += 50) {
+        if (markerExists(hup_marker)) break;
+        var pfd: std.c.pollfd = .{ .fd = -1, .events = 0, .revents = 0 };
+        _ = std.c.poll(@ptrCast(&pfd), 0, 50);
+    }
+    try std.testing.expect(markerExists(hup_marker));
+}
+
+// ---- Job-control edge cases (CHECKLIST §5, §6 — GPT 5.5 review list) -------
+//
+// These are the cases that distinguish "PTY tests pass" from "vim/less/
+// nested shell behave correctly." Each one targets a load-bearing
+// invariant that's easy to miss until a real user trips it:
+//
+//   - `cat &` (a bg reader): on its first stdin read it should stop with
+//     SIGTTIN, not silently hang or read from the shell's input.
+//   - Ctrl-\ (SIGQUIT) on a foreground job: kills the job; the shell
+//     itself ignores QUIT and survives.
+//   - bg writer with `stty tostop`: a background process trying to write
+//     to the terminal stops with SIGTTOU. (POSIX-optional; the kernel
+//     drives this entirely off the tty's `tostop` flag.)
+//   - nested slash inside slash: stop the outer's foreground (which is
+//     the inner slash) with Ctrl-Z; `fg` resumes. Verifies that nested
+//     interactive shells respect the parent's terminal-handoff dance.
+
+test "slash pty: cat & stops with SIGTTIN on bg stdin read" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // `cat &` puts cat in the background reading stdin. The kernel
+    // delivers SIGTTIN on its first read attempt because cat isn't in
+    // the foreground pgrp. `jobs` should show it as Stopped.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "cat &\n", .settle_ms = 300 },
+        .{ .send = "jobs\n", .settle_ms = 200 },
+        .{ .send = "kill -KILL %1\n", .settle_ms = 100 },
+        .{ .send = "wait %1\n", .settle_ms = 200 },
+        .{ .send = "echo done\n" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // The `jobs` listing between bg and kill must show Stopped.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "Stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "done") != null);
+}
+
+test "slash pty: Ctrl-\\ sends SIGQUIT to foreground job; shell survives" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // `\x1c` is the default SIGQUIT character (FS / Ctrl-\). Same path
+    // as Ctrl-C: the kernel delivers SIGQUIT to the tty's foreground
+    // pgrp. With slash's tcsetpgrp wiring, that's the sleep job.
+    // SIGQUIT's default action is core-dump-and-die. Shell ignores it.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 5\n", .settle_ms = 200 },
+        .{ .send = "\x1c", .settle_ms = 300 }, // Ctrl-\ → SIGQUIT
+        .{ .send = "echo shell-still-alive\n" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "shell-still-alive") != null);
+}
+
+test "slash pty: nested slash — runs commands and exits cleanly back to outer" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // Inner slash starts as the outer's foreground. It does its own
+    // bootstrap (setpgid/tcsetpgrp), runs commands, and on `exit 0`
+    // hands the tty back to the outer cleanly.
+    //
+    // Note: we do NOT try to Ctrl-Z the inner. Like bash, an interactive
+    // slash IGNORES SIGTSTP (job-control hygiene per PLAN §18) — Ctrl-Z
+    // from the outer translates to SIGTSTP for the inner's pgrp, which
+    // ignores it. That's correct behavior; this test focuses on the
+    // tty-handoff round trip instead.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "bin/slash --norc\n", .settle_ms = 600 },
+        .{ .send = "echo inner-running\n", .settle_ms = 200 },
+        .{ .send = "echo from-inner-pid=$$\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n", .settle_ms = 400 },
+        .{ .send = "echo outer-back\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "inner-running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "from-inner-pid=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "outer-back") != null);
+}
+
+test "slash pty: nested bash — runs commands and exits cleanly back to outer" {
+    if (!ptySupported()) return error.SkipZigTest;
+    if (std.c.access("/bin/bash", std.c.X_OK) != 0) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // Same shape as the nested-slash test but with bash, exercising
+    // cross-shell terminal-handoff compatibility. Like slash, bash
+    // ignores SIGTSTP when interactive, so the test covers exit/return,
+    // not stop/resume.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "/bin/bash --noprofile --norc\n", .settle_ms = 600 },
+        .{ .send = "echo bash-running\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n", .settle_ms = 400 },
+        .{ .send = "echo outer-back\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "bash-running") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "outer-back") != null);
+}
+
+test "slash pty: nested slash — Ctrl-Z stops a sleep INSIDE the inner shell" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // The valuable nested-shell job-control test: stop a foreground
+    // command that's running INSIDE the inner shell. The inner shell
+    // (not the outer) is the one whose tcsetpgrp/termios discipline
+    // is exercised here. Validates that a slash inside slash can do
+    // its own job control independently.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "bin/slash --norc\n", .settle_ms = 600 },
+        .{ .send = "sleep 5\n", .settle_ms = 200 },
+        .{ .send = "\x1a", .settle_ms = 400 }, // Ctrl-Z hits sleep, not the inner slash
+        .{ .send = "jobs\n", .settle_ms = 200 },
+        .{ .send = "kill -KILL %1\n", .settle_ms = 200 },
+        .{ .send = "wait %1\n", .settle_ms = 200 },
+        .{ .send = "echo inner-recovered\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n", .settle_ms = 400 },
+        .{ .send = "echo outer-back\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "Stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "inner-recovered") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "outer-back") != null);
+}
+
+test "slash pty: shell exit does NOT signal disowned jobs" {
+    if (!ptySupported()) return error.SkipZigTest;
+    unlinkMarker(disown_marker);
+    defer unlinkMarker(disown_marker);
+
+    const alloc = std.testing.allocator;
+    // Same setup but with `disown`. The orphan finishes its sleep
+    // naturally without ever receiving HUP, so the marker stays
+    // absent. The sleep is short so the test finishes quickly.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{
+            .send =
+                "/bin/sh -c 'trap \"echo hupped > " ++ disown_marker ++
+                "\" HUP; sleep 0.4' >/dev/null 2>&1 &\n",
+            .settle_ms = 200,
+        },
+        .{ .send = "disown\n", .settle_ms = 100 },
+        .{ .send = "exit 0\n", .settle_ms = 800 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // Wait long enough for the disowned sleep to finish naturally.
+    var waited: u32 = 0;
+    while (waited < 1000) : (waited += 100) {
+        var pfd: std.c.pollfd = .{ .fd = -1, .events = 0, .revents = 0 };
+        _ = std.c.poll(@ptrCast(&pfd), 0, 100);
+    }
+    try std.testing.expect(!markerExists(disown_marker));
+}
