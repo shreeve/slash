@@ -371,6 +371,17 @@ fn spawnEditor(tmp_path: [:0]const u8) anyerror!u8 {
         // SIGQUIT, SIGTSTP, SIGTTIN, SIGTTOU, SIGPIPE and Ctrl-C/Ctrl-Z
         // wouldn't work inside vim. (Handlers reset to SIG_DFL across
         // execve automatically; ignores do not. CHECKLIST §6.)
+        //
+        // Note: this fork path intentionally does NOT do the full
+        // job-control discipline (setpgid + tcsetpgrp + termios save/
+        // restore). The Ctrl-X "edit one command line" flow is meant
+        // to be a quick modal pop into $EDITOR — slash blocks on
+        // waitpid for the duration. Users who want a real editor
+        // session type `vim` at the prompt, which goes through
+        // `eval.serviceForeground` and gets the full discipline. If
+        // the editor needs Ctrl-Z while inside the Ctrl-X popup, that
+        // would require expanding this path; until then it's a
+        // documented limitation, not a bug.
         var sa: std.posix.Sigaction = .{
             .handler = .{ .handler = std.c.SIG.DFL },
             .mask = std.posix.sigemptyset(),

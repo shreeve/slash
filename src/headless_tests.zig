@@ -1467,11 +1467,16 @@ fn teardownBuiltinsFixture() void {
 // of the pre-state.
 
 /// Count open file descriptors in this process by probing fcntl(F_GETFD)
-/// across the typical fd range. Cross-platform — no `/proc` walk on
-/// Linux, no `proc_pidinfo` on macOS. Limited to fds < `cap` (1024
-/// covers the default soft limit on every supported platform).
+/// across [0, RLIMIT_NOFILE.cur). Cross-platform — no /proc walk on
+/// Linux, no proc_pidinfo on macOS. Cap at 65536 defensively in case
+/// the soft limit is set absurdly high (some macOS setups push it to
+/// MAX_INT, which would make this loop pointlessly slow).
 fn countOpenFds() u32 {
-    const cap: c_int = 1024;
+    var rl: std.c.rlimit = undefined;
+    const cap: c_int = if (std.c.getrlimit(.NOFILE, &rl) == 0)
+        @intCast(@min(rl.cur, 65536))
+    else
+        1024;
     var n: u32 = 0;
     var fd: c_int = 0;
     while (fd < cap) : (fd += 1) {
@@ -1481,15 +1486,29 @@ fn countOpenFds() u32 {
     return n;
 }
 
-/// Drain any zombie children with `waitpid(-1, WNOHANG)`. Returns the
-/// number reaped — should be 0 after a clean run.
+/// Drain zombie children with `waitpid(-1, WNOHANG)`. Returns the number
+/// reaped. Loops with brief 10ms naps until two consecutive empty polls
+/// — a child that exited microseconds ago may not be visible to the
+/// first WNOHANG call. Caps total wait at ~500ms so a real leak still
+/// surfaces as a non-zero return.
 fn drainZombies() u32 {
     var reaped: u32 = 0;
-    while (true) {
+    var quiet_polls: u32 = 0;
+    var attempts: u32 = 0;
+    while (attempts < 50) : (attempts += 1) {
         var status: c_int = 0;
         const rc = std.c.waitpid(-1, &status, std.c.W.NOHANG);
-        if (rc <= 0) break;
-        reaped += 1;
+        if (rc > 0) {
+            reaped += 1;
+            quiet_polls = 0;
+            continue;
+        }
+        // No reapable child this round. Two quiet 10ms polls in a row
+        // means everything has settled.
+        quiet_polls += 1;
+        if (quiet_polls >= 2) break;
+        var pfd: std.c.pollfd = .{ .fd = -1, .events = 0, .revents = 0 };
+        _ = std.c.poll(@ptrCast(&pfd), 0, 10);
     }
     return reaped;
 }
@@ -1542,7 +1561,7 @@ test "stress: 200 pipeline iterations leave fd count stable" {
     }
 }
 
-test "stress: 100 detached jobs leave no zombies" {
+test "stress: 100 detached jobs are reaped without explicit wait" {
     const alloc = std.testing.allocator;
     // Fence: reap anything outstanding before we measure.
     _ = drainZombies();
@@ -1553,11 +1572,13 @@ test "stress: 100 detached jobs leave no zombies" {
         defer arena.deinit();
         const a = arena.allocator();
 
-        // Backgrounded `true` exits immediately. Without disciplined
-        // reaping, each iteration leaves a zombie. The `wait` builtin
-        // drains the bg job before the iteration's session deinit,
-        // which is the explicit-reap path we want exercised.
-        const source_text = "true >/dev/null 2>&1 & wait $!";
+        // Bare `true &` — no `wait`. This is the harder test: it
+        // exercises the safe-point poll path (PLAN §19), not the
+        // explicit-wait path. Each iteration ends with a session
+        // deinit, which drains the JobTable. If safe-point polling
+        // doesn't reap completed bg jobs, zombies accumulate; the
+        // assertion at the end catches it.
+        const source_text = "true >/dev/null 2>&1 &";
         const source = diag.Source{ .name = "<stress>", .text = source_text };
         const parsed = try shape.parse(source, a, null);
         const ctx = program.LowerContext{ .alloc = a, .source = source };
@@ -1569,6 +1590,11 @@ test "stress: 100 detached jobs leave no zombies" {
         builtins.installSession(&session);
 
         _ = eval.runForeground(prog, &session, a, null) catch {};
+        // hangupRemainingJobs models actual shell teardown — it sends
+        // HUP+CONT to the still-live bg `true` (which has typically
+        // already exited by now anyway). Then the test's drainZombies
+        // at the end catches anything not reaped.
+        eval.hangupRemainingJobs(&session);
     }
 
     const leaked = drainZombies();
