@@ -20,6 +20,7 @@ const session_mod = @import("session.zig");
 const vars_mod = @import("vars.zig");
 const job_mod = @import("job.zig");
 const exec_mod = @import("exec.zig");
+const terminal_mod = @import("terminal.zig");
 const shape_mod = @import("shape.zig");
 const program_mod = @import("program.zig");
 const diag = @import("diagnostics.zig");
@@ -1069,6 +1070,13 @@ pub fn installSession(s: *session_mod.Session) void {
     current_session = s;
 }
 
+/// Read accessor for the SIGCHLD handler living in `repl.zig` —
+/// keeping the global module-private but exposing a getter avoids
+/// scattering raw `*Session` pointers across the codebase.
+pub fn currentSession() ?*session_mod.Session {
+    return current_session;
+}
+
 fn trapSignalHandler(sig_id: std.c.SIG) callconv(.c) void {
     const s = current_session orelse return;
     const sig: session_mod.TrapSignal = switch (sig_id) {
@@ -1187,26 +1195,16 @@ fn fgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
         _ = std.c.write(1, "\n", 1);
     }
 
-    // The terminal-handoff + termios dance below intentionally mirrors
-    // `eval.serviceForeground`. They're duplicated today because
-    // builtins.zig can't import eval.zig without a module cycle; the
-    // right longer-term fix is to lift this helper into a neutral
-    // module (`terminal.zig` or `job_control.zig`) that both eval and
-    // builtins consume. Until then: any change to one MUST be mirrored
-    // to the other.
+    // APUE order: give the tty to the job (handoff + termios install),
+    // mark the job foreground, send SIGCONT if it was stopped, block
+    // on the wait, reclaim the tty.
     //
-    // Resume-order (per APUE): hand the tty FIRST, THEN restore the
-    // job's saved termios (less raw, vim raw, etc.), THEN SIGCONT.
-    // Without the termios restore, a resumed `less` sees the shell's
-    // cooked mode and instantly falls out of its line discipline.
-    // TCSADRAIN waits for in-flight output to finish so the operator
-    // doesn't see a flicker.
-    if (session.controlling_tty_fd) |tty_fd| {
-        if (j.pgid > 0) _ = exec_mod.tcSetPgrp(tty_fd, j.pgid);
-        if (j.termios) |t| {
-            std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
-        }
-    }
+    // The terminal dance lives in `terminal.zig` so both this builtin
+    // and eval's foreground-wait sites use one implementation. We
+    // can't use `terminal.waitForeground` directly here because we
+    // need to interleave SIGCONT between handoff and wait.
+    terminal_mod.giveTo(session, j);
+
     if (j.state == .stopped) {
         for (j.processes) |*p| switch (p.state) {
             .stopped => p.state = .running,
@@ -1220,23 +1218,7 @@ fn fgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
 
     try job_mod.service(&session.jobs, .foreground, j);
 
-    // Post-wait recovery (mirrors serviceForeground): snapshot the
-    // job's termios on stop, then reclaim the tty for the shell, then
-    // restore the shell's saved termios.
-    if (session.controlling_tty_fd) |tty_fd| {
-        switch (j.state) {
-            .stopped => {
-                if (std.posix.tcgetattr(tty_fd)) |t| {
-                    j.termios = t;
-                } else |_| {}
-            },
-            else => {},
-        }
-        if (session.shell_pgid > 0) _ = exec_mod.tcSetPgrp(tty_fd, session.shell_pgid);
-        if (session.shell_termios) |t| {
-            std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
-        }
-    }
+    terminal_mod.reclaim(session, j);
     return j.result orelse Result{ .exited = 0 };
 }
 

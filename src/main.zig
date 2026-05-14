@@ -328,6 +328,7 @@ test {
     _ = @import("runtime.zig");
     _ = @import("exec.zig");
     _ = @import("job.zig");
+    _ = @import("terminal.zig");
     _ = @import("builtins.zig");
     _ = @import("session.zig");
     _ = @import("vars.zig");

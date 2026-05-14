@@ -207,6 +207,12 @@ pub const Session = struct {
     /// PID of the most recently launched background job (for `$!`).
     /// `null` until at least one bg job has started in the session.
     last_bg_pid: ?std.c.pid_t = null,
+    /// Set by the SIGCHLD handler; consumed at safe points by
+    /// `eval.drainChildEvents`. PLAN §19: the handler is minimal and
+    /// async-signal-safe — it sets this flag and pokes zigline's
+    /// signal pipe to wake any blocked editor read. The actual
+    /// reaping happens later, in shell context.
+    child_event_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// File descriptor referring to the controlling tty when slash is
     /// interactive and stderr is a terminal. `null` in non-interactive
     /// or piped contexts. Used for `tcsetpgrp` handoff around foreground

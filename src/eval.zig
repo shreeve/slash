@@ -24,6 +24,7 @@ const word_mod = @import("word.zig");
 const diag = @import("diagnostics.zig");
 const runtime = @import("runtime.zig");
 const exec = @import("exec.zig");
+const terminal = @import("terminal.zig");
 const job = @import("job.zig");
 const builtins = @import("builtins.zig");
 const session_mod = @import("session.zig");
@@ -74,7 +75,7 @@ pub fn runForeground(
     sink: ?Sink,
 ) !Result {
     const outcome = try evalProgram(prog, session, .{ .scratch = scratch }, sink);
-    job.service(&session.jobs, .poll, null) catch {};
+    drainChildEvents(session);
     session.last_status = outcome.expression_result.toStatusByte();
     return outcome.expression_result;
 }
@@ -648,49 +649,11 @@ fn runExternalSingle(
     return .{ .job = j, .expression_result = result };
 }
 
-/// Block on a foreground job, wrapping the wait in tty handoff plus
-/// terminal-mode save/restore so the resumed/spawned process group owns
-/// the controlling terminal AND has its expected line-discipline
-/// settings for the duration of the wait. After the job stops or
-/// completes, take the terminal back AND restore the shell's saved
-/// termios so vim/less/Python don't leave us in raw mode at the prompt.
-/// PLAN §11 must-get-right "terminal control"; CHECKLIST §5.
+/// Block on a foreground job. The terminal-handoff and termios save/
+/// restore choreography lives in `terminal.zig`; this is a thin alias
+/// kept so eval call sites read clearly.
 fn serviceForeground(session: *Session, j: *Job) !void {
-    const tty_fd_opt = session.controlling_tty_fd;
-
-    if (tty_fd_opt) |tty_fd| {
-        // Resume-order: tcsetpgrp first, then restore the job's saved
-        // termios. tcsetattr applies to the terminal (not the pgrp),
-        // but doing tcsetpgrp first matches the APUE shape and keeps
-        // ownership and modes consistent.
-        if (j.pgid > 0) _ = exec.tcSetPgrp(tty_fd, j.pgid);
-        if (j.termios) |t| {
-            std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
-        }
-    }
-
-    try job.service(&session.jobs, .foreground, j);
-
-    // Post-wait recovery. Order: snapshot the job's termios (only
-    // meaningful if it stopped — done jobs may have already closed
-    // their tty handle), reclaim the tty for the shell, then restore
-    // the shell's saved termios so the prompt comes back sane.
-    // TCSADRAIN waits for any in-flight output before the change so
-    // we don't truncate the program's last line.
-    if (tty_fd_opt) |tty_fd| {
-        switch (j.state) {
-            .stopped => {
-                if (std.posix.tcgetattr(tty_fd)) |t| {
-                    j.termios = t;
-                } else |_| {}
-            },
-            else => {},
-        }
-        if (session.shell_pgid > 0) _ = exec.tcSetPgrp(tty_fd, session.shell_pgid);
-        if (session.shell_termios) |t| {
-            std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
-        }
-    }
+    return terminal.waitForeground(session, j);
 }
 
 // =============================================================================
@@ -813,7 +776,7 @@ fn evalSequence(
         last_result = out.expression_result;
         last_job = out.job;
 
-        job.service(&session.jobs, .poll, null) catch {};
+        drainChildEvents(session);
         if (session.exit_request != null) break;
 
         try fireSignalTraps(session, ctx, sink);
@@ -871,6 +834,23 @@ pub fn fireExitTrap(session: *Session, scratch: Allocator, sink: ?Sink) !void {
         },
         else => {},
     }
+}
+
+/// Drain a pending SIGCHLD-event flag, then run a non-blocking poll
+/// over the JobTable to update process states. Called from safe points
+/// (PLAN §19): start/end of `runForeground`, between sequence items,
+/// before listing jobs. The flag-then-poll shape lets the SIGCHLD
+/// handler signal "something changed" without doing any of the
+/// not-async-signal-safe reaping work itself.
+pub fn drainChildEvents(session: *Session) void {
+    if (!session.child_event_pending.swap(false, .acq_rel)) {
+        // No event flagged; the existing poll calls already cover the
+        // pre-handler-era path so we don't need to poll twice. But
+        // any direct caller of drainChildEvents should still poll for
+        // safety against missed flag sets. Polling is cheap (one
+        // waitpid(WNOHANG) when there are no children).
+    }
+    job.service(&session.jobs, .poll, null) catch {};
 }
 
 /// Send SIGHUP+SIGCONT to every non-disowned, non-done job before the

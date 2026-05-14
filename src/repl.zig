@@ -1323,6 +1323,12 @@ fn bootstrapInteractive(session: *session_mod.Session) void {
             session.shell_termios = t;
         } else |_| {}
     }
+
+    // Step 8: install the SIGCHLD handler now that the session is in
+    // place. The handler reads `builtins.currentSession()` — install
+    // order matters: this must come AFTER `builtins.installSession`
+    // (handled by the caller before invoking bootstrapInteractive).
+    installChildEventHandler();
 }
 
 fn installInteractiveSignalHandlers() void {
@@ -1359,6 +1365,50 @@ pub fn installShellSignalDefaults() void {
         .flags = 0,
     };
     std.posix.sigaction(.PIPE, &ignore, null);
+}
+
+/// Async-signal-safe body shared between the real SIGCHLD handler and
+/// the focused unit test. Sets the pending flag with a swap (so the
+/// caller can tell whether this was the first signal in this batch),
+/// and pokes zigline's signal pipe ONLY on the first signal — coalesces
+/// bursts (e.g. `for i in {1..100}; do work-stuff & done`) so the
+/// editor doesn't redraw 100 times. Subsequent SIGCHLDs are silent
+/// until `drainChildEvents` clears the flag.
+///
+/// Async-signal-safe primitives only: atomic swap, single one-byte
+/// `write(2)` via `zigline.pokeActiveSignalPipe`. No allocation, no
+/// locks, no Zig std formatting.
+pub fn notifyChildEventFromSignal(session: *session_mod.Session) void {
+    if (!session.child_event_pending.swap(true, .release)) {
+        zigline.pokeActiveSignalPipe();
+    }
+}
+
+/// SIGCHLD handler: dispatches to `notifyChildEventFromSignal` for the
+/// shared signal-safe path. Does NOT reap, NOT allocate, NOT log.
+/// Safe-point code in eval drains the flag and runs the actual
+/// `waitpid` poll.
+fn sigchldHandler(_: std.c.SIG) callconv(.c) void {
+    const s = builtins.currentSession() orelse return;
+    notifyChildEventFromSignal(s);
+}
+
+/// Install the SIGCHLD handler. Done at interactive bootstrap so it
+/// only fires once we have a session installed (the handler reads
+/// `current_session`). Non-interactive shapes don't install it —
+/// reaping there happens via the existing safe-point polls in eval,
+/// and there's no editor read to wake.
+///
+/// Notably we do NOT set `SA_NOCLDSTOP`: we want SIGCHLD on stop
+/// and continue events too, so `Job.state` transitions (e.g., a
+/// foreground process being SIGTSTP'd) are visible at safe points.
+fn installChildEventHandler() void {
+    var sa: std.posix.Sigaction = .{
+        .handler = .{ .handler = sigchldHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.c.SA.RESTART,
+    };
+    std.posix.sigaction(.CHLD, &sa, null);
 }
 
 fn sigintNoop(_: std.c.SIG) callconv(.c) void {}
