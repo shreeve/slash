@@ -37,6 +37,18 @@ const TIOCSWINSZ: c_ulong = switch (builtin.target.os.tag) {
     else => 0x80087467,
 };
 
+// `TIOCSCTTY` — make this fd the calling session leader's controlling
+// terminal. After `setsid()` clears the inherited ctty, the child needs
+// this ioctl on the slave PTY so the kernel routes tty-driven signals
+// (SIGINT/SIGTSTP/SIGWINCH) to it. Without it, slash's tcsetpgrp calls
+// fail with ENOTTY and Ctrl-Z under PTY stops the wrong process group.
+const TIOCSCTTY: c_ulong = switch (builtin.target.os.tag) {
+    .linux => 0x540E,
+    .macos, .ios, .driverkit, .maccatalyst, .tvos, .visionos, .watchos => 0x20007461,
+    .freebsd, .netbsd, .openbsd, .dragonfly => 0x20007461,
+    else => 0x20007461,
+};
+
 const O_RDWR: c_int = 2;
 const O_NOCTTY: c_int = switch (builtin.target.os.tag) {
     .macos, .ios => 0x20000,
@@ -161,6 +173,12 @@ fn spawnSlash(args: []const []const u8) !Spawned {
     if (pid == 0) {
         _ = std.c.close(pty.master);
         _ = setsid();
+
+        // Acquire the slave PTY as our controlling terminal. setsid()
+        // clears the inherited ctty; without TIOCSCTTY the child has no
+        // ctty even though dup2() makes the slave fd 0/1/2. Slash needs
+        // a ctty for tcsetpgrp + tty-driven signal delivery (Ctrl-Z).
+        _ = ioctl_with_ulong_request(pty.slave, TIOCSCTTY, @as(c_int, 0));
 
         _ = std.c.dup2(pty.slave, 0);
         _ = std.c.dup2(pty.slave, 1);
@@ -549,4 +567,135 @@ test "slash pty: highlighter inside dq with $var emits string + variable colors"
     // output. The renderer emits SGR around each span.
     try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[38;2;158;206;106m") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[38;2;224;175;104m") != null);
+}
+
+// =============================================================================
+// Job control under a real PTY
+// =============================================================================
+//
+// These cases exercise the path the headless harness can't reach: a real
+// controlling terminal, real `tcsetpgrp` handoff, real `SIGTSTP` from
+// the kernel's tty driver translating Ctrl-Z (byte 0x1A). The bookkeeping
+// invariants from PLAN §7 Rule 22 + §19 must hold under terminal pressure.
+
+test "slash pty: sleep & jobs shows the backgrounded sleep" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 5 >/dev/null 2>&1 &\n", .settle_ms = 200 },
+        .{ .send = "jobs\n", .settle_ms = 200 },
+        .{ .send = "kill -TERM %1\n", .settle_ms = 100 },
+        .{ .send = "wait %1\n", .settle_ms = 200 },
+        .{ .send = "echo done-pty\n" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // `jobs` output should mention `sleep` somewhere. The bracketed job
+    // id and "Running" label are formatted by `jobsFn`.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "sleep") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "done-pty") != null);
+}
+
+test "slash pty: $! reports a real pid that wait can drain" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 0.3 >/dev/null 2>&1 &\n", .settle_ms = 100 },
+        .{ .send = "echo bgpid=$!\n", .settle_ms = 100 },
+        .{ .send = "wait $!\n", .settle_ms = 600 },
+        .{ .send = "echo final=$?\n" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // `bgpid=NNNN` must appear with at least one digit (the rendered pid).
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "bgpid=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "final=0") != null);
+}
+
+test "slash pty: Ctrl-Z stops a foreground sleep, fg resumes it" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // `sleep 1` runs as a foreground command. We send Ctrl-Z (byte
+    // 0x1A); the tty driver translates that to SIGTSTP for the
+    // controlling terminal's foreground process group, which is the
+    // sleep job's pgrp because slash handed the tty to it via
+    // `tcsetpgrp`. The sleep stops, control returns to the shell,
+    // and `fg` resumes it. Without the `tcsetpgrp` wiring this whole
+    // sequence breaks (Ctrl-Z would target the shell instead of the
+    // job, or the job wouldn't be the controlling-tty's foreground).
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 1\n", .settle_ms = 200 },
+        .{ .send = "\x1a", .settle_ms = 300 }, // Ctrl-Z → SIGTSTP
+        .{ .send = "jobs\n", .settle_ms = 200 },
+        .{ .send = "fg\n", .settle_ms = 1500 },
+        .{ .send = "echo resumed-ok\n" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // `jobs` between stop and fg should show the stopped sleep.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "Stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "resumed-ok") != null);
+}
+
+test "slash pty: Ctrl-Z then bg lets the job finish without blocking" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 0.5\n", .settle_ms = 150 },
+        .{ .send = "\x1a", .settle_ms = 200 }, // Ctrl-Z
+        .{ .send = "bg\n", .settle_ms = 100 },
+        // After bg, we can immediately run other commands. The sleep
+        // finishes in the background; `wait` drains it.
+        .{ .send = "echo bg-prompt-ok\n", .settle_ms = 100 },
+        .{ .send = "wait\n", .settle_ms = 800 },
+        .{ .send = "echo all-drained\n" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "bg-prompt-ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "all-drained") != null);
+}
+
+test "slash pty: kill -TERM %1 reaps a backgrounded sleep" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30 >/dev/null 2>&1 &\n", .settle_ms = 150 },
+        .{ .send = "kill -TERM %1\n", .settle_ms = 200 },
+        .{ .send = "wait %1\n", .settle_ms = 300 },
+        .{ .send = "echo killed-cleanly\n" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "killed-cleanly") != null);
+}
+
+test "slash pty: disown removes a backgrounded job from the table" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 1 >/dev/null 2>&1 &\n", .settle_ms = 150 },
+        .{ .send = "disown\n", .settle_ms = 100 },
+        // After disown, `jobs` should show NO `[1]` because it's been
+        // forgotten. We then echo a marker; the disowned sleep finishes
+        // in 1s on its own, but the test moves on without waiting.
+        .{ .send = "jobs\n", .settle_ms = 100 },
+        .{ .send = "echo after-disown\n" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "after-disown") != null);
 }

@@ -668,6 +668,47 @@ const cases: []const Case = &.{
         .source = "sleep 5 >/dev/null 2>&1 & kill -TERM %1; wait %1; echo done",
         .expect = .{ .exit_code = 0, .stdout = "done\n", .stdout_contains = true },
     },
+
+    // ---- $! and wait $pid (POSIX async-pid + wait-by-pid) ---------------
+    //
+    // `$!` is the pid of the most recently launched background job (the
+    // last process of a backgrounded pipeline). `wait PID` finds the
+    // owning Job and waits on it; bash-compatible.
+
+    .{
+        .name = "$!: empty before any bg job",
+        .source = "echo \"before=[$!]\"",
+        .expect = .{ .exit_code = 0, .stdout = "before=[]\n" },
+    },
+    .{
+        .name = "$!: set to backgrounded pid; wait $! works",
+        .source = "sleep 0.2 >/dev/null 2>&1 &\nwait $!\necho final=$?",
+        .expect = .{ .exit_code = 0, .stdout = "final=0\n" },
+    },
+    .{
+        .name = "wait $! propagates the exit status",
+        .source = "false &\nwait $!\necho got=$?",
+        .expect = .{ .exit_code = 0, .stdout = "got=1\n" },
+    },
+    .{
+        .name = "wait: bare integer that's not our child errors",
+        .source = "wait 1",
+        .expect = .{ .exit_code = 127 },
+    },
+    .{
+        .name = "wait: invalid spec is a usage error",
+        .source = "wait %nope",
+        .expect = .{ .exit_code = 2 },
+    },
+    .{
+        .name = "$!: bg pipeline records the LAST stage's pid; wait returns the JOB result (pipefail-on)",
+        // `$!` is the last stage's pid, but `wait $!` finds the owning
+        // Job and returns its aggregate result. Per Slash's default
+        // `pipefail = on` (PLAN §7 Rule 11), `false | true` => 1.
+        .source = "false | true >/dev/null 2>&1 &\nwait $!\necho got=$?",
+        .expect = .{ .exit_code = 0, .stdout = "got=1\n" },
+    },
+
     .{
         .name = "disown: removes a backgrounded job",
         // After disown, the orphan keeps running its (short) sleep then

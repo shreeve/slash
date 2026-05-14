@@ -9,6 +9,10 @@ const program_mod = @import("program.zig");
 
 pub const Allocator = std.mem.Allocator;
 
+// libc bindings — Zig 0.16's `std.c` doesn't expose `getpgrp`/`getpgid`,
+// but they're standard POSIX. Declare directly.
+extern "c" fn getpgrp() std.c.pid_t;
+
 pub const ProcSubEntry = struct {
     parent_fd: i32,
     pid: i32,
@@ -200,6 +204,19 @@ pub const Session = struct {
     exit_request: ?runtime.Result,
     /// Last command's exit status (for `$?`).
     last_status: u8,
+    /// PID of the most recently launched background job (for `$!`).
+    /// `null` until at least one bg job has started in the session.
+    last_bg_pid: ?std.c.pid_t = null,
+    /// File descriptor referring to the controlling tty when slash is
+    /// interactive and stderr is a terminal. `null` in non-interactive
+    /// or piped contexts. Used for `tcsetpgrp` handoff around foreground
+    /// jobs (PLAN §18 / §11 must-get-right "terminal control"). Owned
+    /// by the session: `dup`d at init, `close`d at deinit.
+    controlling_tty_fd: ?std.c.fd_t = null,
+    /// Process group id of the shell process. Captured at init via
+    /// `getpgrp()`; restored as the controlling-tty's foreground pgrp
+    /// after every foreground job completes or stops.
+    shell_pgid: std.c.pid_t = 0,
     /// Process-substitution side children whose pipe ends the parent
     /// is holding open until the foreground command exits. Each
     /// entry's fd is closed and its child reaped at the next safe
@@ -218,6 +235,23 @@ pub const Session = struct {
         envp: [*:null]const ?[*:0]const u8,
         interactive: bool,
     ) !Session {
+        // Capture the shell's pgid so foreground job-control handoff
+        // can restore it as the tty's foreground group after each fg
+        // job. `getpgrp()` returns the calling process's pgid and
+        // cannot fail.
+        const shell_pgid = getpgrp();
+
+        // Open a stable handle to the controlling tty when interactive.
+        // Use stderr (fd 2) — it's the conventional "stays connected to
+        // the user even if stdin/stdout are redirected" fd. We `dup` it
+        // so subsequent `dup2` of fd 2 (e.g., from `2>file` redirects)
+        // doesn't lose our handle.
+        var tty_fd: ?std.c.fd_t = null;
+        if (interactive and std.c.isatty(2) != 0) {
+            const dup_fd = std.c.dup(2);
+            if (dup_fd >= 0) tty_fd = dup_fd;
+        }
+
         return .{
             .alloc = alloc,
             .jobs = job.JobTable.init(alloc),
@@ -230,6 +264,9 @@ pub const Session = struct {
             .default_pipefail = true,
             .exit_request = null,
             .last_status = 0,
+            .last_bg_pid = null,
+            .controlling_tty_fd = tty_fd,
+            .shell_pgid = shell_pgid,
         };
     }
 
@@ -244,6 +281,7 @@ pub const Session = struct {
         self.clearPathCache();
         self.path_cache.deinit(self.alloc);
         if (self.path_cache_signature) |sig| self.alloc.free(sig);
+        if (self.controlling_tty_fd) |fd| _ = std.c.close(fd);
     }
 
     /// Close every pending proc-sub fd and reap the side children.

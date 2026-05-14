@@ -19,6 +19,7 @@ const runtime = @import("runtime.zig");
 const session_mod = @import("session.zig");
 const vars_mod = @import("vars.zig");
 const job_mod = @import("job.zig");
+const exec_mod = @import("exec.zig");
 const shape_mod = @import("shape.zig");
 const program_mod = @import("program.zig");
 const diag = @import("diagnostics.zig");
@@ -767,7 +768,15 @@ fn jobsFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror
 
     var line_buf: [512]u8 = undefined;
     for (session.jobs.list()) |j| {
-        if (!j.detached) continue;
+        // List backgrounded jobs and stopped foreground jobs. Skip
+        // zero-child shell-context bookkeeping (`processes.len == 0`)
+        // and reaped jobs.
+        if (j.processes.len == 0) continue;
+        switch (j.state) {
+            .done => continue,
+            .stopped => {}, // include stopped jobs even if not detached
+            .running, .pending => if (!j.detached) continue,
+        }
         const status_label = formatJobState(j.state);
         const text = j.command_text orelse "<job>";
         const line = std.fmt.bufPrint(
@@ -831,17 +840,37 @@ fn waitFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror
     };
 
     if (argv.len >= 2) {
-        const id = parseJobSpec(argv[1]) orelse {
-            var msg_buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf, "wait: invalid job id `{s}`\n", .{argv[1]}) catch "wait: invalid job id\n";
-            _ = std.c.write(2, msg.ptr, msg.len);
-            return .{ .exited = 2 };
-        };
-        const j = session.jobs.lookup(id) orelse {
-            var msg_buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf, "wait: no such job {d}\n", .{id}) catch "wait: no such job\n";
-            _ = std.c.write(2, msg.ptr, msg.len);
-            return .{ .exited = 127 };
+        const target = argv[1];
+        const j = blk: {
+            // `%N` form: numeric job id.
+            if (target.len >= 1 and target[0] == '%') {
+                const id = std.fmt.parseInt(u32, target[1..], 10) catch {
+                    var buf: [256]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buf, "wait: invalid job spec `{s}`\n", .{target}) catch "wait: invalid job spec\n";
+                    _ = std.c.write(2, msg.ptr, msg.len);
+                    return .{ .exited = 2 };
+                };
+                break :blk session.jobs.lookup(id) orelse {
+                    var buf: [256]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buf, "wait: no such job {d}\n", .{id}) catch "wait: no such job\n";
+                    _ = std.c.write(2, buf[0..msg.len].ptr, msg.len);
+                    return .{ .exited = 127 };
+                };
+            }
+            // Bare integer: pid (POSIX `wait pid...`). Find the owning
+            // job and wait on it. `$!` flows through this branch.
+            const pid = std.fmt.parseInt(std.c.pid_t, target, 10) catch {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "wait: invalid pid `{s}`\n", .{target}) catch "wait: invalid pid\n";
+                _ = std.c.write(2, msg.ptr, msg.len);
+                return .{ .exited = 2 };
+            };
+            break :blk findJobByPid(session, pid) orelse {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "wait: pid {d} is not a child of this shell\n", .{pid}) catch "wait: not a child\n";
+                _ = std.c.write(2, msg.ptr, msg.len);
+                return .{ .exited = 127 };
+            };
         };
         try job_mod.service(&session.jobs, .foreground, j);
         return j.result orelse Result{ .exited = 0 };
@@ -857,6 +886,13 @@ fn waitFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror
         if (target.result) |r| last_result = r;
     }
     return last_result;
+}
+
+fn findJobByPid(session: *session_mod.Session, pid: std.c.pid_t) ?*job_mod.Job {
+    for (session.jobs.list()) |j| {
+        for (j.processes) |p| if (p.pid == pid) return j;
+    }
+    return null;
 }
 
 fn pickPendingBgJob(session: *session_mod.Session) ?*job_mod.Job {
@@ -1056,11 +1092,11 @@ fn trapSignalHandler(sig_id: std.c.SIG) callconv(.c) void {
 // JobTable; `kill` also accepts raw pids for ad-hoc signaling.
 //
 // `fg` and `bg` send `SIGCONT` to the target job's process group via
-// `kill(-pgid, SIGCONT)` and update Job state. `fg` then blocks via
-// `job.service(.foreground, target)` until the job is `done` or `stopped`
-// again. Terminal handoff (`tcsetpgrp`) is a separate surface — without it
-// a resumed job that reads the controlling tty may receive `SIGTTIN`. The
-// resume + reap mechanics are correct in either case.
+// `kill(-pgid, SIGCONT)` and update Job state. `fg` hands the controlling
+// terminal to the resumed pgrp via `tcsetpgrp`, blocks via `job.service
+// (.foreground, target)` until the job is done or stopped again, and
+// then takes the terminal back so the shell's prompt stays usable.
+// `bg` only sends `SIGCONT` — backgrounded jobs never own the tty.
 //
 // `kill -SIG TARGET...` parses the signal as a name (`-INT`, `-HUP`,
 // `-CONT`, ...) or a number (`-9`, `-15`); default is `TERM`. Targets are
@@ -1151,8 +1187,13 @@ fn fgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
         _ = std.c.write(1, "\n", 1);
     }
 
-    // Resume any stopped processes; if the job was already running in
-    // the background, SIGCONT is a no-op for already-running children.
+    // Hand the controlling tty to the resumed pgrp before sending
+    // SIGCONT. Without this a resumed `cat` immediately re-stops with
+    // SIGTTIN trying to read stdin. After the wait, take the tty back
+    // (handled in the deferred restore inside the wait helper).
+    if (session.controlling_tty_fd) |tty_fd| {
+        if (j.pgid > 0) _ = exec_mod.tcSetPgrp(tty_fd, j.pgid);
+    }
     if (j.state == .stopped) {
         for (j.processes) |*p| switch (p.state) {
             .stopped => p.state = .running,
@@ -1165,6 +1206,9 @@ fn fgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
     j.foreground = true;
 
     try job_mod.service(&session.jobs, .foreground, j);
+    if (session.controlling_tty_fd) |tty_fd| {
+        if (session.shell_pgid > 0) _ = exec_mod.tcSetPgrp(tty_fd, session.shell_pgid);
+    }
     return j.result orelse Result{ .exited = 0 };
 }
 
@@ -1193,6 +1237,12 @@ fn bgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
     }
     j.detached = true;
     j.foreground = false;
+    // Mirror POSIX: backgrounding a job (whether by `&` or `bg`) makes
+    // it the new `$!` target. Use the last process in the group so
+    // `wait $!` returns the meaningful exit status.
+    if (j.processes.len > 0) {
+        session.last_bg_pid = j.processes[j.processes.len - 1].pid;
+    }
 
     var buf: [256]u8 = undefined;
     const text = j.command_text orelse "<job>";

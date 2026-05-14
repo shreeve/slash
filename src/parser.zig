@@ -293,7 +293,6 @@ pub const BaseLexer = struct {
                 self.paren += 1;
                     break :blk Token{ .cat = .@"dollar_paren", .pre = wsCount, .pos = start, .len = 2 };
                 }
-                self.pos -= 1;
                 break :blk Token{ .cat = .@"err", .pre = wsCount, .pos = start, .len = 1 };
             },
             '&' => blk: {
@@ -347,7 +346,6 @@ pub const BaseLexer = struct {
                 self.paren += 1;
                     break :blk Token{ .cat = .@"at_paren", .pre = wsCount, .pos = start, .len = 2 };
                 }
-                self.pos -= 1;
                 break :blk Token{ .cat = .@"err", .pre = wsCount, .pos = start, .len = 1 };
             },
             '[' => blk: {

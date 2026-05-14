@@ -23,6 +23,11 @@ const runtime = @import("runtime.zig");
 pub const Fd = std.c.fd_t;
 pub const Pid = std.c.pid_t;
 
+// libc bindings — Zig 0.16's `std.c` doesn't expose `tcsetpgrp`. It's
+// standard POSIX (XSI); declare directly so the job-control handoff
+// in `tcSetPgrp` can call it.
+extern "c" fn tcsetpgrp(fd: Fd, pgid: Pid) c_int;
+
 pub const Error = error{
     ForkFailed,
     PipeFailed,
@@ -221,6 +226,22 @@ pub fn closeFd(fd: Fd) void {
 
 pub fn setPgid(pid: Pid, pgid: Pid) Error!void {
     if (std.c.setpgid(pid, pgid) != 0) return Error.SetPgidFailed;
+}
+
+/// Hand the controlling terminal's foreground process group to `pgid`.
+/// Best-effort: returns `false` on EBADF / ENOTTY (no controlling tty)
+/// or any other failure. The shell is responsible for ignoring SIGTTOU
+/// before calling this — otherwise it'd stop itself trying to set the
+/// foreground group from a background context (PLAN §18 disposition
+/// table).
+pub fn tcSetPgrp(fd: Fd, pgid: Pid) bool {
+    while (true) {
+        const rc = tcsetpgrp(fd, pgid);
+        if (rc == 0) return true;
+        const e = std.c.errno(@as(c_int, -1));
+        if (e == .INTR) continue;
+        return false;
+    }
 }
 
 /// Reset the disposition of signals the interactive shell typically catches

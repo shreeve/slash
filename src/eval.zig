@@ -642,10 +642,27 @@ fn runExternalSingle(
     const j = try session.jobs.create(true, false, argv[0]);
     var pids = [_]exec.Pid{pid};
     try session.jobs.setProcesses(j, pid, &pids);
-    try job.service(&session.jobs, .foreground, j);
+    try serviceForeground(session, j);
     session.drainProcSubs();
     const result: Result = j.result orelse Result{ .exited = 1 };
     return .{ .job = j, .expression_result = result };
+}
+
+/// Block on a foreground job, wrapping the wait in tty handoff so the
+/// resumed/spawned process group owns the controlling terminal for the
+/// duration of the wait. After the job stops or completes, take the
+/// terminal back so the shell's own prompt and readline keep working.
+/// PLAN §11 must-get-right "terminal control".
+fn serviceForeground(session: *Session, j: *Job) !void {
+    if (session.controlling_tty_fd) |tty_fd| {
+        if (j.pgid > 0) _ = exec.tcSetPgrp(tty_fd, j.pgid);
+    }
+    defer {
+        if (session.controlling_tty_fd) |tty_fd| {
+            if (session.shell_pgid > 0) _ = exec.tcSetPgrp(tty_fd, session.shell_pgid);
+        }
+    }
+    try job.service(&session.jobs, .foreground, j);
 }
 
 // =============================================================================
@@ -730,7 +747,7 @@ fn evalPipeline(
 
     const j = try session.jobs.create(true, false, "<pipeline>");
     try session.jobs.setProcesses(j, leader_pgid, pids);
-    try job.service(&session.jobs, .foreground, j);
+    try serviceForeground(session, j);
     session.drainProcSubs();
     const result: Result = j.result orelse Result{ .exited = 1 };
     return .{ .job = j, .expression_result = result };
@@ -888,7 +905,7 @@ fn evalSubshell(
     const j = try session.jobs.create(true, false, "<subshell>");
     var pids = [_]exec.Pid{pid};
     try session.jobs.setProcesses(j, pid, &pids);
-    try job.service(&session.jobs, .foreground, j);
+    try serviceForeground(session, j);
     const result: Result = j.result orelse Result{ .exited = 1 };
     return .{ .job = j, .expression_result = result };
 }
@@ -1007,6 +1024,7 @@ fn spawnCommandNoWait(
     const j = try session.jobs.create(false, true, exe_text);
     var pids = [_]exec.Pid{pid};
     try session.jobs.setProcesses(j, pid, &pids);
+    session.last_bg_pid = pid;
     return .{ .job = j, .expression_result = .{ .exited = 0 } };
 }
 
@@ -1075,6 +1093,10 @@ fn spawnPipelineNoWait(
 
     const j = try session.jobs.create(false, true, "<pipeline>");
     try session.jobs.setProcesses(j, leader_pgid, pids);
+    // POSIX `$!` is the last process in a backgrounded pipeline (the
+    // one whose exit status `wait $!` reports). For a single command
+    // that's the only pid; for `a | b | c &` it's `c`'s pid.
+    session.last_bg_pid = pids[pids.len - 1];
     return .{ .job = j, .expression_result = .{ .exited = 0 } };
 }
 
@@ -1426,12 +1448,19 @@ fn wordHasGlob(word: Word) bool {
 
 fn lookupSpecial(name: []const u8, session: *Session, scratch: Allocator) !?[]const u8 {
     if (name.len == 0) return null;
-    // Magic params.
     if (std.mem.eql(u8, name, "?")) {
         return try std.fmt.allocPrint(scratch, "{d}", .{session.last_status});
     }
     if (std.mem.eql(u8, name, "$")) {
         return try std.fmt.allocPrint(scratch, "{d}", .{std.c.getpid()});
+    }
+    // `$!` — pid of the most recently launched background job. Empty
+    // string when no bg job has been launched yet (matches bash).
+    if (std.mem.eql(u8, name, "!")) {
+        if (session.last_bg_pid) |pid| {
+            return try std.fmt.allocPrint(scratch, "{d}", .{pid});
+        }
+        return try scratch.dupe(u8, "");
     }
     return null;
 }
