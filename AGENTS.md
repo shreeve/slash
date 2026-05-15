@@ -19,14 +19,15 @@ an AI shell.
 
 ## Architecture
 
-Four-stage pipeline:
+Three-stage execution model — three transitions across four
+representations:
 
 ```
 source  →  Shape  →  Program  →  Job
          (parse)    (lower)      (run)
 ```
 
-| Stage   | Layer       | Responsibility                                       |
+| Layer   | Kind        | Responsibility                                       |
 |---------|-------------|------------------------------------------------------|
 | Source  | bytes       | Raw user input                                       |
 | Shape   | syntactic   | Parsed structure, span-bearing, source-faithful      |
@@ -67,8 +68,10 @@ source  →  Shape  →  Program  →  Job
 - **`src/history.zig`** — slash-side persistent command-history index
   with cwd / ts / status / duration metadata, JSONL persistence under
   XDG, and a frecency + cwd-boost + recency ranking API. Substrate
-  for the `history` builtin and (eventually) smart Up/Down + Ctrl-R
-  reverse search. PLAN §12: editor-time only, no shell expansion.
+  for the `history` builtin and smart prefix-aware Up/Down navigation
+  (both shipped); also the ranking source for the ROADMAP autosuggestion
+  and Ctrl-R search-UI items. PLAN §12: editor-time only, no shell
+  expansion.
 - **`src/vars.zig`** — `VarStore`: scalar and list variables, exported
   flag.
 - **`src/runtime.zig`** — `Result`, `Signal`, status-byte conversion.
@@ -119,10 +122,15 @@ is wrong.
 - **Zig 0.16.** `std.posix.fork`/`waitpid`/`pipe`/`close`/`dup2`/`_exit`
   were removed; use `std.c.*` with `std.c.errno(rc)`. See
   `ZIG-0.16.0.md`.
-- **No temporal framing.** Don't write "currently does X but later will do
-  Y", "deferred to phase 2", "TODO add this", or "for now we just". Code
-  describes what *is*. Features that haven't shipped yet simply aren't
-  referenced. The ROADMAP is where future work lives.
+- **No temporal framing in code comments or stable design docs.** Don't
+  write "currently does X but later will do Y", "deferred to phase 2",
+  "TODO add this", or "for now we just" in source comments or in
+  `PLAN.md` / `AGENTS.md` / `README.md` / `CHECKLIST.md`. Code
+  describes what *is*. Features that haven't shipped yet simply
+  aren't referenced. Future work belongs in `ROADMAP.md`; empirical
+  history belongs in `VALIDATION.md`; pickup state belongs in
+  `HANDOFF.md`. Those three are the legitimate homes for "what's
+  next" / "what was" / "what's now".
 - **Comments explain non-obvious intent, trade-offs, or constraints.**
   Don't narrate what the code does line-by-line.
 - **Public-API names are real English words a Unix engineer

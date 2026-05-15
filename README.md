@@ -12,10 +12,11 @@
 
 Slash is a Unix shell written in Zig. It parses each line into a `Shape`,
 lowers it into an immutable `Program`, and runs it as an inspectable
-`Job`. One grammar drives parsing, highlighting, completion, and
-formatting. `argv` is never flattened to a string. Pipelines are
-structured. Job control is first-class. There is no `set -e` magic, no
-implicit word-splitting, no hidden coercion.
+`Job`. One grammar drives parsing and editor-facing syntax work;
+completion and formatting must use the same grammar rather than
+separate tokenizers. `argv` is never flattened to a string. Pipelines
+are structured. Job control is first-class. There is no `set -e`
+magic, no implicit word-splitting, no hidden coercion.
 
 Slash runs programs. It does not try to be a language.
 
@@ -86,11 +87,20 @@ jobs; fg %1
 ## Interactive UX
 
 Slash commits to fish-class interactive UX without becoming a
-programming language: syntax highlighting as you type, abbreviations
-(`str`), intelligent completions, rich prompts, smart history (per-cwd,
-frecency, dedup), autosuggestions. The line editor is
+programming language. The line editor is
 [zigline](https://github.com/shreeve/zigline). See [`PLAN.md`](./PLAN.md)
 §12 for the in-scope/out-of-scope split.
+
+What ships today:
+
+- syntax highlighting as you type (BaseLexer-driven; one grammar)
+- `str` abbreviations (literal-bytes-to-literal-bytes editor rewrites)
+- persistent metadata-rich command history (per-cwd, frecency, dedup)
+- smart prefix-aware Up/Down navigation
+- pre-prompt status notices (`slash: exit N (SIGNAME)`)
+- live job-state announcements (`[N] Stopped`, `[N] Continued`)
+
+See [`ROADMAP.md`](./ROADMAP.md) for remaining release work.
 
 ```sh
 # `str` — editor-only literal-text rewrites. Strict literal bytes →

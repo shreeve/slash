@@ -218,7 +218,7 @@ kill(pid, SIGINT)
 Checklist:
 
 - [x] Ctrl-C hits the entire foreground pipeline (kernel routes via tty foreground pgrp = pipeline pgid; validated by PTY test "Ctrl-\ sends SIGQUIT" + manual run 2026-05-14 test 3)
-- [x] Ctrl-Z stops the entire foreground pipeline (PTY test "Ctrl-Z stops a foreground sleep, fg resumes" + manual run 2026-05-14 test 4)
+- [x] Ctrl-Z stops the entire foreground pipeline (PTY test "Ctrl-Z stops a foreground sleep, fg resumes" + "Ctrl-Z in a pipeline emits one Stopped notice for the pipeline" — confirms the aggregate pipeline Job state goes `.stopped` rather than mixed; manual run 2026-05-14 test 4 + 2026-05-15 test 10)
 - [x] shell itself survives (interactive shell ignores INT/QUIT/TSTP; verified by tests + manual)
 - [x] resumed jobs continue as one group (`fgFn` SIGCONTs the entire pgrp via `kill(-pgid, .CONT)`)
 
@@ -383,7 +383,7 @@ Required validation set:
 Behavioral tests:
 
 - [x] Ctrl-C interrupts foreground job only (manual run test 3 + PTY test "Ctrl-\ SIGQUIT to fg")
-- [x] Ctrl-Z suspends foreground job only (manual run test 4 + PTY test "Ctrl-Z stops a foreground sleep")
+- [x] Ctrl-Z suspends foreground job only (manual run 2026-05-14 test 4; targeted run 2026-05-15 tests 5, 9–11; PTY tests "Ctrl-Z stops a foreground sleep, fg resumes it", "Ctrl-Z auto-notices Stopped and fg auto-notices Continued", "Ctrl-Z in a sequence suspends the rest of the sequence" — `outcomeStopped` propagates the stop up through evalSequence/evalWhile/evalFor so the abandoned tail does not run, "Ctrl-Z in a pipeline emits one Stopped notice for the pipeline", "Ctrl-Z does not emit a redundant 'slash: exit' notice")
 - [x] fg restores terminal ownership (manual run test 4: `fg` resumed sleep cleanly; `terminal.giveToJob` does the handoff)
 - [x] bg resumes without terminal ownership (PTY test "Ctrl-Z then bg lets the job finish without blocking" — bg builtin doesn't touch tty ownership)
 - [x] background jobs cannot steal stdin (kernel SIGTTIN-stops them; PTY test "cat & stops with SIGTTIN" + manual run test 2)
@@ -444,25 +444,7 @@ Relevant files:
 
 ---
 
-# 15. Future Runtime Goals
-
-## Future runtime goals
-
-Potential future enhancements:
-
-- signalfd backend on Linux
-- kqueue EVFILT_PROC backend on macOS
-- pidfd integration on Linux
-- structured tty layer
-- async job notifications
-- pty integration layer
-- shell-safe cancellation primitives
-- runtime tracing/debug mode
-- deterministic shell integration tests
-
----
-
-# 16. Canonical Validation Commands
+# 15. Canonical Validation Commands
 
 ## Required validation commands
 
@@ -521,7 +503,7 @@ node
 
 ---
 
-# 17. Operational Philosophy
+# 16. Operational Philosophy
 
 ## Shell philosophy
 
@@ -548,7 +530,7 @@ Correct shell behavior is primarily determined by:
 
 ---
 
-# 18. Key Lessons Extracted from CS61
+# 17. Key Lessons Extracted from CS61
 
 ## High-value lessons extracted
 

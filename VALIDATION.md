@@ -89,3 +89,56 @@ The foundation is solid under real interactive software. vim / less / top / man 
 Per the post-validation plan: this is the "core solid" milestone. Slash is ready for the interactive UX phase.
 
 ---
+
+## Run: 2026-05-15 19:55 UTC
+
+- commit: `82ac1b0` (notice: drop leading \r\n on stop notice)
+- os: Darwin 25.4.0 arm64 (macOS, M-series)
+- slash binary: `bin/slash` (ReleaseFast)
+- operator: shreeve
+- mode: targeted re-validation of the F3-placement closure + the new
+  job-state announcement mechanism (`src/notice.zig`). Exercised the
+  status-notice and live-state-announcement paths interactively at
+  the prompt.
+
+| # | test | result | note |
+|---|---|---|---|
+| 1 | status notice on `false` | PASS | `slash: exit 1` on its own dim line above the next prompt |
+| 2 | status notice with signal name | PASS | `sleep 30` + Ctrl-C → `slash: exit 130 (SIGINT)` |
+| 3 | status notice clears | PASS | `false` then `true` → notice fires once, next prompt is silent |
+| 4 | status notice plain on non-signal exit | PASS | `sh -c "exit 42"` → `slash: exit 42`, no spurious signal name |
+| 5 | Ctrl-Z auto-notice | PASS | `sleep 30` Ctrl-Z → `[1] Stopped sleep 30` immediately, no need to run `jobs` |
+| 6 | `fg` continued notice | PASS | resumed sleep prints `[1] Continued sleep 30` |
+| 7 | `bg` continued notice with `&` | PASS | `[1] Continued sleep 30 &` — `&` suffix matches the launch convention |
+| 8 | `fg`/`bg` on already-running silent | PASS | `sleep 30 &` then `bg %1` → no Continued line; idempotent |
+| 9 | sequence-after-Ctrl-Z suspends | PASS | `sleep 30; echo HI` after Ctrl-Z does NOT run `echo HI`; matches bash/zsh |
+| 10 | pipeline Ctrl-Z aggregate | PASS | `sleep 30 \| cat` Ctrl-Z → exactly one `[1] Stopped` notice for the pipeline as a whole |
+| 11 | no redundant `slash: exit` on stop | PASS | Ctrl-Z'd job leaves session at `[N] Stopped` only — no spurious `slash: exit` for the placeholder result |
+| 12 | prompt is clean (no `[N]` badge) | PASS | the failing-command exit-status badge moved out of the prompt entirely |
+
+**Tally:** 12 PASS, 0 FAIL, 0 SKIP.
+
+### Findings
+
+None new. F3 closure (commits `46a13b7` + `82ac1b0`) is confirmed
+visually. The corresponding PTY tests (`tests/pty_tests.zig` —
+`nonzero last-status surfaces as 'slash: exit N' notice`,
+`status notice names signal when foreground is Ctrl-C'd`,
+`Ctrl-Z auto-notices Stopped and fg auto-notices Continued`,
+`Ctrl-Z in a sequence suspends the rest of the sequence`,
+`Ctrl-Z in a pipeline emits one Stopped notice for the pipeline`,
+`bg announces '[N] Continued <command> &'`,
+`bg on already-running job is silent`,
+`Ctrl-Z does not emit a redundant 'slash: exit' notice`) are all
+green at this commit.
+
+### Verdict
+
+F3-placement is closed. The first wave of interactive UX (`str`
+abbreviations, persistent metadata-rich history, smart prefix-aware
+Up/Down, pre-prompt status notices, live job-state announcements)
+all behave correctly under real keystrokes. Slash is ready to move
+to the next ROADMAP item — autosuggestions are the natural pickup
+since the `HistoryIndex` substrate is already in.
+
+---

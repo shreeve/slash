@@ -5,21 +5,23 @@ the smallest set of pointers a fresh AI session needs to be productive in
 a single sitting. Read this in order; everything else is reachable from
 the links inside.
 
-If you're a human: same advice. The doc is short on purpose.
+If you're a human: same advice. The doc is curated on purpose — it's
+the smallest map that's still useful for picking up the project.
 
 ---
 
 ## What Slash is in one paragraph
 
-Slash is a Unix shell with a precise four-stage execution model
-(`source → Shape → Program → Job`), one grammar driving every text-shape
-concern, structured pipelines, first-class job control, and an explicit
-commitment to interactive UX (autosuggestions, abbreviations via `str`,
-smart history, syntax highlighting, intelligent completions, rich
-prompts) — **without becoming a programming language**. The kernel
-stays small; the surface is principled. AI may produce source or
-`Program`s but never auto-runs them. See `PLAN.md` §1 for the full
-statement of intent.
+Slash is a Unix shell with a precise three-stage execution model
+(`source → Shape → Program → Job` — three transitions across four
+representations), one grammar driving every text-shape concern,
+structured pipelines, first-class job control, and an explicit
+commitment to interactive UX (autosuggestions, abbreviations via
+`str`, smart history, syntax highlighting, intelligent completions,
+rich prompts) — **without becoming a programming language**. The
+kernel stays small; the surface is principled. AI may produce
+source or `Program`s but never auto-runs them. See `PLAN.md` §1 for
+the full statement of intent.
 
 ---
 
@@ -30,9 +32,10 @@ statement of intent.
 | [`AGENTS.md`](./AGENTS.md) | The contributor rules. **The §14 test** ("does this improve `Command` clarity, `Pipeline` correctness, `Program` composability, or `Job` control?") is the only filter that decides whether a feature ships. Read this first; it's the shortest. |
 | [`PLAN.md`](./PLAN.md) | The design constitution. Long. §1 (vision), §7 (semantic rules), §12 (in/out of scope), §14 (the §14 test) are the load-bearing parts. Everything else is reachable from there. |
 | [`CHECKLIST.md`](./CHECKLIST.md) | The operational correctness rubric. Process groups, terminal ownership, signal discipline, etc. **75/77 boxes checked** with inline evidence pointers (file/function/test for every claim). Two unchecked items both deferred for the same reason: no rapid-stop/continue stress test. |
-| [`VALIDATION.md`](./VALIDATION.md) | The empirical log. First run on 2026-05-14 was **14/14 PASS** against real interactive software (vim, less, top, ssh, python, node, nested shells, yes-pipe). Findings are tracked in numbered F-entries; F1, F2, F3 (both stickiness and placement), F4 are all FIXED. |
-| [`ROADMAP.md`](./ROADMAP.md) | What's left. Currently the remaining interactive-UX phase — six items, two of them blocked on zigline 0.4.0. |
+| [`VALIDATION.md`](./VALIDATION.md) | The empirical log. First run on 2026-05-14 was **14/14 PASS** against real interactive software (vim, less, top, ssh, python, node, nested shells, yes-pipe). Findings are tracked in numbered F-entries; F1, F2, F3 (both stickiness and placement), F4 are all FIXED. Second run on 2026-05-15 confirmed the F3 + notice closure interactively. |
+| [`ROADMAP.md`](./ROADMAP.md) | What's left. Currently the remaining interactive-UX phase — six items: three ready now, three blocked on missing zigline primitives. Two of the blockers are tracked as zigline 0.4.0; autosuggestions need ghost-text rendering, which lives in `zigline/FUTURE.md` without a specific release number. |
 | [`README.md`](./README.md) | What slash looks like to a user. Public surface. |
+| [`ZIG-0.16.0.md`](./ZIG-0.16.0.md) | Reference for Zig 0.16's API shifts (Juicy Main, `std.Io`, `std.posix` shrinkage, format-string changes). Most LLM training cutoffs predate this; if a Zig API surprise comes up, the answer is almost certainly here. |
 
 If you only have time for two: **AGENTS.md** and **CHECKLIST.md**.
 
@@ -76,13 +79,15 @@ slash/
 │   ├── diagnostics.zig # Diagnostic, Sink, error codes (SH/LW/EV/EX/JB)
 │   └── main.zig        # CLI entry — `-c`, scripts, REPL, dump modes
 ├── tests/
-│   ├── headless_tests.zig  # in-process integration tests (~236 cases);
-│   │                       # imports src/* via ../src/foo.zig
+│   ├── headless_tests.zig  # unit + in-process integration tests;
+│   │                       # currently 45 tests via test_root.zig
 │   └── pty_tests.zig       # PTY-driven tests for raw mode + job control;
-│                           # spawns built bin/slash against a real pty
+│                           # currently 46 tests; spawns built bin/slash
+│                           # against a real pty
 ├── scripts/
 │   └── validate-interactive.sh  # the 14-test interactive validation harness
-└── PLAN.md, CHECKLIST.md, VALIDATION.md, ROADMAP.md, README.md, AGENTS.md
+└── PLAN.md, CHECKLIST.md, VALIDATION.md, ROADMAP.md, README.md,
+   AGENTS.md, ZIG-0.16.0.md
 ```
 
 The grammar engine [`nexus`](https://github.com/shreeve/nexus) lives in a
@@ -112,16 +117,18 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: 236 headless cases, 46 PTY cases. All
-green and reliable on repeated runs. The two ex-flaky PTY tests
-(`Ctrl-Z stops a foreground sleep`, `cat & SIGTTIN`) were diagnosed
-and fixed in commit `14f5e4a` — root cause was Ctrl-Z arriving before
-slash finished `fork+exec+tcsetpgrp`, with the signal silently dropped
-because both parent and pre-exec child inherited slash's
-SIGTSTP-ignore. The fix uses `sleep 30` + 800 ms initial settle +
-`wait_for "Stopped"` (the `Step.wait_for` field added in the same
-commit polls in 50 ms slices for an expected output substring,
-turning a fixed-window settle into a max-wait-with-early-exit).
+**Test totals as of this handoff**: **91/91 passing** — 45 in the
+unit + headless suite (`zig build test-headless`) and 46 in the PTY
+suite (`zig build test-pty`). All green and reliable on repeated
+runs. The two ex-flaky PTY tests (`Ctrl-Z stops a foreground
+sleep`, `cat & SIGTTIN`) were diagnosed and fixed in commit
+`14f5e4a` — root cause was Ctrl-Z arriving before slash finished
+`fork+exec+tcsetpgrp`, with the signal silently dropped because
+both parent and pre-exec child inherited slash's SIGTSTP-ignore.
+The fix uses `sleep 30` + 800 ms initial settle + `wait_for
+"Stopped"` (the `Step.wait_for` field added in the same commit
+polls in 50 ms slices for an expected output substring, turning a
+fixed-window settle into a max-wait-with-early-exit).
 
 PTY-test isolation: tests share `XDG_DATA_HOME=/tmp/slash-pty-tests-xdg`
 and `HOME=/tmp/slash-pty-tests-xdg` (set via `setenv` in `spawnSlash`)
@@ -188,43 +195,120 @@ so the JSONL history index doesn't pollute the user's real
 
 ## What to do next
 
-Six items left in `ROADMAP.md`, in rough order of leverage:
+Six items left in `ROADMAP.md`, grouped by readiness:
 
-1. **Autosuggestions** — dim ghost text predicted from history;
-   accept on right-arrow / Ctrl-F. The substrate (`HistoryIndex`)
-   is already in place from commit `a0fd0e0` — autosuggestions
-   should consume the same ranked-prefix search API rather than
-   inventing a parallel ranking system. ~1–2 days.
-2. **Intelligent tab completions** — per-command completion specs
+### Ready now (3 items)
+
+1. **Intelligent tab completions** — per-command completion specs
    as declarative data. Starter specs: `git`, `cd`, `ssh`, `kill`,
-   `fg`/`bg`, `cmd`, `str`. Specs live in a registry loaded from
-   config; no completion script ever runs arbitrary slash code at
-   completion time beyond the explicit dynamic-source hook. ~2–3
-   days for the framework + first specs.
-3. **Rich prompt** — extend the prompt provider set (jobs count,
+   `fg`/`bg`, `cmd`, `str`. zigline 0.2.x already provides the
+   completion hook + multi-column menu (slash's `completionHook` in
+   `repl.zig` uses them); this work is the slash-side spec registry
+   and starter specs. **This is the highest-leverage next pickup.**
+   ~2–3 days for framework + first specs.
+
+   *Implementation shape:*
+   - `repl.zig` owns only the zigline `completionHook` adapter.
+   - Put slash-side data / model / ranking in a focused new module:
+     `src/completion.zig`.
+   - Specs are declarative records: command name, argument position,
+     static candidates, flag metadata, path filters, and explicit
+     provider IDs.
+   - Dynamic candidates are explicit bounded providers, not sourced
+     completion scripts and not arbitrary slash evaluation. If a
+     provider runs a command, it takes an argv vector, has a short
+     timeout, reads newline-delimited stdout, treats failure as no
+     candidates, and never mutates shell state.
+   - Command-position completion combines builtins, external PATH
+     commands, user `cmd` definitions, and relevant `str` names.
+   - The existing grammar / lexer is the source for locating
+     command/word position; do not add regex tokenization.
+
+   *Definition of done:*
+   - `cd <TAB>` lists directories only and preserves quoting.
+   - `fg %<TAB>` / `bg %<TAB>` list current job specs.
+   - `kill -<TAB>` lists signal names; `kill <TAB>` can list jobs/pids.
+   - `str -e <TAB>` lists defined `str` names.
+   - `git <TAB>` lists starter git subcommands without invoking the
+     git completion scripts.
+   - completion never executes arbitrary slash code while the user
+     is only pressing Tab.
+   - PTY tests pin each of the above.
+
+2. **Rich prompt** — extend the prompt provider set (jobs count,
    git context, virtualenv, host/user, time). Fixed providers, no
    user-defined "prompt is a function." Ship a small set of
    defaults (default, plain, minimal) and a config knob to compose
-   the providers. ~1 day.
-4. **Syntax highlighting polish** — already shipped as a feature;
+   the providers. Pure slash work, no zigline dependency. **Smallest,
+   quickest dopamine.** ~1 day.
+
+   *Implementation shape:*
+   - Put prompt providers in a focused module: `src/prompt.zig` (or
+     extend the existing `expandPromptFormat` machinery in `repl.zig`
+     if the expansion stays bounded).
+   - Providers read from `Session`, cwd / env, and cached status only;
+     they never evaluate slash code.
+   - Providers must be bounded and fast. Git context degrades to
+     empty on timeout / error.
+   - Config selects a preset and / or a provider list; no prompt
+     function hook.
+   - Use the existing `$PROMPT` / `~/.slashrc` mechanism for selection;
+     do **not** introduce a general prompt scripting / config subsystem
+     just to ship presets.
+
+   *Definition of done:*
+   - PTY tests cover the default prompt, plain / minimal presets,
+     nonzero-status display, background / stopped job count, and
+     git-provider failure fallback.
+
+3. **Syntax highlighting polish** — already shipped as a feature;
    expand the token classes (variables, command substitutions,
    redirects, glob parts, heredoc bodies). Always driven by the
-   BaseLexer / one grammar — never a second tokenizer. ~half day.
+   BaseLexer / one grammar — never a second tokenizer. Uses zigline's
+   existing highlight hook. ~half day.
 
-Two more items are blocked on **zigline 0.4.0**, which needs a
-transient-input-mode primitive (a result variant that combines
-`replace_buffer` with `accept_line` in one step, and a way to
-overlay a search-mode UI without faking it via in-buffer hacks):
+### Blocked on zigline (3 items)
 
+Each item names the specific zigline addition it waits on. The
+recommended escalation path is to file (or contribute) the missing
+primitive in zigline before unblocking these on the slash side.
+
+4. **Autosuggestions** — dim ghost text predicted from history;
+   accept on right-arrow / Ctrl-F. The substrate (`HistoryIndex`)
+   is in place from commit `a0fd0e0` — autosuggestions must consume
+   the same ranked-prefix search API, not invent a parallel ranking
+   system.
+   - **Blocker:** zigline 0.3.1 does **not** render virtual ghost
+     text past the end of the editable buffer. The existing
+     highlight hook only styles existing buffer text. Ghost-text
+     rendering is listed in `/Users/shreeve/Data/Code/zigline/FUTURE.md`
+     as "Hints (ghost text). Right-of-cursor suggestion rendering.
+     Fish-style." It isn't tied to a specific zigline release; could
+     ship in any 0.x.
+   - **Do not fake it** by inserting bytes into the editable buffer
+     — that violates the UX semantic (the suggestion isn't the
+     user's command until they accept it).
+   - When unblocked, the wire-up is small: `repl.zig`'s existing
+     zigline config hosts the highlight, smart Up/Down, and `str`
+     hooks; the autosuggestion render hook lands in the same
+     neighborhood. Acceptance (Right Arrow / Ctrl-F) replaces the
+     editable buffer with the suggested line; normal Enter runs it.
+     PTY tests should pin: prefix renders suggestion; Right
+     Arrow / Ctrl-F accepts; Enter without accept runs only the
+     typed prefix; suggestion comes from the test XDG fixture.
 5. **`str` Enter trigger** — currently `str` only expands on Space.
    Enter on an unexpanded `str` candidate would either submit the
-   LHS literally or require a second Enter — both wrong. Wire
-   up here when zigline 0.4.0 ships `replace_buffer_and_accept`.
-6. **Smart history Ctrl-R interactive search** — substrate is
-   shipped; only the modal-input UI is missing. We agreed
-   explicitly NOT to fake it via in-buffer hacks (worse than not
-   having it). Wire up here when zigline 0.4.0 lands the
-   transient-input-mode primitive.
+   LHS literally or require a second Enter — both wrong.
+   - **Blocker:** zigline 0.4.0 `replace_buffer_and_accept` (a
+     result variant that combines `replace_buffer` with `accept_line`
+     in one step). When that lands, wire up in slash's
+     `customActionHook` — the trigger detection is already there.
+6. **Smart history Ctrl-R interactive search** — substrate shipped;
+   only the modal-input UI is missing. We agreed explicitly **not**
+   to fake it via in-buffer hacks (worse than not having it).
+   - **Blocker:** zigline 0.4.0 transient-input-mode primitive (a
+     way to overlay a temporary input UI without polluting the main
+     buffer). Wire up here when that lands.
 
 Each item passes the §14 test (improves `Command` clarity at the
 keystroke moment) but stops short of language semantics — see
@@ -251,9 +335,13 @@ reading those files first.
   is on by default. Variables are scalar or list (no string
   re-splitting hack). Quoted variable expansion preserves field
   boundaries.
-- **No temporal framing in code or docs.** Don't write "currently does
-  X but later will do Y". Code describes what *is*. Future work lives
-  in `ROADMAP.md`, not in inline TODOs.
+- **No temporal framing in code comments or stable design docs.**
+  Don't write "currently does X but later will do Y" in source
+  comments, `PLAN.md`, `AGENTS.md`, `README.md`, or `CHECKLIST.md`.
+  Code describes what *is*. Future work belongs in `ROADMAP.md`;
+  empirical history belongs in `VALIDATION.md`; pickup state belongs
+  in `HANDOFF.md` (this file). Those four are the legitimate homes
+  for "what's next" / "what was" / "what's now"; nothing else is.
 - **Comments explain non-obvious intent.** Don't narrate what code
   does line-by-line. Don't explain the change being made.
 - **When you ship a `ROADMAP.md` item, delete the bullet** in the
@@ -263,6 +351,40 @@ reading those files first.
   evidence pointer or add one. The checklist is a living artifact.
 - **Edit `slash.grammar`, never `src/parser.zig`.** Regenerate via
   nexus. Commit grammar and generated parser together.
+- **Foreground `.stopped` propagates monotonically.** When a Ctrl-Z
+  stops the foreground job, every iterating container (`evalSequence`,
+  `evalWhile`, `evalFor`) must check `outcomeStopped(out)` after each
+  nested `evalProgram` and break. `runForeground` then suppresses the
+  `slash: exit N` notice via `status_pending = !job_stopped` so the
+  `[N] Stopped <command>` notice is the sole signal. Match this pattern
+  if you add a new iterating construct.
+
+---
+
+## Sanity check before commit
+
+A short pre-commit ritual that's caught real bugs across this session:
+
+1. **`zig build test`** — must be 91/91 green (or whatever the new
+   total is after your tests). A single red test means the commit
+   isn't ready.
+2. **§14 self-test** — say out loud which axis the change improves
+   (`Command` clarity / `Pipeline` correctness / `Program`
+   composability / `Job` control). If you can't, it doesn't ship.
+3. **Live interactive smoke** — for any change that touches
+   `repl.zig`, `eval.zig`, `terminal.zig`, `builtins.zig`, or
+   `notice.zig`, run `zig build -Doptimize=ReleaseFast && ./bin/slash
+   --norc` and exercise at least: `false` → notice; `sleep 30 ^C` →
+   notice; `sleep 30 ^Z` → notice; `fg` / `bg`. Five minutes of
+   keystrokes vs. an hour of debugging a regression.
+4. **GPT 5.5 review** — see next section. Apply every catch.
+5. **Update docs in the same commit**: `ROADMAP.md` (delete the
+   shipped bullet), `CHECKLIST.md` (add the evidence pointer if
+   relevant), `VALIDATION.md` (add a run entry if interactive UX
+   changed), `HANDOFF.md` (only if the file map / "what's left"
+   genuinely shifted).
+
+This loop is the difference between "passes tests" and "is shipped".
 
 ---
 
@@ -299,6 +421,8 @@ single-dollar range.
 ## Recent history (last 12 commits)
 
 ```
+82ac1b0 notice: drop leading \r\n on stop notice (visual cleanup)
+09a5791 docs: refresh HANDOFF + ROADMAP after str + history work
 c7f2570 chore: regenerate parser.zig against nexus v0.10.3
 46a13b7 notice: pre-prompt status + live job-state announcements (closes F3)
 abab621 history: smart prefix-aware Up/Down navigation
@@ -309,8 +433,6 @@ bd598bb str: editor-only literal-text rewrites (PLAN §12)
 60812d3 Add HANDOFF.md — single-file pickup doc for a fresh AI session.
 0b36e4e Use zigline.pokeActiveFreshRow (v0.3.1) instead of direct tty write.
 715a4e1 VALIDATION.md: F2 closed, F3 stickiness closed, F4 added and closed.
-d53ce67 Fix F2 properly + F3 stickiness + F4 comment-only continuation.
-c514318 Fix F2: ensure ECHOCTL+ISIG on for user-mode termios.
 ```
 
 Read commit messages — they're long on purpose and explain the *why*
