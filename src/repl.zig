@@ -1129,15 +1129,16 @@ fn evaluatePending(
     alloc: Allocator,
     pending: *std.ArrayListUnmanaged(u8),
 ) !u8 {
-    // Whitespace-only input: pressing Enter on an empty (or all-blanks)
-    // prompt is a real-world no-op. Without this short-circuit, the
-    // parser sees end-of-input where a statement was expected, emits
-    // a diagnostic at the very end of the buffer, and `isIncompleteParse`
-    // misreads that as "needs more input" — putting the REPL into the
-    // `... ` continuation prompt forever. Match bash/sh: empty Enter
-    // returns to a fresh prompt with no side effects.
-    const trimmed = std.mem.trim(u8, pending.items, " \t\n\r");
-    if (trimmed.len == 0) {
+    // Whitespace-/comment-only input: pressing Enter on an empty (or
+    // all-blanks) prompt is a real-world no-op. So is a line that
+    // contains only `# blah` comments. Without this short-circuit,
+    // the parser sees end-of-input where a statement was expected,
+    // emits a diagnostic at the very end of the buffer, and
+    // `isIncompleteParse` misreads that as "needs more input" —
+    // putting the REPL into the `... ` continuation prompt forever.
+    // Match bash/sh: comment-only or empty Enter returns to a fresh
+    // prompt with no side effects.
+    if (containsNoStatement(pending.items)) {
         pending.clearRetainingCapacity();
         return session.last_status;
     }
@@ -1177,6 +1178,32 @@ fn evaluatePending(
 
     pending.clearRetainingCapacity();
     return result.toStatusByte();
+}
+
+/// True if `text` contains no executable statement — only whitespace
+/// (spaces, tabs, newlines, carriage returns) and `#`-to-end-of-line
+/// comments. Used by `evaluatePending` to short-circuit Enter on
+/// blank or comment-only lines.
+///
+/// Doesn't try to handle `#` inside quoted strings — if the user has
+/// `"foo # bar"` on a line by itself, that line isn't a statement
+/// either (it's a bare word that errors), but this helper would
+/// route it through the normal parse path. The grammar will reject
+/// it and the user will see the real error, which is correct.
+fn containsNoStatement(text: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = text[i];
+        switch (c) {
+            ' ', '\t', '\n', '\r' => i += 1,
+            '#' => {
+                // Skip to end of line.
+                while (i < text.len and text[i] != '\n') i += 1;
+            },
+            else => return false,
+        }
+    }
+    return true;
 }
 
 /// True if every error-level diagnostic points at the very end of the
@@ -1318,39 +1345,20 @@ fn bootstrapInteractive(session: *session_mod.Session) void {
     session.shell_pgid = getpgrp();
     session.controlling_tty_fd = tty_fd;
 
-    // Step 7: snapshot the shell's terminal modes so they can be
-    // restored after every foreground job. Programs like vim/less/
-    // Python REPL push the tty into raw mode; without this snapshot,
-    // returning to the shell prompt leaves Slash in whatever mode the
-    // last foreground job was using.
+    // Step 7: snapshot the shell's terminal modes (as inherited from
+    // the parent shell, untouched) so they can be restored after
+    // every foreground job. Programs like vim/less/Python REPL push
+    // the tty into raw mode; without this snapshot, returning to the
+    // shell prompt leaves Slash in whatever mode the last foreground
+    // job was using.
     //
-    // Force the standard "user mode" cooked flags ON before saving:
-    // ECHO + ECHOE + ECHOK + ECHOCTL + ICANON + ISIG + IEXTEN on the
-    // input side, OPOST + ONLCR on the output side. This is the bash/
-    // zsh "user mode" termios — what user programs (sleep, cat, vim
-    // before it goes raw) expect to see.
-    //
-    // Concretely: ECHOCTL is what makes the kernel echo `^C` when the
-    // user presses Ctrl-C in front of a foreground job. Without it,
-    // pressing Ctrl-C kills the job correctly but provides no visual
-    // feedback — VALIDATION.md run 2026-05-14 finding F2.
+    // We deliberately DO NOT modify shell_termios here — modifying
+    // the parent-inherited baseline confused zigline's saved-termios
+    // bookkeeping (broke Ctrl-D EOF in the editor). The "user mode"
+    // termios distinction (ECHOCTL etc.) is applied at the point of
+    // handing the tty to a foreground job — see `terminal.giveToJob`.
     if (tty_fd) |fd| {
-        if (std.posix.tcgetattr(fd)) |raw_t| {
-            var t = raw_t;
-            t.lflag.ECHO = true;
-            t.lflag.ECHOE = true;
-            t.lflag.ECHOK = true;
-            t.lflag.ECHOCTL = true;
-            t.lflag.ICANON = true;
-            t.lflag.ISIG = true;
-            t.lflag.IEXTEN = true;
-            t.oflag.OPOST = true;
-            t.oflag.ONLCR = true;
-            // Push the user-mode termios onto the tty so the editor's
-            // first `enterRawMode` snapshots THIS as the saved state.
-            // Best-effort; if tcsetattr fails, we still save what we
-            // intended in shell_termios so reclaim restores it later.
-            std.posix.tcsetattr(fd, .DRAIN, t) catch {};
+        if (std.posix.tcgetattr(fd)) |t| {
             session.shell_termios = t;
         } else |_| {}
     }
@@ -1521,16 +1529,23 @@ extern fn strftime(buf: [*]u8, sz: usize, fmt: [*:0]const u8, tm: *const Tm) usi
 
 /// Top-level entry: dispatch to user-defined `$PROMPT` if set, else
 /// the built-in default. Returns a slice into `buf`.
-fn slashPrompt(buf: []u8, session: *const session_mod.Session) []const u8 {
+fn slashPrompt(buf: []u8, session: *session_mod.Session) []const u8 {
     if (session.vars.get("PROMPT")) |v| switch (v.value) {
-        .scalar => |raw| return expandPromptFormat(buf, session, raw),
+        .scalar => |raw| {
+            const out = expandPromptFormat(buf, session, raw);
+            session.status_pending = false;
+            return out;
+        },
         .list => {},
     };
     return renderDefaultPrompt(buf, session);
 }
 
 /// Built-in default prompt. Pure ASCII; byte length == display width.
-fn renderDefaultPrompt(buf: []u8, session: *const session_mod.Session) []const u8 {
+/// Shows `[N]` only on the prompt that immediately follows a non-zero
+/// command result (see `Session.status_pending`) — not on every
+/// subsequent prompt while `$?` happens to stay non-zero.
+fn renderDefaultPrompt(buf: []u8, session: *session_mod.Session) []const u8 {
     var w = std.Io.Writer.fixed(buf);
 
     var cwd_buf: [4096]u8 = undefined;
@@ -1544,15 +1559,22 @@ fn renderDefaultPrompt(buf: []u8, session: *const session_mod.Session) []const u
     if (std.c.getenv("HOME")) |home_env| {
         const home = std.mem.span(home_env);
         if (home.len > 0 and std.mem.startsWith(u8, cwd, home)) {
-            w.writeAll("~") catch return "$ ";
+            w.writeAll("~") catch {
+                session.status_pending = false;
+                return "$ ";
+            };
             cwd = cwd[home.len..];
         }
     }
-    w.writeAll(cwd) catch return "$ ";
+    w.writeAll(cwd) catch {
+        session.status_pending = false;
+        return "$ ";
+    };
 
-    if (session.last_status != 0) {
+    if (session.status_pending and session.last_status != 0) {
         w.print(" [{d}]", .{session.last_status}) catch {};
     }
+    session.status_pending = false;
 
     const suffix: []const u8 = if (std.c.getuid() == 0) " # " else " $ ";
     w.writeAll(suffix) catch return "$ ";

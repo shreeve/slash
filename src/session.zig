@@ -204,6 +204,13 @@ pub const Session = struct {
     exit_request: ?runtime.Result,
     /// Last command's exit status (for `$?`).
     last_status: u8,
+    /// True iff `last_status` was set by a command that hasn't yet
+    /// surfaced in a prompt render. The default prompt shows `[N]`
+    /// only when this flag is true (and `last_status != 0`), then
+    /// clears the flag — so the indicator appears on the prompt
+    /// immediately after the failure but doesn't stick to every
+    /// subsequent prompt while `$?` remains non-zero.
+    status_pending: bool = false,
     /// PID of the most recently launched background job (for `$!`).
     /// `null` until at least one bg job has started in the session.
     last_bg_pid: ?std.c.pid_t = null,

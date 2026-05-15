@@ -41,17 +41,42 @@ const exec = @import("exec.zig");
 const Session = session_mod.Session;
 const Job = job_mod.Job;
 
-/// Hand the controlling terminal to the job's process group AND restore
-/// the job's saved terminal modes (vim raw, less cbreak, etc.).
+/// Hand the controlling terminal to the job's process group AND set
+/// the appropriate terminal modes:
 ///
-/// No-op when there's no controlling tty (non-interactive shape) or when
-/// the job has no real process group (zero-child shell-context jobs
-/// shouldn't be reaching this path anyway, but defensive).
+///   - If the job has a saved termios from a prior stop (it was `fg`'d
+///     after `Ctrl-Z`), restore that — vim wants its raw mode, less
+///     wants its cbreak mode, etc.
+///
+///   - Otherwise, install a "user-mode" termios derived from the shell's
+///     baseline by forcing the standard cooked-mode echo flags on:
+///     `ECHO|ECHOE|ECHOK|ECHOCTL|ICANON|ISIG|IEXTEN` on lflag,
+///     `OPOST|ONLCR` on oflag. This is the bash/zsh "shell mode →
+///     user mode" distinction. The load-bearing flag is `ECHOCTL`,
+///     which makes the kernel echo `^C` when Ctrl-C arrives at a
+///     foreground job — without it, pressing Ctrl-C kills the job
+///     but provides no visual feedback (VALIDATION.md F2).
+///
+/// No-op when there's no controlling tty (non-interactive shape) or
+/// when the job has no real process group (zero-child shell-context
+/// jobs shouldn't reach this path, but defensive).
 pub fn giveToJob(session: *Session, j: *Job) void {
     const tty_fd = session.controlling_tty_fd orelse return;
     if (j.pgid > 0) _ = exec.tcSetPgrp(tty_fd, j.pgid);
     if (j.termios) |t| {
         std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
+    } else if (session.shell_termios) |base| {
+        var user_t = base;
+        user_t.lflag.ECHO = true;
+        user_t.lflag.ECHOE = true;
+        user_t.lflag.ECHOK = true;
+        user_t.lflag.ECHOCTL = true;
+        user_t.lflag.ICANON = true;
+        user_t.lflag.ISIG = true;
+        user_t.lflag.IEXTEN = true;
+        user_t.oflag.OPOST = true;
+        user_t.oflag.ONLCR = true;
+        std.posix.tcsetattr(tty_fd, .DRAIN, user_t) catch {};
     }
 }
 
@@ -60,6 +85,13 @@ pub fn giveToJob(session: *Session, j: *Job) void {
 /// termios into `j.termios` first so a later `fg` can restore it.
 /// Then `tcsetpgrp(tty, shell_pgid)` and restore the shell's saved
 /// modes via `tcsetattr(DRAIN, shell_termios)`.
+///
+/// On `.done` with a signaled result, emit a `\r\n` to the tty so any
+/// kernel-echoed control character (`^C`, `^\`, `^Z`) sits on its own
+/// row before the editor's next render. zigline's render begins with
+/// `\x1b[2K\r` to clear the prompt row, which would otherwise wipe
+/// out the kernel echo. Bash and zsh both ensure a fresh row after a
+/// signaled foreground job for the same reason.
 ///
 /// `TCSADRAIN` waits for any in-flight output before the change so we
 /// don't truncate the program's last line.
@@ -70,6 +102,12 @@ pub fn reclaimForShell(session: *Session, j: *Job) void {
             if (std.posix.tcgetattr(tty_fd)) |t| {
                 j.termios = t;
             } else |_| {}
+        },
+        .done => |r| switch (r) {
+            .signaled => {
+                _ = std.c.write(tty_fd, "\r\n", 2);
+            },
+            else => {},
         },
         else => {},
     }

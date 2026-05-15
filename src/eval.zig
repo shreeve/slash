@@ -77,6 +77,11 @@ pub fn runForeground(
     const outcome = try evalProgram(prog, session, .{ .scratch = scratch }, sink);
     drainChildEvents(session);
     session.last_status = outcome.expression_result.toStatusByte();
+    // Mark this status as not-yet-displayed so the next prompt
+    // shows `[N]` once if non-zero (and not on every subsequent
+    // prompt while `$?` happens to stay non-zero — see
+    // `Session.status_pending`).
+    session.status_pending = true;
     return outcome.expression_result;
 }
 
