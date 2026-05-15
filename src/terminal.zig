@@ -37,6 +37,7 @@ const std = @import("std");
 const session_mod = @import("session.zig");
 const job_mod = @import("job.zig");
 const exec = @import("exec.zig");
+const zigline = @import("zigline");
 
 const Session = session_mod.Session;
 const Job = job_mod.Job;
@@ -86,15 +87,17 @@ pub fn giveToJob(session: *Session, j: *Job) void {
 /// Then `tcsetpgrp(tty, shell_pgid)` and restore the shell's saved
 /// modes via `tcsetattr(DRAIN, shell_termios)`.
 ///
-/// On `.done` with a signaled result, emit a `\r\n` to the tty so any
-/// kernel-echoed control character (`^C`, `^\`, `^Z`) sits on its own
-/// row before the editor's next render. zigline's render begins with
-/// `\x1b[2K\r` to clear the prompt row, which would otherwise wipe
-/// out the kernel echo. Bash and zsh both ensure a fresh row after a
-/// signaled foreground job for the same reason.
+/// On `.done` with a signaled result, ask zigline to ensure its next
+/// render starts on a fresh row. Without this, any kernel-echoed
+/// control character (`^C`, `^\`, `^Z`) gets wiped by the editor's
+/// `\x1b[2K\r` clear-line on the next prompt redraw. Bash and zsh
+/// ensure a fresh row after a signaled foreground job for the same
+/// reason; `zigline.pokeActiveFreshRow` (v0.3.1+) is the proper
+/// hook for it — Editor-scoped lifetime, so it works between
+/// `readLine` calls (which is exactly when we're calling it).
 ///
-/// `TCSADRAIN` waits for any in-flight output before the change so we
-/// don't truncate the program's last line.
+/// `TCSADRAIN` waits for any in-flight output before the termios
+/// change so we don't truncate the program's last line.
 pub fn reclaimForShell(session: *Session, j: *Job) void {
     const tty_fd = session.controlling_tty_fd orelse return;
     switch (j.state) {
@@ -104,9 +107,7 @@ pub fn reclaimForShell(session: *Session, j: *Job) void {
             } else |_| {}
         },
         .done => |r| switch (r) {
-            .signaled => {
-                _ = std.c.write(tty_fd, "\r\n", 2);
-            },
+            .signaled => zigline.pokeActiveFreshRow(),
             else => {},
         },
         else => {},
