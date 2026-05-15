@@ -40,12 +40,13 @@ shell code at editor events.
   accepted command with cwd / ts / status / duration, persists as
   JSONL under XDG, and exposes a frecency + cwd-boost + recency +
   prefix-vs-substring ranking API. The `history` builtin lists and
-  searches against the same index. What's pending is the
-  interactive Ctrl-R reverse-search UI, which needs a zigline 0.4.0
-  search-mode primitive (no clean way to fake transient input mode
-  without it). Smart prefix-aware Up/Down navigation against the
-  same index lands as a separate slash-side commit (no upstream
-  dependency).
+  searches against the same index. Smart prefix-aware Up/Down
+  navigation against the same index already ships (commit
+  `abab621` — empty buffer is chronological, non-empty buffer is
+  ranked). What's pending is the **interactive Ctrl-R
+  reverse-search UI**, which needs a zigline 0.4.0 search-mode
+  primitive (no clean way to fake transient input mode without
+  it).
 - **Intelligent tab completions.** Per-command completion specs as
   declarative data (subcommand sets, flag definitions, file-path
   filters, dynamic-source hooks where the source is a slash command
