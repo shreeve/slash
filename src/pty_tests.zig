@@ -578,6 +578,34 @@ test "slash pty: highlighter inside dq with $var emits string + variable colors"
 // the kernel's tty driver translating Ctrl-Z (byte 0x1A). The bookkeeping
 // invariants from PLAN §7 Rule 22 + §19 must hold under terminal pressure.
 
+test "slash pty: Ctrl-C in foreground job echoes `^C` (ECHOCTL on)" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // VALIDATION.md run 2026-05-14 finding F2: pressing Ctrl-C while a
+    // foreground job runs killed the job correctly (exit 130) but the
+    // kernel never echoed `^C` first, so the user had no visible
+    // feedback before the prompt returned. Bash and zsh both echo
+    // `^C` because their tty's lflag has ECHOCTL on. Our `bootstrap-
+    // Interactive` step 7 now forces ECHOCTL (plus ECHO/ECHOE/ECHOK/
+    // ICANON/ISIG/IEXTEN/OPOST/ONLCR) on before saving shell_termios,
+    // so the editor's enterRawMode snapshots a "user mode" baseline
+    // that includes the cooked-mode echo flags.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30\n", .settle_ms = 200 },
+        .{ .send = "\x03", .settle_ms = 300 }, // Ctrl-C → SIGINT
+        .{ .send = "echo back\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // The kernel echoes Ctrl-C as the literal two-byte sequence "^C"
+    // when ECHOCTL is on. Without our bootstrap fix, this would be
+    // absent.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "^C") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "back") != null);
+}
+
 test "slash pty: backgrounding with & prints [N] PID announcement" {
     if (!ptySupported()) return error.SkipZigTest;
 

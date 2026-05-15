@@ -1323,8 +1323,34 @@ fn bootstrapInteractive(session: *session_mod.Session) void {
     // Python REPL push the tty into raw mode; without this snapshot,
     // returning to the shell prompt leaves Slash in whatever mode the
     // last foreground job was using.
+    //
+    // Force the standard "user mode" cooked flags ON before saving:
+    // ECHO + ECHOE + ECHOK + ECHOCTL + ICANON + ISIG + IEXTEN on the
+    // input side, OPOST + ONLCR on the output side. This is the bash/
+    // zsh "user mode" termios — what user programs (sleep, cat, vim
+    // before it goes raw) expect to see.
+    //
+    // Concretely: ECHOCTL is what makes the kernel echo `^C` when the
+    // user presses Ctrl-C in front of a foreground job. Without it,
+    // pressing Ctrl-C kills the job correctly but provides no visual
+    // feedback — VALIDATION.md run 2026-05-14 finding F2.
     if (tty_fd) |fd| {
-        if (std.posix.tcgetattr(fd)) |t| {
+        if (std.posix.tcgetattr(fd)) |raw_t| {
+            var t = raw_t;
+            t.lflag.ECHO = true;
+            t.lflag.ECHOE = true;
+            t.lflag.ECHOK = true;
+            t.lflag.ECHOCTL = true;
+            t.lflag.ICANON = true;
+            t.lflag.ISIG = true;
+            t.lflag.IEXTEN = true;
+            t.oflag.OPOST = true;
+            t.oflag.ONLCR = true;
+            // Push the user-mode termios onto the tty so the editor's
+            // first `enterRawMode` snapshots THIS as the saved state.
+            // Best-effort; if tcsetattr fails, we still save what we
+            // intended in shell_termios so reclaim restores it later.
+            std.posix.tcsetattr(fd, .DRAIN, t) catch {};
             session.shell_termios = t;
         } else |_| {}
     }
