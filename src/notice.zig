@@ -69,16 +69,16 @@ pub fn pendingExitStatus(session: *Session) void {
     const result = session.last_result;
     var buf: [128]u8 = undefined;
     const text = formatExit(result, session.last_status, &buf) orelse return;
-    writeLineDim(text, .{});
+    writeLineDim(text);
 }
 
 /// Emit a job-state-change notice at the point of action.
 ///
-/// Stop notices follow a kernel-echoed `^Z` with no trailing newline,
-/// so `.stopped` is written with a leading `\r\n` to start the
-/// announcement on a fresh row. The other kinds happen at points
-/// where the cursor is already at column 0 (`fg` / `bg` after Enter,
-/// or post-prompt for idle done).
+/// All four kinds land at column 0 by the time we write: kernel
+/// echoes of `^Z` / `^C` already advance to the next line, and `fg`
+/// / `bg` / idle-done all fire after an Enter. So no special leading
+/// break is needed — the line just lands cleanly under whatever was
+/// last on screen.
 pub fn jobStateChange(session: *Session, j: *const Job, kind: JobNoticeKind) void {
     if (!session.interactive) return;
 
@@ -91,26 +91,15 @@ pub fn jobStateChange(session: *Session, j: *const Job, kind: JobNoticeKind) voi
         .done => formatDone(j, &buf) orelse return,
     };
 
-    const opts: WriteOpts = .{ .leading_break = (kind == .stopped) };
-    writeLineDim(text, opts);
+    writeLineDim(text);
 }
 
 // =============================================================================
 // Internals
 // =============================================================================
 
-const WriteOpts = struct {
-    /// When true, prefix the notice with `\r\n` so it starts on a
-    /// fresh row even if the cursor is mid-line (e.g. directly after
-    /// the kernel's `^Z` echo).
-    leading_break: bool = false,
-};
-
-fn writeLineDim(body: []const u8, opts: WriteOpts) void {
+fn writeLineDim(body: []const u8) void {
     const tty = std.c.isatty(STDERR) != 0;
-    if (opts.leading_break) {
-        _ = std.c.write(STDERR, "\r\n", 2);
-    }
     if (tty) {
         const dim = "\x1b[2m";
         _ = std.c.write(STDERR, dim, dim.len);
