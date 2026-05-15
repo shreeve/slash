@@ -33,7 +33,7 @@ the full statement of intent.
 | [`PLAN.md`](./PLAN.md) | The design constitution. Long. §1 (vision), §7 (semantic rules), §12 (in/out of scope), §14 (the §14 test) are the load-bearing parts. Everything else is reachable from there. |
 | [`CHECKLIST.md`](./CHECKLIST.md) | The operational correctness rubric. Process groups, terminal ownership, signal discipline, etc. **75/77 boxes checked** with inline evidence pointers (file/function/test for every claim). Two unchecked items both deferred for the same reason: no rapid-stop/continue stress test. |
 | [`VALIDATION.md`](./VALIDATION.md) | The empirical log. First run on 2026-05-14 was **14/14 PASS** against real interactive software (vim, less, top, ssh, python, node, nested shells, yes-pipe). Findings are tracked in numbered F-entries; F1, F2, F3 (both stickiness and placement), F4 are all FIXED. Second run on 2026-05-15 confirmed the F3 + notice closure interactively. |
-| [`ROADMAP.md`](./ROADMAP.md) | What's left. Currently the remaining interactive-UX phase — four items: two ready now, two blocked on missing zigline primitives (`replace_buffer_and_accept`, transient input mode). |
+| [`ROADMAP.md`](./ROADMAP.md) | What's left. Currently the remaining interactive-UX phase — three items: two ready now, one blocked on the zigline transient input mode primitive. |
 | [`README.md`](./README.md) | What slash looks like to a user. Public surface. |
 | [`ZIG-0.16.0.md`](./ZIG-0.16.0.md) | Reference for Zig 0.16's API shifts (Juicy Main, `std.Io`, `std.posix` shrinkage, format-string changes). Most LLM training cutoffs predate this; if a Zig API surprise comes up, the answer is almost certainly here. |
 
@@ -69,10 +69,10 @@ slash/
 │   ├── history.zig     # persistent metadata-rich command-history index;
 │   │                   #   JSONL under XDG; frecency + cwd-boost ranking
 │   │                   #   API; substrate for `history` builtin + smart
-│   │                   #   Up/Down + (eventually) autosuggestions
+│   │                   #   Up/Down + autosuggestions
 │   ├── repl.zig        # interactive REPL — bootstrap, prompt, signals,
 │   │                   #   zigline integration, SIGCHLD handler, smart
-│   │                   #   Up/Down nav, `str` space-trigger expansion
+│   │                   #   Up/Down nav, `str` Space/Enter-trigger expansion
 │   ├── notice.zig      # pre-prompt + live job-state stderr notices
 │   │                   #   (dim-on-tty, signal-name aware)
 │   ├── runtime.zig     # Result, Signal, status-byte conversion
@@ -94,7 +94,7 @@ The grammar engine [`nexus`](https://github.com/shreeve/nexus) lives in a
 sibling repo at `/Users/shreeve/Data/Code/nexus`. The line editor
 [`zigline`](https://github.com/shreeve/zigline) lives at
 `/Users/shreeve/Data/Code/zigline`; slash uses it as a path dependency
-(switch to URL dep at zigline 1.0; currently 0.3.1).
+(switch to URL dep at zigline 1.0; currently 0.4.1).
 
 ---
 
@@ -117,8 +117,8 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: **112/112 passing** — 60 in the
-unit + headless suite (`zig build test-headless`) and 52 in the PTY
+**Test totals as of this handoff**: **114/114 passing** — 60 in the
+unit + headless suite (`zig build test-headless`) and 54 in the PTY
 suite (`zig build test-pty`). All green. The two ex-flaky PTY tests
 (`Ctrl-Z stops a foreground
 sleep`, `cat & SIGTTIN`) were diagnosed and fixed in commit
@@ -161,8 +161,9 @@ so the JSONL history index doesn't pollute the user's real
 - `str` editor-only literal-text rewrites (PLAN §12) — bare-args form
   (`str ll ls -lAh`) plus the brace form (`str ll { awk '{print $1}'
   | sort }`) with raw-byte capture via the lexer wrapper. Space at
-  command position triggers expansion; bracketed-paste content stays
-  literal. Idempotent silent erase. See commit `bd598bb`.
+  command position expands with a trailing separator; Enter at command
+  position expands and accepts in one editor action. Bracketed-paste
+  content stays literal. Idempotent silent erase. See commit `bd598bb`.
 - Persistent history with rich metadata (`src/history.zig`) — JSONL
   under XDG, frecency + cwd-boost + recency + prefix-vs-substring
   ranking. `history` / `history -s QUERY` / `history -p PREFIX` /
@@ -206,7 +207,7 @@ so the JSONL history index doesn't pollute the user's real
 
 ## What to do next
 
-Four items left in `ROADMAP.md`, grouped by readiness:
+Three items left in `ROADMAP.md`, grouped by readiness:
 
 ### Ready now (2 items)
 
@@ -242,20 +243,11 @@ Four items left in `ROADMAP.md`, grouped by readiness:
    BaseLexer / one grammar — never a second tokenizer. Uses zigline's
    existing highlight hook. ~half day.
 
-### Blocked on zigline (2 items)
+### Blocked on zigline (1 item)
 
-Each item names the specific zigline addition it waits on. The
-recommended escalation path is to file (or contribute) the missing
-primitive in zigline before unblocking these on the slash side.
+One item waits on a zigline input-mode primitive.
 
-3. **`str` Enter trigger** — currently `str` only expands on Space.
-   Enter on an unexpanded `str` candidate would either submit the
-   LHS literally or require a second Enter — both wrong.
-   - **Blocker:** zigline 0.4.0 `replace_buffer_and_accept` (a
-     result variant that combines `replace_buffer` with `accept_line`
-     in one step). When that lands, wire up in slash's
-     `customActionHook` — the trigger detection is already there.
-4. **Smart history Ctrl-R interactive search** — substrate shipped;
+3. **Smart history Ctrl-R interactive search** — substrate shipped;
    only the modal-input UI is missing. We agreed explicitly **not**
    to fake it via in-buffer hacks (worse than not having it).
    - **Blocker:** zigline 0.4.0 transient-input-mode primitive (a

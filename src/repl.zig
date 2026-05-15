@@ -289,12 +289,15 @@ const ActionId = enum(u32) {
     /// Space pressed at command position — try to expand a session
     /// `str` before inserting the literal space (PLAN §12).
     expand_str_space = 2,
+    /// Enter pressed at command position — expand a session `str`
+    /// and accept the rewritten line in one editor action.
+    expand_str_enter = 3,
     /// Up arrow / Ctrl-P — smart prefix-aware history navigation when
     /// the buffer is non-empty; chronological zigline history when
     /// the buffer is empty.
-    smart_history_prev = 3,
+    smart_history_prev = 4,
     /// Down arrow / Ctrl-N — counterpart to `smart_history_prev`.
-    smart_history_next = 4,
+    smart_history_next = 5,
 };
 
 // `execvp` isn't exposed in `std.c` for our target. Declare the minimum
@@ -328,6 +331,7 @@ fn slashKeymapLookup(key: zigline.KeyEvent) ?zigline.Action {
     if (!key.mods.ctrl and !key.mods.alt and !key.mods.shift) {
         switch (key.code) {
             .char => |c| if (c == ' ') return zigline.Action{ .custom = @intFromEnum(ActionId.expand_str_space) },
+            .enter => return zigline.Action{ .custom = @intFromEnum(ActionId.expand_str_enter) },
             else => {},
         }
     }
@@ -363,6 +367,7 @@ fn customActionHook(
     return switch (@as(ActionId, @enumFromInt(id))) {
         .edit_in_editor => editInEditor(allocator, request, action_ctx, hooks),
         .expand_str_space => expandStrSpace(allocator, request, hooks),
+        .expand_str_enter => expandStrEnter(allocator, request, hooks),
         .smart_history_prev => smartHistoryPrev(allocator, request, hooks),
         .smart_history_next => smartHistoryNext(allocator, request, hooks),
     };
@@ -600,6 +605,24 @@ fn expandStrSpace(
     @memcpy(out[prefix_len .. prefix_len + rhs.len], rhs);
     out[out.len - 1] = ' ';
     return .{ .replace_buffer = out };
+}
+
+/// Enter-key counterpart to `expandStrSpace`. If the buffer ends in a
+/// command-position `str` name, accept the expansion as the line that
+/// will be evaluated; otherwise behave like ordinary Enter.
+fn expandStrEnter(
+    allocator: Allocator,
+    request: zigline.CustomActionRequest,
+    hooks: *const SlashHooks,
+) anyerror!zigline.CustomActionResult {
+    const candidate = strCandidate(request.buffer, request.cursor_byte) orelse return .accept_line;
+    const rhs = hooks.session.strs.lookup(candidate) orelse return .accept_line;
+
+    const prefix_len = request.buffer.len - candidate.len;
+    var out = try allocator.alloc(u8, prefix_len + rhs.len);
+    @memcpy(out[0..prefix_len], request.buffer[0..prefix_len]);
+    @memcpy(out[prefix_len..], rhs);
+    return .{ .replace_buffer_and_accept = out };
 }
 
 /// Open the current line in `$VISUAL` (or `$EDITOR`, or `vi`) via a

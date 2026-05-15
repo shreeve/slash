@@ -176,3 +176,25 @@ no shell code is evaluated at editor events, suggestions are not part
 of the command until accepted, and completion providers are bounded.
 
 ---
+
+## Targeted PTY Validation: 2026-05-15 23:35 UTC
+
+- commit: working tree (`str` Enter trigger)
+- os: Darwin 25.4.0 arm64 (macOS, M-series)
+- slash binary: `bin/slash`
+- mode: automated PTY regression suite (`zig build test-pty`)
+
+| # | test | result | note |
+|---|---|---|---|
+| 1 | `str` Enter expansion | PASS | `ll<Enter>` expands and accepts the stored RHS in one editor event |
+| 2 | argument-position Enter | PASS | `echo ARG_RESULT=ll<Enter>` keeps `ll` literal; `str` expansion remains command-position only |
+
+**Tally:** 2 PASS, 0 FAIL, 0 SKIP.
+
+### Verdict
+
+The `str` Enter trigger now matches the shipped Space trigger's
+command-position rule while using zigline's `replace_buffer_and_accept`
+path so the submitted line is the expansion, not the abbreviation.
+
+---

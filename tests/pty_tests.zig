@@ -1350,6 +1350,21 @@ test "slash pty: str expands at command position when Space is pressed" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "SLASH_STR_MARK_OK") != null);
 }
 
+test "slash pty: str expands and accepts at command position when Enter is pressed" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "str ll echo SLASH_STR_ENTER_OK\n", .settle_ms = 100 },
+        .{ .send = "ll\n", .settle_ms = 300, .wait_for = "SLASH_STR_ENTER_OK" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "SLASH_STR_ENTER_OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "ll: command not found") == null);
+}
+
 test "slash pty: str does NOT expand at argument position" {
     if (!ptySupported()) return error.SkipZigTest;
 
@@ -1375,6 +1390,20 @@ test "slash pty: str does NOT expand at argument position" {
     // negative assertion catches both "expansion fired wrongly" and
     // "expansion fired but trimmed funny."
     try std.testing.expect(std.mem.indexOf(u8, r.out, "before WRONG_STR_X trailing") == null);
+}
+
+test "slash pty: str Enter does NOT expand at argument position" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "str ll WRONG_STR_ENTER_ARG\n", .settle_ms = 100 },
+        .{ .send = "echo ARG_RESULT=ll\n", .settle_ms = 300, .wait_for = "ARG_RESULT=ll" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "ARG_RESULT=WRONG_STR_ENTER_ARG") == null);
 }
 
 test "slash pty: Space without any str set inserts literal space" {

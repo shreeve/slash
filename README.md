@@ -107,8 +107,8 @@ See [`ROADMAP.md`](./ROADMAP.md) for remaining release work.
 ```sh
 # `str` — editor-only literal-text rewrites. Strict literal bytes →
 # literal bytes; no variables, no command substitution, no templates.
-# Triggers on Space at command position; the rewritten line is what
-# slash parses and runs.
+# Triggers on Space or Enter at command position; the rewritten line
+# is what slash parses and runs.
 
 # Bare-args form (cooked argv joined by spaces):
 str ll  ls -lAh
@@ -121,6 +121,7 @@ str logs { tail -f /var/log/system.log | grep error }
 str awk1 { awk '{print $1}' | sort | uniq -c }
 
 ll<space>          # → `ls -lAh ` in the editor; Enter runs it
+ll<enter>          # → accepts and runs `ls -lAh` in one step
 git ll<space>      # `ll` is at argument position; Space inserts a
                    # literal space, no expansion
 

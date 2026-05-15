@@ -6,9 +6,8 @@ file** in the same commit. The ROADMAP shrinks until empty; that's how
 the next release ships.
 
 Items are grouped by readiness: **ready now** vs **blocked on missing
-zigline primitives**. The remaining blockers are tracked as zigline
-0.4.0 (`replace_buffer_and_accept`, transient input mode). Within each
-group, ship in whichever order makes sense.
+zigline primitives**. The remaining blocker is zigline transient input
+mode. Within each group, ship in whichever order makes sense.
 
 > **The test that decides whether anything joins this list:**
 > Does this improve `Command` clarity, `Pipeline` correctness, `Program`
@@ -42,19 +41,8 @@ These two are unblocked.
 
 ## Interactive UX — blocked on zigline
 
-Two items wait on zigline input-mode primitives. Each names the
-specific zigline addition it needs.
+One item waits on a zigline input-mode primitive.
 
-- **`str` — Enter trigger.** Space-trigger expansion shipped (`StrTable`
-  in `session.zig`, `str` builtin in `builtins.zig`, `strCandidate`
-  scanner + custom-action hook in `repl.zig`, `str NAME { body }`
-  brace-form via lexer wrapper). Enter-trigger expansion needs a
-  zigline result variant that combines `replace_buffer` with
-  `accept_line` in one step (renders the expanded buffer, then
-  submits as the executed line). Without it, Enter on an unexpanded
-  `str` candidate would either submit the LHS literally or require a
-  second Enter — both wrong. Tracked as zigline 0.4.0
-  `replace_buffer_and_accept`; wire up here when shipped.
 - **Smart history — Ctrl-R interactive search.** The substrate is in
   place: slash-side `HistoryIndex` (`src/history.zig`) captures every
   accepted command with cwd / ts / status / duration, persists as
