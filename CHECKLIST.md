@@ -136,11 +136,11 @@ This closes the fork race where either side may run first.
 
 Checklist:
 
-- [ ] Every pipeline stage shares one pgid
-- [ ] Parent closes setpgid race
-- [ ] Child closes setpgid race
-- [ ] Job table records pgid before wait/control operations
-- [ ] Detached jobs receive independent process groups
+- [x] Every pipeline stage shares one pgid (eval.spawnPipelineNoWait sets `leader_pgid = pids[0]`; subsequent stages spawn with `pgid=leader_pgid`)
+- [x] Parent closes setpgid race (`exec.spawn` calls `setpgid(pid, req.pgid)` after fork in parent)
+- [x] Child closes setpgid race (`exec.runChild` calls `setpgid(0, req.pgid)` first thing in child)
+- [x] Job table records pgid before wait/control operations (`JobTable.setProcesses(j, pgid, pids)` is required before any service call)
+- [x] Detached jobs receive independent process groups (default `pgid=0` in spawn means child becomes own group leader)
 
 ---
 
@@ -156,26 +156,26 @@ At any given moment:
 
 Checklist:
 
-- [ ] shell places itself in its own pgid
-- [ ] shell owns controlling terminal at startup
-- [ ] foreground jobs receive terminal via tcsetpgrp()
-- [ ] shell regains terminal after wait
-- [ ] stopped jobs relinquish terminal
-- [ ] resumed jobs reacquire terminal
-- [ ] background jobs never read from terminal
-- [ ] SIGTTIN/SIGTTOU handled correctly
-- [ ] terminal handoff survives races
-- [ ] interactive programs retain terminal ownership correctly
+- [x] shell places itself in its own pgid (`bootstrapInteractive` step 4: `setpgid(0, 0)` after the foreground-acquisition loop)
+- [x] shell owns controlling terminal at startup (`bootstrapInteractive` step 5: `tcsetpgrp(tty, getpgrp())`)
+- [x] foreground jobs receive terminal via tcsetpgrp() (`terminal.giveToJob` does `tcsetpgrp(tty, j.pgid)`)
+- [x] shell regains terminal after wait (`terminal.reclaimForShell` restores `tcsetpgrp(tty, shell_pgid)` and `shell_termios`)
+- [x] stopped jobs relinquish terminal (`reclaimForShell` snapshots `j.termios` on `.stopped` and restores shell ownership)
+- [x] resumed jobs reacquire terminal (`fgFn`: `giveToJob` → SIGCONT, with prior `j.termios` re-installed first)
+- [x] background jobs never read from terminal (kernel SIGTTIN-stops bg readers; verified by `cat &` PTY test)
+- [x] SIGTTIN/SIGTTOU handled correctly (interactive shell ignores both; bootstrap forces SIGTTIN to default before the fg-acquisition loop and re-ignores after)
+- [ ] terminal handoff survives races (no dedicated stress test; deferred — would need a rapid-stop/continue stress harness)
+- [x] interactive programs retain terminal ownership correctly (validated against vim/less/top/man/python/node — see VALIDATION.md run 2026-05-14)
 
 Validation programs:
 
-- [ ] vim
-- [ ] less
-- [ ] top
-- [ ] man
-- [ ] ssh
-- [ ] nested slash
-- [ ] nested bash
+- [x] vim (run 2026-05-14: PASS)
+- [x] less (run 2026-05-14: PASS)
+- [x] top (run 2026-05-14: PASS)
+- [x] man (run 2026-05-14: PASS)
+- [x] ssh (run 2026-05-14: PASS, real nested-PTY end-to-end)
+- [x] nested slash (run 2026-05-14: PASS)
+- [x] nested bash (run 2026-05-14: PASS)
 
 ---
 
@@ -193,10 +193,10 @@ Foreground children:
 
 Checklist:
 
-- [ ] parent ignores interactive job-control signals
-- [ ] child restores signal defaults
-- [ ] signal disposition reset occurs before execve
-- [ ] builtins-in-child behave like external commands
+- [x] parent ignores interactive job-control signals (`installInteractiveSignalHandlers`: ignore QUIT/TSTP/TTIN/TTOU + SIGINT noop; `installShellSignalDefaults`: ignore SIGPIPE for every entry point)
+- [x] child restores signal defaults (`exec.runChild` resets INT/QUIT/TSTP/TTIN/TTOU/PIPE/CHLD/HUP to SIG_DFL before execve; same reset in eval.zig direct-fork sites: subshell body, captureProgramStdout, proc-subst child; same reset in repl's Ctrl-X edit-in-editor fork — fixed in 5bbab06)
+- [x] signal disposition reset occurs before execve (per the resetSignalDefaults pass in runChild; ignored dispositions don't survive execve only because we explicitly DFL them — POSIX preserves SIG_IGN across execve otherwise)
+- [x] builtins-in-child behave like external commands (audited in commit 5bbab06 item A; all forked-builtin-child paths route through `exec.spawn`, which resets dispositions)
 
 ## Signals target process groups
 
@@ -217,10 +217,10 @@ kill(pid, SIGINT)
 
 Checklist:
 
-- [ ] Ctrl-C hits the entire foreground pipeline
-- [ ] Ctrl-Z stops the entire foreground pipeline
-- [ ] shell itself survives
-- [ ] resumed jobs continue as one group
+- [x] Ctrl-C hits the entire foreground pipeline (kernel routes via tty foreground pgrp = pipeline pgid; validated by PTY test "Ctrl-\ sends SIGQUIT" + manual run 2026-05-14 test 3)
+- [x] Ctrl-Z stops the entire foreground pipeline (PTY test "Ctrl-Z stops a foreground sleep, fg resumes" + manual run 2026-05-14 test 4)
+- [x] shell itself survives (interactive shell ignores INT/QUIT/TSTP; verified by tests + manual)
+- [x] resumed jobs continue as one group (`fgFn` SIGCONTs the entire pgrp via `kill(-pgid, .CONT)`)
 
 ---
 
@@ -232,12 +232,12 @@ A pipeline is not correct until ALL unused pipe ends are closed.
 
 Checklist:
 
-- [ ] every child closes unused read ends
-- [ ] every child closes unused write ends
-- [ ] parent closes its copies too
-- [ ] CLOEXEC prevents descriptor leakage across execve
-- [ ] pipeline stages inherit only intended fds
-- [ ] no stale pipe descriptors survive exec
+- [x] every child closes unused read ends (`extra_close` list threaded through `exec.SpawnRequest`; closed in `runChild` before redirects)
+- [x] every child closes unused write ends (same `extra_close` mechanism; spawnPipelineNoWait builds the per-stage close list)
+- [x] parent closes its copies too (parent closes both pipe ends in evalPipeline's after-spawn loop)
+- [x] CLOEXEC prevents descriptor leakage across execve (`exec.makePipe` calls `setCloexec` on both ends; bootstrap's controlling-tty fd dup also CLOEXEC'd)
+- [x] pipeline stages inherit only intended fds (verified by the explicit dup wiring in spawnPipelineNoWait + `extra_close`)
+- [x] no stale pipe descriptors survive exec (CLOEXEC enforces; stress test "200 pipeline iterations" confirms fd count stable within +2 of baseline)
 
 Existing Slash alignment:
 
@@ -272,10 +272,10 @@ Expected:
 
 Checklist:
 
-- [ ] EOF propagates correctly through pipelines
-- [ ] parent pipe fds are closed after spawn
-- [ ] dead pipelines terminate naturally
-- [ ] no dangling writers remain
+- [x] EOF propagates correctly through pipelines (headless test "yes | head -n 3" returns 141 (SIGPIPE); manual run 2026-05-14 test 14 PASS)
+- [x] parent pipe fds are closed after spawn (evalPipeline's after-spawn loop closes both ends of every pipe)
+- [x] dead pipelines terminate naturally (head exits → pipe closes → yes dies of SIGPIPE on next write; verified end-to-end)
+- [x] no dangling writers remain (extra_close machinery + parent-close ensures only the intended write end is held)
 
 ---
 
@@ -297,9 +297,9 @@ The writer should terminate naturally once the reader exits.
 
 Checklist:
 
-- [ ] SIGPIPE is not treated as an internal shell failure
-- [ ] pipeline writers terminate naturally
-- [ ] shell survives SIGPIPE generated by child jobs
+- [x] SIGPIPE is not treated as an internal shell failure (`installShellSignalDefaults` ignores SIGPIPE in the shell process for every entry point)
+- [x] pipeline writers terminate naturally (yes / head test confirms; 141 exit propagates correctly per pipefail-on)
+- [x] shell survives SIGPIPE generated by child jobs (headless test "shell survives" + "echo upstream | head -n 1; echo done" exercises the builtin-in-pipeline-child path)
 
 ---
 
@@ -320,12 +320,12 @@ Zombie accumulation is a correctness failure.
 
 Checklist:
 
-- [ ] foreground jobs are waited fully
-- [ ] background jobs are eventually reaped
-- [ ] detached jobs are intentionally managed
-- [ ] no unreachable children exist
-- [ ] waitpid EINTR handling is correct
-- [ ] unrelated child events do not corrupt active waits
+- [x] foreground jobs are waited fully (`terminal.runForeground` blocks via `job.service(.foreground, target)` until done or stopped)
+- [x] background jobs are eventually reaped (safe-point `service(.poll)` calls + SIGCHLD handler sets `child_event_pending` flag drained by `eval.drainChildEvents`)
+- [x] detached jobs are intentionally managed (`evalDetached` registers in JobTable; `disown` is the explicit opt-out; stress test "100 detached jobs are reaped without explicit wait" confirms)
+- [x] no unreachable children exist (every fork goes through JobTable; verified by stress test counting reapings via tracked pids)
+- [x] waitpid EINTR handling is correct (`exec.waitOne` loops on EINTR)
+- [x] unrelated child events do not corrupt active waits (foreground service loops on the target job's state, not on event pid; unrelated events are applied to their own jobs and the loop continues)
 
 Existing Slash alignment:
 
@@ -353,11 +353,11 @@ Therefore Slash must avoid:
 
 Checklist:
 
-- [ ] repeated command execution is stable
-- [ ] repeated pipeline execution is stable
-- [ ] repeated subshell execution is stable
-- [ ] no descriptor growth over time
-- [ ] no process leakage over time
+- [x] repeated command execution is stable (memory test: 500 iterations of mixed eval, no allocator leaks via `std.testing.allocator`)
+- [x] repeated pipeline execution is stable (stress test: 200 iterations of `echo hi | wc -l >/dev/null`, fd count within +2 baseline)
+- [x] repeated subshell execution is stable (covered indirectly by 500-iter memory test; subshell forks are part of the mix)
+- [x] no descriptor growth over time (stress test: cross-platform fd probe via `fcntl(F_GETFD)` over `[0, RLIMIT_NOFILE.cur)`)
+- [x] no process leakage over time (stress test: 100 detached `true &` iterations, race-free join via tracked pids + `drainZombies`)
 
 ---
 
@@ -369,27 +369,27 @@ Slash should be validated against real interactive software.
 
 Required validation set:
 
-- [ ] vim
-- [ ] less
-- [ ] top
-- [ ] ssh
-- [ ] nested slash
-- [ ] nested bash
-- [ ] cat
-- [ ] man
-- [ ] python REPL
-- [ ] node REPL
+- [x] vim (run 2026-05-14: PASS)
+- [x] less (run 2026-05-14: PASS)
+- [x] top (run 2026-05-14: PASS)
+- [x] ssh (run 2026-05-14: PASS)
+- [x] nested slash (run 2026-05-14: PASS)
+- [x] nested bash (run 2026-05-14: PASS)
+- [x] cat (run 2026-05-14: PASS — fg, bg+SIGTTIN both)
+- [x] man (run 2026-05-14: PASS)
+- [x] python REPL (run 2026-05-14: PASS)
+- [x] node REPL (run 2026-05-14: PASS)
 
 Behavioral tests:
 
-- [ ] Ctrl-C interrupts foreground job only
-- [ ] Ctrl-Z suspends foreground job only
-- [ ] fg restores terminal ownership
-- [ ] bg resumes without terminal ownership
-- [ ] background jobs cannot steal stdin
-- [ ] pipelines terminate cleanly
-- [ ] heredocs behave interactively
-- [ ] process substitution behaves correctly
+- [x] Ctrl-C interrupts foreground job only (manual run test 3 + PTY test "Ctrl-\ SIGQUIT to fg")
+- [x] Ctrl-Z suspends foreground job only (manual run test 4 + PTY test "Ctrl-Z stops a foreground sleep")
+- [x] fg restores terminal ownership (manual run test 4: `fg` resumed sleep cleanly; `terminal.giveToJob` does the handoff)
+- [x] bg resumes without terminal ownership (PTY test "Ctrl-Z then bg lets the job finish without blocking" — bg builtin doesn't touch tty ownership)
+- [x] background jobs cannot steal stdin (kernel SIGTTIN-stops them; PTY test "cat & stops with SIGTTIN" + manual run test 2)
+- [x] pipelines terminate cleanly (manual run test 14 yes-head + headless yes-pipe regression test)
+- [x] heredocs behave interactively (existing heredoc support; PLAN §3.1 + headless tests for `<<TAG` / `<<'TAG'` with column-determined dedent)
+- [x] process substitution behaves correctly (existing `<(...)` and `>(...)` support; headless tests + cleanup-on-termination per PLAN §7 Rule 25)
 
 ---
 
@@ -410,11 +410,11 @@ Audit all:
 
 Checklist:
 
-- [ ] parent bookkeeping survives immediate child exit
-- [ ] terminal ownership survives rapid stop/continue cycles
-- [ ] signal delivery order does not corrupt state
-- [ ] wait loops tolerate EINTR
-- [ ] pgid assignment is deterministic
+- [x] parent bookkeeping survives immediate child exit (caught a real UAF in `disown -a` during this work — Job referenced after free; fixed via `isDisownable` filter)
+- [ ] terminal ownership survives rapid stop/continue cycles (no dedicated stress test; deferred — would need a synthetic Ctrl-Z/fg loop)
+- [x] signal delivery order does not corrupt state (SIGCHLD handler is flag-only-async-signal-safe; reaping happens in shell context at safe points)
+- [x] wait loops tolerate EINTR (`exec.waitOne` and `serviceForeground` both loop on EINTR)
+- [x] pgid assignment is deterministic (parent + child both call setpgid; fork-race-closed; verified by every job-control test)
 
 ---
 
