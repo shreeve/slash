@@ -16,14 +16,14 @@
 //!   - `exit N` sets `session.exit_request` and is honored at the top.
 
 const std = @import("std");
-const diag = @import("diagnostics.zig");
-const shape = @import("shape.zig");
-const program = @import("program.zig");
-const session_mod = @import("session.zig");
-const eval = @import("eval.zig");
-const exec = @import("exec.zig");
-const builtins = @import("builtins.zig");
-const repl = @import("repl.zig");
+const diag = @import("../src/diagnostics.zig");
+const shape = @import("../src/shape.zig");
+const program = @import("../src/program.zig");
+const session_mod = @import("../src/session.zig");
+const eval = @import("../src/eval.zig");
+const exec = @import("../src/exec.zig");
+const builtins = @import("../src/builtins.zig");
+const repl = @import("../src/repl.zig");
 
 extern "c" var environ: [*:null]?[*:0]u8;
 

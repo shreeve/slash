@@ -334,7 +334,6 @@ test {
     _ = @import("vars.zig");
     _ = @import("eval.zig");
     _ = @import("repl.zig");
-    _ = @import("headless_tests.zig");
 }
 
 fn printUsage() void {

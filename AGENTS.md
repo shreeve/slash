@@ -64,10 +64,15 @@ source  →  Shape  →  Program  →  Job
   flag.
 - **`src/runtime.zig`** — `Result`, `Signal`, status-byte conversion.
 - **`src/diagnostics.zig`** — `Diagnostic`, `Sink`, error codes.
-- **`src/headless_tests.zig`** — end-to-end integration tests.
-- **`src/pty_tests.zig`** — PTY-driven REPL tests; spawns the built
+- **`tests/headless_tests.zig`** — end-to-end integration tests. Imports
+  `src/*` modules via `../src/foo.zig`; pulled in by `test_root.zig` at
+  the project root (Zig 0.16 module-path constraint — see `build.zig`).
+- **`tests/pty_tests.zig`** — PTY-driven REPL tests; spawns the built
   `bin/slash` against a pseudo-terminal and asserts on rendered output.
   Run via `zig build test-pty` (also runs as part of `zig build test`).
+- **`test_root.zig`** — project-root entry point for the unit + headless
+  test binary. Contains a single `test { ... }` block that imports
+  `src/main.zig` and `tests/headless_tests.zig`. No production code.
 - **`src/main.zig`** — CLI entry point.
 - **`PLAN.md`** — design constitution.
 - **`ROADMAP.md`** — concrete remaining work; items disappear as they

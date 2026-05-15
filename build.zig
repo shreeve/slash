@@ -67,10 +67,15 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all tests");
 
-    // Unit tests rooted at src/main.zig (the top-level `test { ... }` block
-    // explicitly imports every module so each module's test blocks run).
+    // Unit tests + headless integration tests share one test binary,
+    // rooted at `test_root.zig` at the project root. Zig 0.16
+    // constrains `@import("path")` to files within the module's
+    // directory tree (rooted at `root_source_file`'s parent), so
+    // a project-root root is the simplest way to let
+    // `tests/headless_tests.zig` reach back into `src/*` via
+    // `../src/foo.zig` paths.
     const test_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("test_root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -111,7 +116,7 @@ pub fn build(b: *std.Build) void {
     // exit-status propagation, slash-flavored highlighter output) —
     // line-editor mechanics are covered in zigline's own PTY tests.
     const pty_mod = b.createModule(.{
-        .root_source_file = b.path("src/pty_tests.zig"),
+        .root_source_file = b.path("tests/pty_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
