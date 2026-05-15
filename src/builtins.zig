@@ -27,6 +27,7 @@ const diag = @import("diagnostics.zig");
 const word_mod = @import("word.zig");
 const parser = @import("parser.zig");
 const slash = @import("slash.zig");
+const history_mod = @import("history.zig");
 
 pub const Allocator = std.mem.Allocator;
 pub const Result = runtime.Result;
@@ -101,6 +102,7 @@ pub fn init(alloc: Allocator) !BuiltinSet {
     try set.table.put(alloc, "disown", .{ .name = "disown", .run = disownFn });
     try set.table.put(alloc, "trap", .{ .name = "trap", .run = trapFn });
     try set.table.put(alloc, "str", .{ .name = "str", .run = strFn });
+    try set.table.put(alloc, "history", .{ .name = "history", .run = historyFn });
     return set;
 }
 
@@ -1643,4 +1645,208 @@ pub fn validateStrValue(value: []const u8) ?[]const u8 {
         if (c == 0x7f) return "contains DEL byte";
     }
     return null;
+}
+
+// =============================================================================
+// history — list / search the slash-side HistoryIndex
+// =============================================================================
+//
+// Surface forms:
+//
+//   history                 list recent entries chronologically (last N)
+//   history -n N            list the most-recent N
+//   history -s QUERY        ranked search (substring match, ranking by
+//                            frecency + cwd boost + recency + frequency)
+//   history -p QUERY        ranked search (prefix-only)
+//   history --json          emit one JSON object per event for tooling
+//
+// The flat-listing form prints `<seq>  <line>` so users can copy/paste.
+// The search form prints `<line>` only — designed to feed `head`/`grep`.
+
+const default_history_limit: usize = 50;
+
+fn historyFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+
+    const args = argv[1..];
+
+    var search_query: ?[]const u8 = null;
+    var search_mode: history_mod.SearchMode = .substring;
+    var limit: usize = default_history_limit;
+    var json_out = false;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "-s") or std.mem.eql(u8, a, "--search")) {
+            i += 1;
+            if (i >= args.len) {
+                _ = writeAllToFd(io.stderr, "history: -s requires a query argument\n");
+                return .{ .exited = 2 };
+            }
+            search_query = args[i];
+            search_mode = .substring;
+        } else if (std.mem.eql(u8, a, "-p") or std.mem.eql(u8, a, "--prefix")) {
+            i += 1;
+            if (i >= args.len) {
+                _ = writeAllToFd(io.stderr, "history: -p requires a prefix argument\n");
+                return .{ .exited = 2 };
+            }
+            search_query = args[i];
+            search_mode = .prefix;
+        } else if (std.mem.eql(u8, a, "-n")) {
+            i += 1;
+            if (i >= args.len) {
+                _ = writeAllToFd(io.stderr, "history: -n requires a count argument\n");
+                return .{ .exited = 2 };
+            }
+            limit = std.fmt.parseInt(usize, args[i], 10) catch {
+                var buf: [128]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "history: -n: invalid count '{s}'\n", .{args[i]}) catch "history: -n: bad count\n";
+                _ = writeAllToFd(io.stderr, msg);
+                return .{ .exited = 2 };
+            };
+        } else if (std.mem.eql(u8, a, "--json")) {
+            json_out = true;
+        } else if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
+            _ = writeAllToFd(io.stdout,
+                "history                  list recent (default 50)\n" ++
+                "history -n COUNT         list COUNT most-recent\n" ++
+                "history -s QUERY         ranked substring search\n" ++
+                "history -p PREFIX        ranked prefix search\n" ++
+                "history --json           emit JSONL records\n");
+            return .{ .exited = 0 };
+        } else {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "history: unrecognized argument '{s}'\n", .{a}) catch "history: bad argument\n";
+            _ = writeAllToFd(io.stderr, msg);
+            return .{ .exited = 2 };
+        }
+    }
+
+    const idx_ptr = if (session.history) |*h| h else {
+        // No history index — interactive entry point didn't run, or
+        // init failed. Empty list, exit 0 to keep scripts happy.
+        return .{ .exited = 0 };
+    };
+
+    if (search_query) |q| {
+        return searchHistoryAndPrint(idx_ptr, io, q, search_mode, limit);
+    }
+    return listHistoryAndPrint(idx_ptr, io, limit, json_out);
+}
+
+fn listHistoryAndPrint(
+    idx: *const history_mod.HistoryIndex,
+    io: BuiltinIo,
+    limit: usize,
+    json_out: bool,
+) anyerror!Result {
+    const events = idx.eventsSlice();
+    const start: usize = if (events.len > limit) events.len - limit else 0;
+    var line_buf = try std.ArrayListUnmanaged(u8).initCapacity(idx.alloc, 256);
+    defer line_buf.deinit(idx.alloc);
+    for (events[start..]) |ev| {
+        line_buf.clearRetainingCapacity();
+        if (json_out) {
+            try writeHistoryJsonLine(idx.alloc, &line_buf, ev);
+        } else {
+            try writeHistoryListLine(idx.alloc, &line_buf, ev);
+        }
+        _ = writeAllToFd(io.stdout, line_buf.items);
+    }
+    return .{ .exited = 0 };
+}
+
+fn searchHistoryAndPrint(
+    idx: *const history_mod.HistoryIndex,
+    io: BuiltinIo,
+    query: []const u8,
+    mode: history_mod.SearchMode,
+    limit: usize,
+) anyerror!Result {
+    var cwd_buf: [4096]u8 = undefined;
+    extern_getcwd: {
+        if (std.c.getcwd(&cwd_buf, cwd_buf.len) == null) {
+            cwd_buf[0] = '?';
+            cwd_buf[1] = 0;
+            break :extern_getcwd;
+        }
+    }
+    const cwd = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&cwd_buf)), 0);
+
+    const results = try idx.search(idx.alloc, query, cwd, mode, limit);
+    defer idx.alloc.free(results);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(idx.alloc);
+    for (results) |r| {
+        out.clearRetainingCapacity();
+        try out.appendSlice(idx.alloc, r.line);
+        try out.append(idx.alloc, '\n');
+        _ = writeAllToFd(io.stdout, out.items);
+    }
+    return .{ .exited = 0 };
+}
+
+fn writeHistoryListLine(
+    alloc: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    ev: history_mod.HistoryEvent,
+) !void {
+    var num_buf: [32]u8 = undefined;
+    const seq_str = std.fmt.bufPrint(&num_buf, "{d:>5}", .{ev.seq}) catch return;
+    try out.appendSlice(alloc, seq_str);
+    try out.appendSlice(alloc, "  ");
+    try out.appendSlice(alloc, ev.line);
+    try out.append(alloc, '\n');
+}
+
+fn writeHistoryJsonLine(
+    alloc: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    ev: history_mod.HistoryEvent,
+) !void {
+    var num_buf: [32]u8 = undefined;
+    try out.appendSlice(alloc, "{\"seq\":");
+    try out.appendSlice(alloc, std.fmt.bufPrint(&num_buf, "{d}", .{ev.seq}) catch "0");
+    try out.appendSlice(alloc, ",\"ts\":");
+    try out.appendSlice(alloc, std.fmt.bufPrint(&num_buf, "{d}", .{ev.ts_s}) catch "0");
+    try out.appendSlice(alloc, ",\"cwd\":");
+    try writeJsonStringSimple(alloc, out, ev.cwd);
+    try out.appendSlice(alloc, ",\"line\":");
+    try writeJsonStringSimple(alloc, out, ev.line);
+    if (ev.status) |s| {
+        try out.appendSlice(alloc, ",\"status\":");
+        try out.appendSlice(alloc, std.fmt.bufPrint(&num_buf, "{d}", .{s}) catch "0");
+    }
+    if (ev.duration_s) |d| {
+        try out.appendSlice(alloc, ",\"dur\":");
+        try out.appendSlice(alloc, std.fmt.bufPrint(&num_buf, "{d}", .{d}) catch "0");
+    }
+    try out.appendSlice(alloc, "}\n");
+}
+
+fn writeJsonStringSimple(
+    alloc: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    bytes: []const u8,
+) !void {
+    try out.append(alloc, '"');
+    for (bytes) |b| switch (b) {
+        '"' => try out.appendSlice(alloc, "\\\""),
+        '\\' => try out.appendSlice(alloc, "\\\\"),
+        '\n' => try out.appendSlice(alloc, "\\n"),
+        '\r' => try out.appendSlice(alloc, "\\r"),
+        '\t' => try out.appendSlice(alloc, "\\t"),
+        else => if (b < 0x20) {
+            var u_buf: [8]u8 = undefined;
+            const formatted = std.fmt.bufPrint(&u_buf, "\\u{x:0>4}", .{b}) catch "";
+            try out.appendSlice(alloc, formatted);
+        } else try out.append(alloc, b),
+    };
+    try out.append(alloc, '"');
 }

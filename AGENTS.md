@@ -60,6 +60,11 @@ source  →  Shape  →  Program  →  Job
   service.
 - **`src/builtins.zig`** — builtin registry and implementations.
 - **`src/session.zig`** — long-lived shell state.
+- **`src/history.zig`** — slash-side persistent command-history index
+  with cwd / ts / status / duration metadata, JSONL persistence under
+  XDG, and a frecency + cwd-boost + recency ranking API. Substrate
+  for the `history` builtin and (eventually) smart Up/Down + Ctrl-R
+  reverse search. PLAN §12: editor-time only, no shell expansion.
 - **`src/vars.zig`** — `VarStore`: scalar and list variables, exported
   flag.
 - **`src/runtime.zig`** — `Result`, `Signal`, status-byte conversion.

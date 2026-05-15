@@ -35,9 +35,19 @@ const session_mod = @import("session.zig");
 const eval = @import("eval.zig");
 const builtins = @import("builtins.zig");
 const exec = @import("exec.zig");
+const history_mod = @import("history.zig");
 
-// libc binding — `std.c` doesn't expose `getpgrp` in Zig 0.16.
+// libc bindings — `std.c` doesn't expose these in Zig 0.16.
 extern "c" fn getpgrp() std.c.pid_t;
+extern "c" fn getcwd(buf: [*]u8, size: usize) ?[*:0]u8;
+
+/// Wall-clock seconds since the unix epoch via `gettimeofday(2)`.
+/// Used to time accepted-line durations for the history index.
+fn nowSeconds() i64 {
+    var tv: std.c.timeval = undefined;
+    if (std.c.gettimeofday(&tv, null) != 0) return 0;
+    return @as(i64, @intCast(tv.sec));
+}
 const parser = @import("parser.zig");
 const slash = @import("slash.zig");
 const zigline = @import("zigline");
@@ -121,9 +131,9 @@ fn runCooked(session: *session_mod.Session, alloc: Allocator) !u8 {
 // =============================================================================
 
 fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
-    // History — owned by us; passed to the editor by reference. Path is
-    // ~/.slash/history; failures (no HOME, can't mkdir) leave history
-    // in-memory only.
+    // History (chronological Up/Down) — owned by us; passed to the
+    // editor by reference. Path is `~/.slash/history`; failures leave
+    // history in-memory only.
     const hist_path = resolveHistoryPath(alloc) catch null;
     defer if (hist_path) |p| alloc.free(p);
 
@@ -133,6 +143,20 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
         .dedupe = .adjacent,
     });
     defer history.deinit();
+
+    // HistoryIndex (slash-side metadata-rich store) — captures every
+    // accepted line with cwd / ts / status / duration; persists JSONL
+    // under XDG. On first run, imports the legacy flat-file so users
+    // don't lose their history. Failures (no HOME, no XDG, mkdir
+    // denied) leave the index in-memory only — basic Up/Down via the
+    // chronological zigline History keeps working.
+    const jsonl_path = resolveHistoryJsonlPath(alloc) catch null;
+    defer if (jsonl_path) |p| alloc.free(p);
+    var hist_idx = try history_mod.HistoryIndex.init(alloc, jsonl_path);
+    hist_idx.load(hist_path) catch {};
+    session.history = hist_idx;
+    // From now on, session.deinit owns the HistoryIndex's lifetime.
+    // We keep a pointer alias for capture-on-accept convenience.
 
     var hooks = SlashHooks{
         .session = session,
@@ -184,9 +208,36 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
                 try pending.append(alloc, '\n');
 
                 const before_len = pending.items.len;
+                const start_s: i64 = nowSeconds();
                 _ = try evaluatePending(session, alloc, &pending);
+                const end_s: i64 = nowSeconds();
                 // Parse incomplete → keep accumulating; show `... ` next.
-                if (pending.items.len == before_len and pending.items.len > 0) continue;
+                const incomplete = pending.items.len == before_len and pending.items.len > 0;
+                // Record a history event for every accepted line. For
+                // a complete command, attach the just-observed exit
+                // status and duration. For a multi-line continuation,
+                // both are unknown (the user hasn't finished the
+                // construct yet). We still record the physical line
+                // so chronological recall mirrors zigline's flat
+                // history.
+                if (line.len > 0) {
+                    if (session.history) |*hist| {
+                        var cwd_buf: [4096]u8 = undefined;
+                        const cwd: []const u8 = if (getcwd(&cwd_buf, cwd_buf.len)) |p|
+                            std.mem.sliceTo(p, 0)
+                        else
+                            "?";
+                        const status: ?u8 = if (incomplete) null else session.last_status;
+                        const duration: ?u32 = if (incomplete) null else blk: {
+                            const d = end_s - start_s;
+                            if (d < 0) break :blk 0;
+                            break :blk @intCast(d);
+                        };
+                        hist.append(line, cwd, status, duration) catch {};
+                    }
+                }
+
+                if (incomplete) continue;
 
                 if (session.exit_request) |req| {
                     eval.fireExitTrap(session, alloc, null) catch {};
@@ -1251,8 +1302,23 @@ fn isSpace(c: u8) bool {
 
 // =============================================================================
 // History path resolver — kept slash-side because the location is
-// slash-specific (`~/.slash/history`). Falls back to in-memory only on
-// failure.
+// slash-specific. Two paths in play:
+//
+//   - **Legacy flat file** at `~/.slash/history`: zigline's `History`
+//     reads/writes this for chronological Up/Down navigation. Kept
+//     for backward compatibility; existing users' history transfers
+//     in transparently.
+//
+//   - **JSONL index** at `$XDG_DATA_HOME/slash/history.jsonl` (or
+//     `~/.local/share/slash/history.jsonl` if XDG_DATA_HOME is
+//     unset): the slash-side `HistoryIndex` reads/writes this for
+//     metadata-rich storage that drives the `history` builtin and
+//     (eventually) smart Up/Down + autosuggestions.
+//
+// On first run after the JSONL feature lands, the legacy file is
+// imported into JSONL once (no metadata) so the user doesn't lose
+// their history. Both paths fall back to in-memory only on
+// resolution failure (no HOME, can't mkdir, etc.).
 // =============================================================================
 
 fn resolveHistoryPath(allocator: Allocator) !?[]u8 {
@@ -1267,6 +1333,39 @@ fn resolveHistoryPath(allocator: Allocator) !?[]u8 {
     _ = std.c.mkdir(dir_z.ptr, 0o700);
 
     return try std.fmt.allocPrint(allocator, "{s}/history", .{dir});
+}
+
+/// XDG-anchored path to the slash-side JSONL history index. Returns
+/// `null` on env failures (no HOME, no XDG, permission denied at
+/// mkdir). Caller owns the returned path.
+fn resolveHistoryJsonlPath(allocator: Allocator) !?[]u8 {
+    // Prefer XDG_DATA_HOME; fall back to ~/.local/share.
+    var data_home: []u8 = undefined;
+    var data_home_owned = false;
+    if (std.c.getenv("XDG_DATA_HOME")) |xdg_ptr| {
+        const xdg = std.mem.span(xdg_ptr);
+        if (xdg.len > 0) {
+            data_home = try allocator.dupe(u8, xdg);
+            data_home_owned = true;
+        } else {
+            const home_ptr = std.c.getenv("HOME") orelse return null;
+            const home = std.mem.span(home_ptr);
+            if (home.len == 0) return null;
+            data_home = try std.fmt.allocPrint(allocator, "{s}/.local/share", .{home});
+            data_home_owned = true;
+        }
+    } else {
+        const home_ptr = std.c.getenv("HOME") orelse return null;
+        const home = std.mem.span(home_ptr);
+        if (home.len == 0) return null;
+        data_home = try std.fmt.allocPrint(allocator, "{s}/.local/share", .{home});
+        data_home_owned = true;
+    }
+    defer if (data_home_owned) allocator.free(data_home);
+
+    const dir = try std.fmt.allocPrint(allocator, "{s}/slash", .{data_home});
+    defer allocator.free(dir);
+    return try std.fmt.allocPrint(allocator, "{s}/history.jsonl", .{dir});
 }
 
 // =============================================================================

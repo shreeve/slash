@@ -35,9 +35,17 @@ shell code at editor events.
   `str` candidate would either submit the LHS literally or require a
   second Enter — both wrong. Tracked as zigline 0.4.0
   `replace_buffer_and_accept`; wire up here when shipped.
-- **Smart history.** Replace the current flat `~/.slash/history` with a
-  frecency-indexed store. Per-cwd recall, dedup, fuzzy reverse-search
-  (Ctrl-R). Pure data and indexing; no behavioral hooks.
+- **Smart history — Ctrl-R interactive search.** The substrate is in
+  place: slash-side `HistoryIndex` (`src/history.zig`) captures every
+  accepted command with cwd / ts / status / duration, persists as
+  JSONL under XDG, and exposes a frecency + cwd-boost + recency +
+  prefix-vs-substring ranking API. The `history` builtin lists and
+  searches against the same index. What's pending is the
+  interactive Ctrl-R reverse-search UI, which needs a zigline 0.4.0
+  search-mode primitive (no clean way to fake transient input mode
+  without it). Smart prefix-aware Up/Down navigation against the
+  same index lands as a separate slash-side commit (no upstream
+  dependency).
 - **Intelligent tab completions.** Per-command completion specs as
   declarative data (subcommand sets, flag definitions, file-path
   filters, dynamic-source hooks where the source is a slash command

@@ -81,7 +81,7 @@ jobs; fg %1
 `echo`, `true`, `false`, `pwd`, `cd`, `export`, `unset`, `test` (`[`),
 `printf`, `exit`, `read`, `shift`, `type`, `command`, `source` (`.`),
 `exec`, `return`, `break`, `continue`, `trap`, `jobs`, `fg`, `bg`,
-`wait`, `kill`, `disown`, `str`.
+`wait`, `kill`, `disown`, `str`, `history`.
 
 ## Interactive UX
 

@@ -334,6 +334,7 @@ test {
     _ = @import("vars.zig");
     _ = @import("eval.zig");
     _ = @import("repl.zig");
+    _ = @import("history.zig");
 }
 
 fn printUsage() void {

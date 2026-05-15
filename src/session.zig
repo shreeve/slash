@@ -6,6 +6,7 @@ const builtins = @import("builtins.zig");
 const runtime = @import("runtime.zig");
 const vars = @import("vars.zig");
 const program_mod = @import("program.zig");
+const history_mod = @import("history.zig");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -279,6 +280,13 @@ pub const Session = struct {
     defs: DefStore,
     strs: StrTable,
     traps: TrapTable,
+    /// Optional persistent history index. Owned by the session;
+    /// `null` in non-interactive entry points (`-c`, scripts).
+    /// Captures every accepted line with cwd / timestamp / exit
+    /// status / duration, persists as JSONL under XDG. The substrate
+    /// for the `history` builtin and (eventually) smart Up/Down
+    /// navigation + autosuggestions.
+    history: ?history_mod.HistoryIndex = null,
     /// Inherited environment as a raw `execve`-ready pointer. Threaded
     /// from `std.c.environ` in `main`; not owned by Session.
     envp: [*:null]const ?[*:0]const u8,
@@ -375,6 +383,7 @@ pub const Session = struct {
         self.defs.deinit();
         self.strs.deinit();
         self.traps.deinit();
+        if (self.history) |*h| h.deinit();
         self.clearPathCache();
         self.path_cache.deinit(self.alloc);
         if (self.path_cache_signature) |sig| self.alloc.free(sig);
