@@ -163,6 +163,7 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
         .alloc = alloc,
         .history = &history,
     };
+    defer hooks.resetNav();
 
     var editor = try zigline.Editor.init(alloc, .{
         .keymap = slash_keymap,
@@ -276,6 +277,12 @@ const ActionId = enum(u32) {
     /// Space pressed at command position — try to expand a session
     /// `str` before inserting the literal space (PLAN §12).
     expand_str_space = 2,
+    /// Up arrow / Ctrl-P — smart prefix-aware history navigation when
+    /// the buffer is non-empty; chronological zigline history when
+    /// the buffer is empty.
+    smart_history_prev = 3,
+    /// Down arrow / Ctrl-N — counterpart to `smart_history_prev`.
+    smart_history_next = 4,
 };
 
 // `execvp` isn't exposed in `std.c` for our target. Declare the minimum
@@ -312,6 +319,22 @@ fn slashKeymapLookup(key: zigline.KeyEvent) ?zigline.Action {
             else => {},
         }
     }
+
+    // Up / Down (and Ctrl-P / Ctrl-N) — route to smart history
+    // navigation. The handler decides between chronological zigline
+    // history (empty buffer; preserves muscle memory) and smart
+    // prefix-aware ranked search (non-empty buffer; surfaces the
+    // command you actually want).
+    switch (key.code) {
+        .arrow_up => return zigline.Action{ .custom = @intFromEnum(ActionId.smart_history_prev) },
+        .arrow_down => return zigline.Action{ .custom = @intFromEnum(ActionId.smart_history_next) },
+        .char => |c| if (key.mods.ctrl and !key.mods.alt and !key.mods.shift) {
+            if (c == 'p') return zigline.Action{ .custom = @intFromEnum(ActionId.smart_history_prev) };
+            if (c == 'n') return zigline.Action{ .custom = @intFromEnum(ActionId.smart_history_next) };
+        },
+        else => {},
+    }
+
     return zigline.Keymap.defaultEmacs().lookup(key);
 }
 
@@ -328,6 +351,135 @@ fn customActionHook(
     return switch (@as(ActionId, @enumFromInt(id))) {
         .edit_in_editor => editInEditor(allocator, request, action_ctx, hooks),
         .expand_str_space => expandStrSpace(allocator, request, hooks),
+        .smart_history_prev => smartHistoryPrev(allocator, request, hooks),
+        .smart_history_next => smartHistoryNext(allocator, request, hooks),
+    };
+}
+
+// =============================================================================
+// Smart history navigation — prefix-aware ranked Up/Down
+// =============================================================================
+//
+// The behavior matches GPT-5.5's design call:
+//
+//   - Empty buffer: chronological (zigline's flat-file `History`),
+//     so muscle memory ("Up = last thing I ran") is preserved.
+//
+//   - Non-empty buffer: ranked search via `session.history`, prefix
+//     mode. Up walks toward better-ranked matches; Down walks back
+//     toward the originally-typed prefix. Ranking pulls from the
+//     same `HistoryIndex` that backs the `history` builtin.
+//
+// Detection of "user edited mid-nav" relies on comparing the live
+// buffer to the candidate we last pushed: if they differ, the user
+// has typed and we treat the next Up as starting a fresh nav.
+
+fn smartHistoryPrev(
+    allocator: Allocator,
+    request: zigline.CustomActionRequest,
+    hooks: *SlashHooks,
+) anyerror!zigline.CustomActionResult {
+    // Empty buffer → chronological zigline history.
+    if (request.buffer.len == 0) {
+        hooks.resetNav();
+        if (hooks.history.previous(request.buffer)) |prev| {
+            return .{ .replace_buffer = try allocator.dupe(u8, prev) };
+        }
+        return .{ .insert_text = try allocator.dupe(u8, "") };
+    }
+
+    // Non-empty buffer → smart ranked nav.
+    if (hooks.session.history) |*idx| {
+        if (hooks.nav) |*nav| {
+            const buf_matches_current = nav.idx >= 0 and
+                @as(usize, @intCast(nav.idx)) < nav.results.len and
+                std.mem.eql(u8, request.buffer, nav.results[@intCast(nav.idx)].line);
+            if (!buf_matches_current) {
+                // User edited mid-nav. Treat as fresh search.
+                hooks.resetNav();
+            }
+        }
+
+        if (hooks.nav == null) try beginNav(allocator, hooks, request.buffer, idx);
+        if (hooks.nav) |*nav| {
+            if (nav.results.len == 0) {
+                return .{ .insert_text = try allocator.dupe(u8, "") };
+            }
+            // Advance toward older / lower-ranked results. Clamp at end.
+            const next_idx: isize = if (nav.idx + 1 < @as(isize, @intCast(nav.results.len)))
+                nav.idx + 1
+            else
+                nav.idx;
+            nav.idx = next_idx;
+            const line = nav.results[@intCast(nav.idx)].line;
+            return .{ .replace_buffer = try allocator.dupe(u8, line) };
+        }
+    }
+
+    // No HistoryIndex (non-interactive entry point misuse) — fall
+    // back to zigline's history.
+    if (hooks.history.previous(request.buffer)) |prev| {
+        return .{ .replace_buffer = try allocator.dupe(u8, prev) };
+    }
+    return .{ .insert_text = try allocator.dupe(u8, "") };
+}
+
+fn smartHistoryNext(
+    allocator: Allocator,
+    request: zigline.CustomActionRequest,
+    hooks: *SlashHooks,
+) anyerror!zigline.CustomActionResult {
+    // If we're in a smart-nav session, walk back through results
+    // (newest → oldest reversed). At idx 0, restore the original
+    // prefix the user had typed. Subsequent Down does nothing.
+    if (hooks.nav) |*nav| {
+        const buf_matches_current = nav.idx >= 0 and
+            @as(usize, @intCast(nav.idx)) < nav.results.len and
+            std.mem.eql(u8, request.buffer, nav.results[@intCast(nav.idx)].line);
+        if (buf_matches_current) {
+            if (nav.idx == 0) {
+                // Step out of nav — restore the prefix the user had typed.
+                const prefix_copy = try allocator.dupe(u8, nav.prefix);
+                hooks.resetNav();
+                return .{ .replace_buffer = prefix_copy };
+            }
+            nav.idx -= 1;
+            const line = nav.results[@intCast(nav.idx)].line;
+            return .{ .replace_buffer = try allocator.dupe(u8, line) };
+        }
+        hooks.resetNav();
+    }
+
+    // Otherwise: chronological zigline history Down (returns the
+    // saved snapshot or the empty string).
+    if (hooks.history.next()) |nx| {
+        return .{ .replace_buffer = try allocator.dupe(u8, nx) };
+    }
+    return .{ .insert_text = try allocator.dupe(u8, "") };
+}
+
+fn beginNav(
+    _: Allocator,
+    hooks: *SlashHooks,
+    buffer: []const u8,
+    idx: *history_mod.HistoryIndex,
+) !void {
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd: []const u8 = if (getcwd(&cwd_buf, cwd_buf.len)) |p|
+        std.mem.sliceTo(p, 0)
+    else
+        "?";
+
+    const results = try idx.search(hooks.alloc, buffer, cwd, .prefix, 100);
+    errdefer hooks.alloc.free(results);
+
+    const prefix_copy = try hooks.alloc.dupe(u8, buffer);
+    errdefer hooks.alloc.free(prefix_copy);
+
+    hooks.nav = .{
+        .prefix = prefix_copy,
+        .results = results,
+        .idx = -1,
     };
 }
 
@@ -519,10 +671,43 @@ fn spawnEditor(tmp_path: [:0]const u8) anyerror!u8 {
 const SlashHooks = struct {
     session: *session_mod.Session,
     alloc: Allocator,
-    /// Reference to the editor's history. Used by `editInEditor` to
-    /// pre-fill the temp file with the most-recent command when the
-    /// user hits Ctrl-X on an empty buffer (zigline ≥ v0.1.5).
+    /// Reference to the editor's chronological history (zigline's
+    /// flat-file `History`). Drives Up/Down when the buffer is
+    /// empty (so muscle memory is preserved) and feeds
+    /// `editInEditor`'s "Ctrl-X on empty buffer pre-fills the last
+    /// command" behavior.
     history: *zigline.History,
+
+    /// Smart-Up/Down navigation state. Populated on the first Up
+    /// press while the buffer is non-empty, mutated as the user
+    /// cycles, cleared when the user types something non-Up/Down or
+    /// when Down walks back past the first match.
+    nav: ?NavState = null,
+
+    fn resetNav(self: *SlashHooks) void {
+        if (self.nav) |*n| n.deinit(self.alloc);
+        self.nav = null;
+    }
+};
+
+/// Snapshot of an in-progress smart-history navigation. Owns the
+/// captured prefix bytes and the search-result slice.
+const NavState = struct {
+    /// The buffer text at the moment Up was first pressed. Restored
+    /// when Down walks back past the first result.
+    prefix: []u8,
+    /// Ranked search results — borrowed slices into `session.history`'s
+    /// arena (valid for the session's lifetime). The outer slice
+    /// itself is owned by `alloc`.
+    results: []history_mod.HistoryCandidate,
+    /// Position in `results`. -1 means "back to prefix" (Down past
+    /// the start). Otherwise an index into `results`.
+    idx: isize,
+
+    fn deinit(self: *NavState, alloc: Allocator) void {
+        alloc.free(self.prefix);
+        alloc.free(self.results);
+    }
 };
 
 // -----------------------------------------------------------------------------
