@@ -128,6 +128,49 @@ const Spawned = struct {
         }
     }
 
+    /// Drain until `needle` appears in `out` or `timeout_ms` elapses.
+    /// Returns true iff the needle was observed. Polls in 50 ms slices
+    /// so a fast match doesn't pay the full timeout — load-tolerant
+    /// without making clean runs slow. Existing buffer contents count;
+    /// a step that waits for output produced by an earlier step still
+    /// matches if those bytes are already collected.
+    ///
+    /// Time is tracked by deducting each poll slice from a countdown.
+    /// Zig 0.16 removed `std.time.milliTimestamp` and friends; the
+    /// replacement (`std.Io.Clock.Timestamp.now(io, .awake)`) needs an
+    /// io instance to thread through. The countdown is approximate
+    /// (it ignores time spent inside `read`, which is fast on a PTY)
+    /// but more than precise enough for "wait up to N seconds for a
+    /// kernel event."
+    fn drainUntil(
+        self: Spawned,
+        alloc: std.mem.Allocator,
+        out: *std.ArrayListUnmanaged(u8),
+        needle: []const u8,
+        timeout_ms: i64,
+    ) !bool {
+        if (std.mem.indexOf(u8, out.items, needle) != null) return true;
+        var chunk: [4096]u8 = undefined;
+        var remaining = timeout_ms;
+        while (remaining > 0) {
+            const slice_ms: i64 = @min(remaining, 50);
+            if (try waitReadable(self.master, slice_ms)) {
+                const n = std.c.read(self.master, &chunk, chunk.len);
+                if (n < 0) {
+                    const e = std.c.errno(@as(c_int, -1));
+                    if (e == .INTR) continue;
+                    if (e == .IO) return false; // slave closed before needle appeared
+                    return error.ReadFailed;
+                }
+                if (n == 0) return false; // EOF
+                try out.appendSlice(alloc, chunk[0..@intCast(n)]);
+                if (std.mem.indexOf(u8, out.items, needle) != null) return true;
+            }
+            remaining -= slice_ms;
+        }
+        return false;
+    }
+
     fn reap(self: Spawned) u8 {
         var status: c_int = 0;
         while (true) {
@@ -214,6 +257,14 @@ fn spawnSlash(args: []const []const u8) !Spawned {
 const Step = struct {
     send: ?[]const u8 = null,
     settle_ms: i64 = 100,
+    /// If set, after `send` the script drains until this needle appears in
+    /// the collected output OR `settle_ms` elapses (whichever comes first).
+    /// Use for steps that depend on async kernel events (SIGCHLD propagation,
+    /// SIGTTIN delivery, prompt repaint) where a fixed-time settle races
+    /// the scheduler under load. `settle_ms` becomes the maximum wait,
+    /// not the actual wait — fast machines exit as soon as the needle
+    /// shows up.
+    wait_for: ?[]const u8 = null,
 };
 
 fn runScript(
@@ -229,7 +280,11 @@ fn runScript(
 
     for (steps) |step| {
         if (step.send) |bytes| try child.send(bytes);
-        try child.drain(alloc, &collected, step.settle_ms);
+        if (step.wait_for) |needle| {
+            _ = try child.drainUntil(alloc, &collected, needle, step.settle_ms);
+        } else {
+            try child.drain(alloc, &collected, step.settle_ms);
+        }
     }
 
     try child.drain(alloc, &collected, 1500);
@@ -672,7 +727,7 @@ test "slash pty: Ctrl-Z stops a foreground sleep, fg resumes it" {
     if (!ptySupported()) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
-    // `sleep 1` runs as a foreground command. We send Ctrl-Z (byte
+    // `sleep 30` runs as a foreground command. We send Ctrl-Z (byte
     // 0x1A); the tty driver translates that to SIGTSTP for the
     // controlling terminal's foreground process group, which is the
     // sleep job's pgrp because slash handed the tty to it via
@@ -680,17 +735,38 @@ test "slash pty: Ctrl-Z stops a foreground sleep, fg resumes it" {
     // and `fg` resumes it. Without the `tcsetpgrp` wiring this whole
     // sequence breaks (Ctrl-Z would target the shell instead of the
     // job, or the job wouldn't be the controlling-tty's foreground).
-    // Sleep needs to be long enough that Ctrl-Z arrives while it's
-    // still running. settle_ms windows generously to absorb macOS
-    // scheduler latency under load — earlier short windows tripped
-    // a flake where Ctrl-Z arrived after sleep had already finished.
+    //
+    // Two non-obvious settings here:
+    //
+    //   1. **`sleep 30`, not `sleep 5`.** A 5-second sleep can finish
+    //      before the test inspects `jobs` under load, which used to
+    //      look like "Stopped is missing" but was actually "sleep
+    //      already exited normally." 30s is comfortably longer than
+    //      any reasonable test runtime.
+    //
+    //   2. **800 ms initial settle before Ctrl-Z.** If we send Ctrl-Z
+    //      too soon after `sleep 30\n`, slash hasn't yet finished
+    //      fork+exec+tcsetpgrp. The kernel then delivers SIGTSTP to
+    //      slash's pgrp (which includes the still-pre-exec child).
+    //      Both parent and child inherit SIGTSTP-ignore from the
+    //      shell's interactive setup, so the signal is silently
+    //      dropped — by the time the child does `execve("/bin/sleep")`,
+    //      the SIGTSTP has been swallowed and sleep runs untouched.
+    //      800 ms gives slash room to fork, exec, install the user-
+    //      mode termios, and `tcsetpgrp` the tty to the job's pgrp
+    //      before Ctrl-Z arrives.
+    //
+    // The `jobs` step uses `wait_for = "Stopped"` so we exit the wait
+    // as soon as the marker appears — fast on a healthy machine,
+    // tolerant on a busy one. The `echo` step uses `wait_for =
+    // "resumed-ok"` for the same reason after `fg`.
     const r = try runScript(alloc, &.{"--norc"}, &.{
-        .{ .send = "sleep 5\n", .settle_ms = 400 },
-        .{ .send = "\x1a", .settle_ms = 600 }, // Ctrl-Z → SIGTSTP
-        .{ .send = "jobs\n", .settle_ms = 400 },
+        .{ .send = "sleep 30\n", .settle_ms = 800 },
+        .{ .send = "\x1a", .settle_ms = 400 }, // Ctrl-Z → SIGTSTP
+        .{ .send = "jobs\n", .settle_ms = 4000, .wait_for = "Stopped" },
         .{ .send = "fg\n", .settle_ms = 200 },
         .{ .send = "\x03", .settle_ms = 400 }, // Ctrl-C kills the resumed sleep
-        .{ .send = "echo resumed-ok\n", .settle_ms = 200 },
+        .{ .send = "echo resumed-ok\n", .settle_ms = 2000, .wait_for = "resumed-ok" },
         .{ .send = "exit 0\n" },
     });
     defer alloc.free(r.out);
@@ -834,12 +910,25 @@ test "slash pty: cat & stops with SIGTTIN on bg stdin read" {
     // `cat &` puts cat in the background reading stdin. The kernel
     // delivers SIGTTIN on its first read attempt because cat isn't in
     // the foreground pgrp. `jobs` should show it as Stopped.
+    //
+    // The flake we used to hit: 300 ms wasn't always enough for the
+    // full chain "cat is forked → cat starts → cat issues read() on
+    // stdin → kernel delivers SIGTTIN → cat stops → SIGCHLD reaches
+    // slash → slash records the stop in the job table." Under load
+    // any of those steps can slip past 300 ms. Two changes here:
+    //
+    //   1. **800 ms post-bg settle.** Gives the SIGTTIN dance room
+    //      to complete on a busy machine before we ask for `jobs`.
+    //   2. **`wait_for = "Stopped"` on `jobs`.** Exits the wait the
+    //      moment the listing prints — fast on a healthy machine,
+    //      tolerant on a busy one. `echo done` uses the same idiom
+    //      against its own marker.
     const r = try runScript(alloc, &.{"--norc"}, &.{
-        .{ .send = "cat &\n", .settle_ms = 300 },
-        .{ .send = "jobs\n", .settle_ms = 200 },
+        .{ .send = "cat &\n", .settle_ms = 800 },
+        .{ .send = "jobs\n", .settle_ms = 4000, .wait_for = "Stopped" },
         .{ .send = "kill -KILL %1\n", .settle_ms = 100 },
         .{ .send = "wait %1\n", .settle_ms = 200 },
-        .{ .send = "echo done\n" },
+        .{ .send = "echo done\n", .settle_ms = 2000, .wait_for = "done" },
         .{ .send = "exit 0\n" },
     });
     defer alloc.free(r.out);
