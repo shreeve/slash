@@ -81,16 +81,40 @@ jobs; fg %1
 `echo`, `true`, `false`, `pwd`, `cd`, `export`, `unset`, `test` (`[`),
 `printf`, `exit`, `read`, `shift`, `type`, `command`, `source` (`.`),
 `exec`, `return`, `break`, `continue`, `trap`, `jobs`, `fg`, `bg`,
-`wait`, `kill`, `disown`.
+`wait`, `kill`, `disown`, `str`.
 
-## Coming next: interactive UX
+## Interactive UX
 
 Slash commits to fish-class interactive UX without becoming a
-programming language: autosuggestions, abbreviations (literal-only),
-syntax highlighting as you type, intelligent completions, rich prompts,
-smart history (per-cwd, frecency, dedup). The line editor is
+programming language: syntax highlighting as you type, abbreviations
+(`str`), intelligent completions, rich prompts, smart history (per-cwd,
+frecency, dedup), autosuggestions. The line editor is
 [zigline](https://github.com/shreeve/zigline). See [`PLAN.md`](./PLAN.md)
 §12 for the in-scope/out-of-scope split.
+
+```sh
+# `str` — editor-only literal-text rewrites. Strict literal bytes →
+# literal bytes; no variables, no command substitution, no templates.
+# Triggers on Space at command position; the rewritten line is what
+# slash parses and runs.
+
+# Bare-args form (cooked argv joined by spaces):
+str ll  ls -lAh
+str gst git status
+str ..  cd ..
+
+# Brace form (raw bytes between matched braces — no escaping needed
+# for pipes, ampersands, dollar signs, quotes, etc.):
+str logs { tail -f /var/log/system.log | grep error }
+str awk1 { awk '{print $1}' | sort | uniq -c }
+
+ll<space>          # → `ls -lAh ` in the editor; Enter runs it
+git ll<space>      # `ll` is at argument position; Space inserts a
+                   # literal space, no expansion
+
+# Erase: idempotent, silent on missing names.
+str -e ll
+```
 
 ## Design
 

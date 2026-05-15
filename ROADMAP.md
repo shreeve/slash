@@ -25,13 +25,16 @@ shell code at editor events.
   backed) "ghost text" predicted continuation. Render via zigline's
   highlight hook; accept on a single explicit key (right arrow,
   Ctrl-F). Never executed unless accepted as ordinary input.
-- **Abbreviations.** Editor-only token-or-phrase rewrites, fired on
-  space/enter, visible before line accept. **Strictly literal text →
-  literal text.** No variables, no command substitution, no
-  placeholders, no conditionals, no template language. Storage: a
-  session table populated by an `abbr` builtin (`abbr ll 'ls -lAh'`,
-  `abbr -e ll`). The `abbr` builtin is in scope as a UX configuration
-  point, not a language feature.
+- **`str` — Enter trigger.** Space-trigger expansion shipped (`StrTable`
+  in `session.zig`, `str` builtin in `builtins.zig`, `strCandidate`
+  scanner + custom-action hook in `repl.zig`, `str NAME { body }`
+  brace-form via lexer wrapper). Enter-trigger expansion needs a
+  zigline result variant that combines `replace_buffer` with
+  `accept_line` in one step (renders the expanded buffer, then
+  submits as the executed line). Without it, Enter on an unexpanded
+  `str` candidate would either submit the LHS literally or require a
+  second Enter — both wrong. Tracked as zigline 0.4.0
+  `replace_buffer_and_accept`; wire up here when shipped.
 - **Smart history.** Replace the current flat `~/.slash/history` with a
   frecency-indexed store. Per-cwd recall, dedup, fuzzy reverse-search
   (Ctrl-R). Pure data and indexing; no behavioral hooks.
@@ -52,19 +55,6 @@ shell code at editor events.
   the token classes (variables, command substitutions, redirects,
   glob parts, heredoc bodies). Always driven by the BaseLexer / one
   grammar — never a second tokenizer.
-
-## Job-control surface — completing `fg`
-
-`fg` resumes stopped/background jobs and waits for them via the
-existing `service(.foreground, target)` machinery, but slash does not
-yet hand the controlling tty back to the resumed process group via
-`tcsetpgrp`. A resumed job that reads the controlling tty therefore
-takes `SIGTTIN`. The bookkeeping is correct in either case; the gap
-is purely the terminal handoff.
-
-- Wire `tcsetpgrp` in `exec.zig` (or a small helper module). Track the
-  controlling tty fd on `Session`. On `fg`, hand the tty to the
-  job's pgid before waiting; on stop or completion, take it back.
 
 ## Done means done
 

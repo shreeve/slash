@@ -47,7 +47,7 @@ source  →  Shape  →  Program  →  Job
 - **`src/slash.zig`** — hand-written language module: `Tag` enum,
   `keywordAs` keyword promotion, the `Lexer` wrapper (comment skipping,
   `NAME_EQ` fusion, `INDENT`/`OUTDENT` virtual tokens, heredoc body
-  collection).
+  collection, `str NAME { body }` brace-counted raw-body collection).
 - **`src/shape.zig`** — Shape types and the strict Sexp → Shape
   converter.
 - **`src/word.zig`** — `Word` lowering and quote/escape decoding.

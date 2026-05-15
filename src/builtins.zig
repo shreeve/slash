@@ -24,6 +24,9 @@ const terminal_mod = @import("terminal.zig");
 const shape_mod = @import("shape.zig");
 const program_mod = @import("program.zig");
 const diag = @import("diagnostics.zig");
+const word_mod = @import("word.zig");
+const parser = @import("parser.zig");
+const slash = @import("slash.zig");
 
 pub const Allocator = std.mem.Allocator;
 pub const Result = runtime.Result;
@@ -97,6 +100,7 @@ pub fn init(alloc: Allocator) !BuiltinSet {
     try set.table.put(alloc, "kill", .{ .name = "kill", .run = killFn });
     try set.table.put(alloc, "disown", .{ .name = "disown", .run = disownFn });
     try set.table.put(alloc, "trap", .{ .name = "trap", .run = trapFn });
+    try set.table.put(alloc, "str", .{ .name = "str", .run = strFn });
     return set;
 }
 
@@ -1467,4 +1471,176 @@ fn removeJobAt(session: *session_mod.Session, idx: usize) void {
     if (j.command_text) |txt| t.alloc.free(txt);
     t.alloc.destroy(j);
     _ = t.jobs.orderedRemove(idx);
+}
+
+// =============================================================================
+// str — editor-only literal-text rewrites (PLAN §12)
+// =============================================================================
+//
+// Surface forms (cooked / bare-args, handled here in the builtin):
+//
+//   str                    list every str (sorted), exit 0
+//   str NAME               query: "str 'NAME' 'VALUE'\n", exit 0; 1 silent if unset
+//   str NAME ARGS...       set NAME to ARGS joined with " " (cooked argv)
+//   str -e NAME...         erase named, idempotent, silent on missing, exit 0
+//   str -e (no names)      usage error, exit 2
+//   str BAD-NAME ...       validation error, exit 1, stderr message
+//
+// The shell never expands `str` entries — registration just stores
+// bytes. Expansion is driven by the REPL's keystroke handler (see
+// `repl.expandStrSpace`). Per PLAN §12 the rules are strict:
+//
+//   - LHS must lex as a single bare `.ident` token, must not be a
+//     slash keyword, must not start with `-` (would clash with -e).
+//   - RHS bytes must be valid UTF-8 with no NUL/CR/LF/DEL/C0 except
+//     tab — exactly the editor-text contract zigline enforces on
+//     every buffer mutation.
+//   - Empty RHS is allowed and is a real, distinct stored value:
+//     when the candidate fires, the typed name is deleted from the
+//     buffer (vs. an unset name, which inserts a literal space).
+//
+// The brace form (`str NAME { body }`) goes through the grammar +
+// lexer wrapper (raw byte capture, no shell expansion) and lands at
+// `session.strs.set(name, body)` directly — see `eval.evalStrDef`.
+// This builtin only handles the cooked / bare-args / management forms.
+
+fn strFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    const session = switch (ctx) {
+        .shell => |s| s,
+        .child => return .{ .exited = 0 },
+    };
+
+    const args = argv[1..];
+
+    if (args.len == 0) return listStrs(session, io);
+
+    if (std.mem.eql(u8, args[0], "-e")) {
+        if (args.len < 2) {
+            _ = writeAllToFd(io.stderr, "str: -e: usage: str -e NAME [NAME...]\n");
+            return .{ .exited = 2 };
+        }
+        return eraseStrs(session, args[1..]);
+    }
+
+    if (args.len == 1) return queryStr(session, io, args[0]);
+    return setStr(session, io, args[0], args[1..]);
+}
+
+fn listStrs(session: *session_mod.Session, io: BuiltinIo) anyerror!Result {
+    const names = try session.strs.sortedNames(session.alloc);
+    defer session.alloc.free(names);
+    for (names) |name| {
+        const value = session.strs.lookup(name) orelse continue;
+        try writeStrLine(session.alloc, io.stdout, name, value);
+    }
+    return .{ .exited = 0 };
+}
+
+fn queryStr(session: *session_mod.Session, io: BuiltinIo, name: []const u8) anyerror!Result {
+    const value = session.strs.lookup(name) orelse return .{ .exited = 1 };
+    try writeStrLine(session.alloc, io.stdout, name, value);
+    return .{ .exited = 0 };
+}
+
+fn setStr(
+    session: *session_mod.Session,
+    io: BuiltinIo,
+    name: []const u8,
+    value_parts: []const []const u8,
+) anyerror!Result {
+    if (validateStrName(name)) |reason| {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "str: invalid name '{s}': {s}\n", .{ name, reason }) catch "str: invalid name\n";
+        _ = writeAllToFd(io.stderr, msg);
+        return .{ .exited = 1 };
+    }
+
+    const value = try std.mem.join(session.alloc, " ", value_parts);
+    defer session.alloc.free(value);
+
+    if (validateStrValue(value)) |reason| {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "str: invalid value: {s}\n", .{reason}) catch "str: invalid value\n";
+        _ = writeAllToFd(io.stderr, msg);
+        return .{ .exited = 1 };
+    }
+
+    try session.strs.set(name, value);
+    return .{ .exited = 0 };
+}
+
+/// Idempotent erase. Missing names are not an error — a `str -e foo`
+/// followed by another `str -e foo` both succeed silently (`mkdir
+/// -p` / `rm -f` semantics). Scripts that want "ensure foo is gone"
+/// don't need `|| true`.
+fn eraseStrs(
+    session: *session_mod.Session,
+    names: []const []const u8,
+) anyerror!Result {
+    for (names) |name| {
+        _ = session.strs.unset(name);
+    }
+    return .{ .exited = 0 };
+}
+
+/// Emit one `str 'NAME' 'VALUE'` line. Both LHS and RHS are quoted so
+/// the listing is round-trippable Slash source: a name like `*` or `~`
+/// re-registers as the same literal name when fed back to the shell,
+/// no glob expansion or tilde substitution in the way.
+fn writeStrLine(alloc: Allocator, fd: i32, name: []const u8, value: []const u8) !void {
+    const quoted_name = try word_mod.quoteSingleForSlash(alloc, name);
+    defer alloc.free(quoted_name);
+    const quoted_value = try word_mod.quoteSingleForSlash(alloc, value);
+    defer alloc.free(quoted_value);
+    var line = try std.ArrayListUnmanaged(u8).initCapacity(alloc, quoted_name.len + quoted_value.len + 8);
+    defer line.deinit(alloc);
+    try line.appendSlice(alloc, "str ");
+    try line.appendSlice(alloc, quoted_name);
+    try line.append(alloc, ' ');
+    try line.appendSlice(alloc, quoted_value);
+    try line.append(alloc, '\n');
+    _ = writeAllToFd(fd, line.items);
+}
+
+/// Returns `null` if `name` is a valid `str` LHS, or a short English
+/// reason if it isn't. The legal set is exactly "what
+/// `parser.BaseLexer` would lex as one whole `.ident` token, isn't a
+/// slash keyword, and doesn't start with `-`". Reusing the lexer
+/// keeps validation and trigger-eligibility identical: an LHS the
+/// registrar accepts is precisely an LHS the keystroke scanner can
+/// match.
+pub fn validateStrName(name: []const u8) ?[]const u8 {
+    if (name.len == 0) return "empty name";
+    if (!std.unicode.utf8ValidateSlice(name)) return "not valid UTF-8";
+    if (name[0] == '-') return "names starting with '-' clash with str -e";
+
+    var lex = parser.BaseLexer.init(name);
+    const first = lex.next();
+    if (first.cat != .ident) return "must lex as a single bare ident";
+    if (first.pos != 0) return "must lex as a single bare ident";
+    if (@as(usize, first.len) != name.len) return "must lex as a single bare ident";
+
+    const after = lex.next();
+    if (after.cat != .eof) return "must lex as a single bare ident";
+
+    if (slash.keywordAs(name) != null) return "is a slash keyword";
+
+    return null;
+}
+
+/// Returns `null` if `value` is editor-safe RHS bytes, else a short
+/// reason. Mirrors zigline's `replace_buffer` / `insert_text`
+/// constraints: valid UTF-8, no NUL, no CR/LF (single-line invariant),
+/// no DEL, no C0 controls EXCEPT horizontal tab — `awk '{print $1\t$2}'`
+/// and similar idioms occasionally need a literal tab.
+pub fn validateStrValue(value: []const u8) ?[]const u8 {
+    if (!std.unicode.utf8ValidateSlice(value)) return "not valid UTF-8";
+    for (value) |c| {
+        if (c == 0) return "contains NUL byte";
+        if (c == '\n' or c == '\r') return "contains newline";
+        if (c == 0x09) continue; // tab is allowed
+        if (c < 0x20) return "contains control byte";
+        if (c == 0x7f) return "contains DEL byte";
+    }
+    return null;
 }

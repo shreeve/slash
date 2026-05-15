@@ -241,6 +241,19 @@ pub const CmdDefShape = struct {
     span: Span,
 };
 
+/// `str NAME { body }`. The body is opaque raw bytes captured by the
+/// lexer wrapper — no inner shape tree, no parsing. The bytes are
+/// stored verbatim in the StrTable at eval time and replayed onto
+/// the editor buffer when the user triggers expansion. See PLAN §12.
+pub const StrDefShape = struct {
+    name: []const u8,
+    /// Source bytes between the matched braces, with leading and
+    /// trailing horizontal whitespace (space/tab) trimmed at lower
+    /// time. Internal whitespace is preserved exactly.
+    body: []const u8,
+    span: Span,
+};
+
 /// `match SUBJECT { arms... }`. Subject is one word; each arm has one or
 /// more patterns (literal grammar atoms — see PLAN §12) and a body. The
 /// runtime tries arms in source order and runs the first arm whose
@@ -276,6 +289,7 @@ pub const Shape = union(enum) {
     @"for": ForShape,
     @"match": MatchShape,
     cmd_def: CmdDefShape,
+    str_def: StrDefShape,
 
     pub fn span(self: Shape) Span {
         return switch (self) {
@@ -292,6 +306,7 @@ pub const Shape = union(enum) {
             .@"for" => |f| f.span,
             .@"match" => |m| m.span,
             .cmd_def => |d| d.span,
+            .str_def => |d| d.span,
         };
     }
 };
@@ -377,6 +392,7 @@ fn convertShape(
         .@"for" => Shape{ .@"for" = try convertFor(alloc, source, items[1..], sink) },
         .@"match" => Shape{ .@"match" = try convertMatch(alloc, source, items[1..], sink) },
         .cmd_def => Shape{ .cmd_def = try convertCmdDef(alloc, source, items[1..], sink) },
+        .str_def => Shape{ .str_def = try convertStrDef(source, items[1..], sink) },
         else => {
             try emitBadShape(source, sexp, sink, "unexpected head tag at top level");
             return error.InvalidShape;
@@ -495,6 +511,7 @@ fn convertStage(
         .@"for" => Shape{ .@"for" = try convertFor(alloc, source, items[1..], sink) },
         .@"match" => Shape{ .@"match" = try convertMatch(alloc, source, items[1..], sink) },
         .cmd_def => Shape{ .cmd_def = try convertCmdDef(alloc, source, items[1..], sink) },
+        .str_def => Shape{ .str_def = try convertStrDef(source, items[1..], sink) },
         else => {
             try emitBadShape(source, sexp, sink, "expected a command, pipeline, subshell, block, assignment, or control form");
             return error.InvalidShape;
@@ -786,6 +803,36 @@ fn convertWhile(
         .cond = cond_ptr,
         .body = body_ptr,
         .span = .{ .start = cond.span().start, .end = body.span().end },
+    };
+}
+
+fn convertStrDef(
+    source: Source,
+    children: []const parser.Sexp,
+    sink: ?Sink,
+) anyerror!StrDefShape {
+    if (children.len != 2) {
+        try emitBadShape(source, .nil, sink, "str definition requires a name and a body");
+        return error.InvalidShape;
+    }
+    const name_span = try expectSrcSpan(children[0], source, sink);
+    const name = source.text[name_span.start..name_span.end];
+    const body_span = try expectSrcSpan(children[1], source, sink);
+
+    // Trim leading/trailing horizontal whitespace from the captured
+    // body bytes (per the design — `{ x }` and `{x}` produce the same
+    // stored value). Internal whitespace is preserved exactly.
+    const raw = source.text[body_span.start..body_span.end];
+    var lo: usize = 0;
+    var hi: usize = raw.len;
+    while (lo < hi and (raw[lo] == ' ' or raw[lo] == '\t')) : (lo += 1) {}
+    while (hi > lo and (raw[hi - 1] == ' ' or raw[hi - 1] == '\t')) : (hi -= 1) {}
+    const trimmed = raw[lo..hi];
+
+    return .{
+        .name = name,
+        .body = trimmed,
+        .span = .{ .start = name_span.start, .end = body_span.end },
     };
 }
 
@@ -1833,6 +1880,7 @@ fn dumpShape(source: Source, s: Shape, depth: u32, w: *Writer, opts: DumpOptions
         .@"for" => |x| try dumpFor(source, x, depth, w, opts),
         .@"match" => |x| try dumpMatch(source, x, depth, w, opts),
         .cmd_def => |d| try dumpCmdDef(source, d, depth, w, opts),
+        .str_def => |d| try dumpStrDef(d, depth, w, opts),
     }
 }
 
@@ -2037,6 +2085,14 @@ fn dumpCmdDef(source: Source, d: CmdDefShape, depth: u32, w: *Writer, opts: Dump
     try indent(w, depth + 1);
     try w.writeAll("body\n");
     try dumpShape(source, d.body.*, depth + 2, w, opts);
+}
+
+fn dumpStrDef(d: StrDefShape, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.print("str_def {s}", .{d.name});
+    try maybeSpan(d.span, w, opts);
+    try w.writeByte('\n');
+    try indent(w, depth + 1);
+    try w.print("body {d} bytes: {s}\n", .{ d.body.len, d.body });
 }
 
 fn dumpRedirect(source: Source, r: RedirectShape, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {

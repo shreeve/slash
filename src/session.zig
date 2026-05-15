@@ -186,12 +186,98 @@ pub const DefStore = struct {
     }
 };
 
+/// Editor-only literal-text rewrites (PLAN §12). Keys are LHS names
+/// typed at the prompt; values are RHS bytes inserted verbatim before
+/// parsing. The shell itself never expands `str` entries — the REPL's
+/// keystroke handler does, and only at the keystroke moment.
+///
+/// Empty values are a real, distinct stored state — they cause the
+/// candidate to be deleted from the buffer when triggered. Distinct
+/// from "name is unset," which inserts a literal space (no-op).
+///
+/// Both LHS and RHS are owned by `alloc`. The set of legal LHS bytes
+/// is enforced at the call site (the `str` builtin, and the `str_def`
+/// keyword form's lexer wrapper); this table is a passive store that
+/// takes whatever passes that gate.
+pub const StrTable = struct {
+    alloc: Allocator,
+    table: std.StringHashMapUnmanaged([]const u8) = .empty,
+
+    pub fn init(alloc: Allocator) StrTable {
+        return .{ .alloc = alloc };
+    }
+
+    pub fn deinit(self: *StrTable) void {
+        var it = self.table.iterator();
+        while (it.next()) |e| {
+            self.alloc.free(e.key_ptr.*);
+            self.alloc.free(e.value_ptr.*);
+        }
+        self.table.deinit(self.alloc);
+    }
+
+    /// Install a `str`. Replaces any existing entry under the same
+    /// name. Both `name` and `value` are dup'd; the caller owns the
+    /// input slices. An empty `value` is allowed (and meaningful —
+    /// see the type comment).
+    pub fn set(self: *StrTable, name: []const u8, value: []const u8) !void {
+        const key = try self.alloc.dupe(u8, name);
+        errdefer self.alloc.free(key);
+        const val = try self.alloc.dupe(u8, value);
+        errdefer self.alloc.free(val);
+
+        const gop = try self.table.getOrPut(self.alloc, key);
+        if (gop.found_existing) {
+            self.alloc.free(key);
+            self.alloc.free(gop.value_ptr.*);
+        }
+        gop.value_ptr.* = val;
+    }
+
+    /// Remove a `str`. Returns true iff something was removed. Callers
+    /// that want idempotent erase semantics ignore the return value.
+    pub fn unset(self: *StrTable, name: []const u8) bool {
+        const kv = self.table.fetchRemove(name) orelse return false;
+        self.alloc.free(kv.key);
+        self.alloc.free(kv.value);
+        return true;
+    }
+
+    pub fn lookup(self: *const StrTable, name: []const u8) ?[]const u8 {
+        return self.table.get(name);
+    }
+
+    pub fn count(self: *const StrTable) usize {
+        return self.table.count();
+    }
+
+    /// Allocate and return name pointers in lexicographic order,
+    /// borrowed from the table (caller must not free entries; caller
+    /// frees the slice itself with the supplied allocator). Used for
+    /// deterministic listing in the `str` builtin and tests.
+    pub fn sortedNames(self: *const StrTable, alloc: Allocator) ![][]const u8 {
+        const n = self.table.count();
+        var names = try alloc.alloc([]const u8, n);
+        errdefer alloc.free(names);
+        var it = self.table.keyIterator();
+        var i: usize = 0;
+        while (it.next()) |k| : (i += 1) names[i] = k.*;
+        std.mem.sort([]const u8, names, {}, lessByName);
+        return names;
+    }
+
+    fn lessByName(_: void, a: []const u8, b: []const u8) bool {
+        return std.mem.order(u8, a, b) == .lt;
+    }
+};
+
 pub const Session = struct {
     alloc: Allocator,
     jobs: job.JobTable,
     builtins: builtins.BuiltinSet,
     vars: vars.VarStore,
     defs: DefStore,
+    strs: StrTable,
     traps: TrapTable,
     /// Inherited environment as a raw `execve`-ready pointer. Threaded
     /// from `std.c.environ` in `main`; not owned by Session.
@@ -267,6 +353,7 @@ pub const Session = struct {
             .builtins = try builtins.init(alloc),
             .vars = vars.VarStore.init(alloc),
             .defs = DefStore.init(alloc),
+            .strs = StrTable.init(alloc),
             .traps = TrapTable.init(alloc),
             .envp = envp,
             .interactive = interactive,
@@ -286,6 +373,7 @@ pub const Session = struct {
         self.builtins.deinit(self.alloc);
         self.vars.deinit();
         self.defs.deinit();
+        self.strs.deinit();
         self.traps.deinit();
         self.clearPathCache();
         self.path_cache.deinit(self.alloc);

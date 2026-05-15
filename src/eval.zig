@@ -118,6 +118,7 @@ fn evalProgram(
         .@"for" => |f| try evalFor(f, session, ctx, sink),
         .@"match" => |m| try evalMatch(m, session, ctx, sink),
         .define => |d| try evalDefine(d, session, ctx, sink),
+        .str_def => |d| try evalStrDef(d, session, sink),
     };
     // `$?` reflects the most recent command result. Every program node
     // updates it on completion so subsequent statements in the same
@@ -1176,6 +1177,49 @@ fn evalDefine(
     try session.defs.install(d.name, arena, cloned);
 
     const j = try session.jobs.create(true, false, d.name);
+    session.jobs.completeZeroChild(j, .{ .exited = 0 });
+    return .{ .job = j, .expression_result = .{ .exited = 0 } };
+}
+
+/// Run a `str NAME { body }` definition: validate the captured raw
+/// bytes against the same byte-class rules the bare-args path uses,
+/// then store in the session's `StrTable`. Validation failures emit
+/// an EV-level diagnostic and produce a non-zero outcome.
+fn evalStrDef(
+    d: program_mod.StrDef,
+    session: *Session,
+    sink: ?Sink,
+) !EvalOutcome {
+    if (builtins.validateStrName(d.name)) |reason| {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "str: invalid name '{s}': {s}",
+            .{ d.name, reason },
+        ) catch "str: invalid name";
+        try diag.emit(sink, diag.make(
+            .eval, .@"error", "EV0030",
+            msg, .{ .name = "<eval>", .text = "" }, d.span,
+        ));
+        return makeFailedOutcome(session, "str", .{ .exited = 1 });
+    }
+    if (builtins.validateStrValue(d.body)) |reason| {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "str: invalid body: {s}",
+            .{reason},
+        ) catch "str: invalid body";
+        try diag.emit(sink, diag.make(
+            .eval, .@"error", "EV0031",
+            msg, .{ .name = "<eval>", .text = "" }, d.span,
+        ));
+        return makeFailedOutcome(session, "str", .{ .exited = 1 });
+    }
+
+    try session.strs.set(d.name, d.body);
+
+    const j = try session.jobs.create(true, false, "str");
     session.jobs.completeZeroChild(j, .{ .exited = 0 });
     return .{ .job = j, .expression_result = .{ .exited = 0 } };
 }

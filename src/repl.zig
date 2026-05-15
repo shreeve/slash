@@ -222,6 +222,9 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
 // with this ID to run the action.
 const ActionId = enum(u32) {
     edit_in_editor = 1,
+    /// Space pressed at command position — try to expand a session
+    /// `str` before inserting the literal space (PLAN §12).
+    expand_str_space = 2,
 };
 
 // `execvp` isn't exposed in `std.c` for our target. Declare the minimum
@@ -245,6 +248,19 @@ fn slashKeymapLookup(key: zigline.KeyEvent) ?zigline.Action {
             else => {},
         }
     }
+    // Plain Space (no modifiers): route through the `str` expansion
+    // hook. The hook returns `replace_buffer` (with expansion plus a
+    // trailing space) when a candidate is found and a matching `str`
+    // is set, or `insert_text(" ")` to mimic the default character
+    // insert. Bracketed-paste content goes through zigline's
+    // `handlePaste`, not key dispatch, so this hook never fires for
+    // pasted Space bytes — paste suppression is automatic.
+    if (!key.mods.ctrl and !key.mods.alt and !key.mods.shift) {
+        switch (key.code) {
+            .char => |c| if (c == ' ') return zigline.Action{ .custom = @intFromEnum(ActionId.expand_str_space) },
+            else => {},
+        }
+    }
     return zigline.Keymap.defaultEmacs().lookup(key);
 }
 
@@ -260,7 +276,40 @@ fn customActionHook(
     const hooks: *SlashHooks = @ptrCast(@alignCast(ctx_ptr));
     return switch (@as(ActionId, @enumFromInt(id))) {
         .edit_in_editor => editInEditor(allocator, request, action_ctx, hooks),
+        .expand_str_space => expandStrSpace(allocator, request, hooks),
     };
+}
+
+/// Space-key expansion hook. Returns the buffer rewritten with the
+/// matched `str`'s RHS plus a trailing space, or `insert_text` of a
+/// single space if no candidate matches or the candidate isn't set.
+/// The trailing space is part of the rewrite (rather than a follow-up
+/// insert) so zigline records the whole transformation as one undo
+/// step.
+///
+/// Empty stored values are a real, distinct state: the candidate
+/// gets *deleted* from the buffer (`prefix + "" + " " == prefix + " "`).
+/// This is observably different from "name unset," which inserts a
+/// literal space without disturbing the candidate.
+fn expandStrSpace(
+    allocator: Allocator,
+    request: zigline.CustomActionRequest,
+    hooks: *const SlashHooks,
+) anyerror!zigline.CustomActionResult {
+    const fallback_space = " ";
+    const candidate = strCandidate(request.buffer, request.cursor_byte) orelse {
+        return .{ .insert_text = try allocator.dupe(u8, fallback_space) };
+    };
+    const rhs = hooks.session.strs.lookup(candidate) orelse {
+        return .{ .insert_text = try allocator.dupe(u8, fallback_space) };
+    };
+
+    const prefix_len = request.buffer.len - candidate.len;
+    var out = try allocator.alloc(u8, prefix_len + rhs.len + 1);
+    @memcpy(out[0..prefix_len], request.buffer[0..prefix_len]);
+    @memcpy(out[prefix_len .. prefix_len + rhs.len], rhs);
+    out[out.len - 1] = ' ';
+    return .{ .replace_buffer = out };
 }
 
 /// Open the current line in `$VISUAL` (or `$EDITOR`, or `vi`) via a
@@ -534,7 +583,12 @@ fn highlightBuffer(
         if (style_opt) |style| {
             try spans.append(allocator, .{ .start = start, .end = end, .style = style });
         }
-        at_command_pos = isCommandStarter(tok.cat);
+        // Sticky NAME_EQ: env-prefix keeps the state at command
+        // position; argument-position NAME_EQ leaves us in argument
+        // position. See `strCandidate` for the same reasoning.
+        if (tok.cat != .name_eq) {
+            at_command_pos = isCommandStarter(tok.cat);
+        }
     }
 
     return spans.toOwnedSlice(allocator);
@@ -544,6 +598,15 @@ fn highlightBuffer(
 /// Note: `lparen`/`lbrace`/`lbracket` count as starters because slash
 /// uses them to introduce subshells, blocks, and groupings — each
 /// contains a fresh sequence of commands.
+///
+/// `name_eq` is intentionally NOT here: it's a sticky no-op rather
+/// than a starter (handled by callers — see the comment at each call
+/// site). In `FOO=1 ll`, `ll` is at command position because we
+/// haven't yet consumed a leading word; in `echo FOO=ll`, `ll` is at
+/// argument position because `echo` already consumed the leading
+/// word slot. `last_cat` alone can't distinguish those two; the
+/// state needs the additional "have we seen a leading word since
+/// the last separator?" bit, which the call site tracks.
 fn isCommandStarter(cat: parser.TokenCat) bool {
     return switch (cat) {
         .pipe,
@@ -559,11 +622,102 @@ fn isCommandStarter(cat: parser.TokenCat) bool {
     };
 }
 
+/// Slash keywords whose immediately-following IDENT is a *name slot*,
+/// not a command-position word. After `cmd ll`, `for x`, or
+/// `match val`, the IDENT names a definition/loop-variable/value, so
+/// it must not be promoted to a command-position candidate that
+/// would trigger `str` expansion. Keywords like `if`, `while`, `else`
+/// are NOT in this set — what follows them IS at command position
+/// (the test of the conditional / loop body).
+///
+/// `str` is intentionally absent: it isn't promoted by `keywordAs`
+/// at all (the brace form goes through wrapper-emitted `STR_OPEN`,
+/// not keyword promotion), so this branch never sees `str` and
+/// listing it would be dead code.
+fn keywordTakesNameSlot(name: []const u8) bool {
+    return std.mem.eql(u8, name, "cmd") or
+        std.mem.eql(u8, name, "for") or
+        std.mem.eql(u8, name, "match");
+}
+
 fn isOpenBracketTok(cat: parser.TokenCat) bool {
     return switch (cat) {
         .lbrace, .lparen, .lbracket => true,
         else => false,
     };
+}
+
+/// Locate a candidate `str` LHS: a bare `.ident` that ends exactly at
+/// `cursor_byte`, sits at command position, and is not a slash
+/// keyword. Returns the byte slice of that ident, or `null` if no
+/// such candidate exists.
+///
+/// Walks `parser.BaseLexer` and tracks an `at_command_pos` state
+/// machine. Two subtleties:
+///
+///   - **Sticky NAME_EQ.** The fused `NAME=` token (e.g. `FOO=`)
+///     keeps command position when we were already at command
+///     position (env-prefix on a fresh simple-command) but does not
+///     promote argument position back to command position. So
+///     `FOO=1 ll<space>` expands `ll` (it's the leading word) but
+///     `echo FOO=ll<space>` does NOT (it's an argument).
+///
+///   - **Keyword name slot.** After `cmd`/`for`/`match`, the next
+///     IDENT is a definition/loop-variable/value name, not a
+///     command-position word. Don't promote it.
+///
+/// Cursor must be at end-of-buffer; mid-buffer expansion would need
+/// a zigline range-replace API which v0.3.x lacks.
+pub fn strCandidate(buffer: []const u8, cursor_byte: usize) ?[]const u8 {
+    if (cursor_byte != buffer.len) return null;
+    if (buffer.len == 0) return null;
+
+    var at_command_pos = true;
+    var next_ident_is_name_slot = false;
+    var lex = parser.BaseLexer.init(buffer);
+    var candidate: ?[]const u8 = null;
+    while (true) {
+        const tok = lex.next();
+        if (tok.cat == .eof) break;
+        const start: usize = @intCast(tok.pos);
+        const end_unclamped: usize = start + @as(usize, @intCast(tok.len));
+        const end = @min(buffer.len, end_unclamped);
+
+        if (tok.cat == .ident) {
+            const span = buffer[start..end];
+            if (slash.keywordAs(span) != null) {
+                at_command_pos = true;
+                next_ident_is_name_slot = keywordTakesNameSlot(span);
+                candidate = null;
+                continue;
+            }
+            if (next_ident_is_name_slot) {
+                next_ident_is_name_slot = false;
+                candidate = null;
+                at_command_pos = false;
+                continue;
+            }
+            if (at_command_pos and end == buffer.len) {
+                candidate = span;
+            } else {
+                candidate = null;
+            }
+            at_command_pos = false;
+            continue;
+        }
+
+        // Non-ident token. Update command-position state, but with
+        // the sticky NAME_EQ rule: NAME_EQ leaves `at_command_pos`
+        // unchanged (env-prefix preserves it; argument-position
+        // doesn't promote it). All other non-starters reset to
+        // false; starters reset to true.
+        candidate = null;
+        next_ident_is_name_slot = false;
+        if (tok.cat != .name_eq) {
+            at_command_pos = isCommandStarter(tok.cat);
+        }
+    }
+    return candidate;
 }
 
 /// When the cursor sits on (or just past) a closing bracket, find the

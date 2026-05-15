@@ -1064,3 +1064,210 @@ test "slash pty: shell exit does NOT signal disowned jobs" {
     }
     try std.testing.expect(!markerExists(disown_marker));
 }
+
+// =============================================================================
+// str — editor-only literal-text rewrites (PLAN §12)
+// =============================================================================
+
+test "slash pty: str expands at command position when Space is pressed" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // Type `ll` then a Space; expansion fires; the buffer now reads
+    // `echo SLASH_STR_MARK_OK ` and Enter runs it. The executed echo's
+    // stdout is the only path that produces the marker — if expansion
+    // didn't fire, slash would try to run a nonexistent command `ll`
+    // and the marker would be absent.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "str ll echo SLASH_STR_MARK_OK\n", .settle_ms = 100 },
+        .{ .send = "ll" },
+        .{ .send = " ", .settle_ms = 100 },
+        .{ .send = "\n", .settle_ms = 200, .wait_for = "SLASH_STR_MARK_OK" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "SLASH_STR_MARK_OK") != null);
+}
+
+test "slash pty: str does NOT expand at argument position" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // Set `ll` to a value containing `WRONG_STR_X`. When the user types
+    // `echo before ll trailing`, `ll` sits at argument position to
+    // `echo`, so Space must insert a literal space rather than rewrite
+    // the buffer. The marker `WRONG_STR_X` should NOT appear in the
+    // executed echo's output; `before ll trailing` should.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "str ll WRONG_STR_X\n", .settle_ms = 100 },
+        .{ .send = "echo before " },
+        .{ .send = "ll" },
+        .{ .send = " ", .settle_ms = 100 },
+        .{ .send = "trailing\n", .settle_ms = 200, .wait_for = "before ll trailing" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "before ll trailing") != null);
+    // The expansion-failure mode would echo `before WRONG_STR_X
+    // trailing` (literally). Searching for the wrong content as a
+    // negative assertion catches both "expansion fired wrongly" and
+    // "expansion fired but trimmed funny."
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "before WRONG_STR_X trailing") == null);
+}
+
+test "slash pty: Space without any str set inserts literal space" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // No `str` calls. Typing `echo OK_SP_T1 OK_SP_T2\n` must run an
+    // echo whose executed output contains both tokens separated by a
+    // literal space — the keystroke hook returns `insert_text(" ")`
+    // whenever the candidate lookup misses.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "echo OK_SP_T1" },
+        .{ .send = " " },
+        .{ .send = "OK_SP_T2\n", .settle_ms = 200, .wait_for = "OK_SP_T1 OK_SP_T2" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "OK_SP_T1 OK_SP_T2") != null);
+}
+
+test "slash pty: empty str body deletes the candidate on trigger" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // Set `garbage` to an empty value. Typing `echo before garbage `
+    // should produce... wait, actually argument-position `garbage`
+    // doesn't expand. Use a command-position trigger:
+    //   - Type `garbage` then Space at start-of-line → buffer
+    //     becomes just ` ` (the typed name vanishes).
+    //   - Then type `echo MARK_EMPTY_OK\n`. The whole executed line
+    //     is therefore `  echo MARK_EMPTY_OK` — leading spaces are
+    //     fine because `echo` ignores them.
+    // If the body weren't empty (e.g. unset), the line would be
+    // `garbage  echo MARK_EMPTY_OK` and slash would try to run a
+    // nonexistent command `garbage`, exit code != 0, no MARK.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "str garbage \"\"\n", .settle_ms = 100 },
+        .{ .send = "garbage" },
+        .{ .send = " ", .settle_ms = 100 }, // expansion deletes "garbage", inserts " "
+        .{ .send = "echo MARK_EMPTY_OK\n", .settle_ms = 200, .wait_for = "MARK_EMPTY_OK" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "MARK_EMPTY_OK") != null);
+    // Belt-and-suspenders: the unset-fallback path would put `garbage`
+    // back into the executed line and produce a "command not found"
+    // diagnostic. Confirm it doesn't.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "garbage: command not found") == null);
+}
+
+test "slash pty: str expands at command position after env-prefix" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // `FOO=1 ll<space>` — `ll` IS at command position (it's the
+    // leading word of the simple_command, with `FOO=1` as
+    // env-prefix). The keystroke scanner must apply the sticky
+    // NAME_EQ rule: env-prefix preserves command position, so
+    // expansion should fire. Without the fix, NAME_EQ would either
+    // wrongly stay a "command starter" (over-eager) or wrongly
+    // demote to argument position (silent miss).
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "str ll echo SLASH_ENV_OK\n", .settle_ms = 100 },
+        .{ .send = "FOO=1 ll" },
+        .{ .send = " ", .settle_ms = 100 },
+        .{ .send = "\n", .settle_ms = 200, .wait_for = "SLASH_ENV_OK" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "SLASH_ENV_OK") != null);
+}
+
+test "slash pty: str does NOT expand argument-position NAME_EQ value" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // `echo FOO=ll<space>` — `ll` is part of the value `FOO=ll`,
+    // which is at argument position to `echo`. The scanner must
+    // NOT promote `ll` to a candidate here. If the sticky-NAME_EQ
+    // rule were broken (treating NAME_EQ as a command starter
+    // unconditionally), `ll` would expand and `echo` would print
+    // `FOO=echo SLASH_ARG_BREAK ` — which would still print the
+    // marker, breaking our positive assertion. We verify the
+    // executed echo prints the literal `FOO=ll`, which is the
+    // un-expanded form.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "str ll echo SLASH_ARG_BREAK\n", .settle_ms = 100 },
+        .{ .send = "echo FOO=ll" },
+        .{ .send = " ", .settle_ms = 100 },
+        .{ .send = "trailing\n", .settle_ms = 200, .wait_for = "FOO=ll trailing" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "FOO=ll trailing") != null);
+}
+
+test "slash pty: str_def brace form stores raw bytes; expansion fires" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // Define `ll` via the brace form with a body containing characters
+    // that would normally need escaping (a pipe). Then trigger
+    // expansion: `ll<space>` should rewrite the buffer to the body
+    // bytes plus a trailing space, and Enter runs the resulting line.
+    // The pipe means the executed line is `echo BRACE_OK | cat`, whose
+    // stdout is just `BRACE_OK\n`. If brace-form bytes weren't being
+    // stored verbatim — e.g., if they got re-parsed as multiple
+    // arguments — the executed line would differ and the marker
+    // wouldn't appear.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "str ll { echo BRACE_OK | cat }\n", .settle_ms = 100 },
+        .{ .send = "ll" },
+        .{ .send = " ", .settle_ms = 100 },
+        .{ .send = "\n", .settle_ms = 200, .wait_for = "BRACE_OK" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "BRACE_OK") != null);
+}
+
+test "slash pty: str does NOT expand the IDENT after `cmd` keyword" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // After `cmd`, the next IDENT is the name being defined — that's
+    // a name slot, not a command position. Typing `cmd ll<space>{...}`
+    // must NOT expand `ll` mid-stream, or the user could never define
+    // a `cmd` that shares a name with an existing `str`. We verify by
+    // having `ll` set to `WRONG_KW_BREAK` and then defining `cmd ll`
+    // and calling it. If expansion fired wrongly, the cmd body would
+    // never get defined under the name `ll`.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "str ll WRONG_KW_BREAK\n", .settle_ms = 100 },
+        .{ .send = "cmd ll" },
+        .{ .send = " ", .settle_ms = 100 }, // must NOT expand `ll`
+        .{ .send = "{ echo MARK_KW_OK }\n", .settle_ms = 100 },
+        .{ .send = "ll\n", .settle_ms = 200, .wait_for = "MARK_KW_OK" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // If expansion had fired during `cmd ll<space>`, the line would
+    // have parsed as `cmd WRONG_KW_BREAK { echo MARK_KW_OK }` — the
+    // `cmd` would have been bound under the wrong name, calling `ll`
+    // would have failed with "command not found", and the marker
+    // would never print. Seeing `MARK_KW_OK` is positive evidence
+    // that the keyword carve-out held. (We can't negative-assert
+    // `WRONG_KW_BREAK` is absent — the terminal naturally echoes
+    // the bytes we typed for the initial `str ll WRONG_KW_BREAK`.)
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "MARK_KW_OK") != null);
+}

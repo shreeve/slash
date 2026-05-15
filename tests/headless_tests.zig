@@ -1251,6 +1251,240 @@ const cases: []const Case = &.{
         .source = "cmd greet {\n  echo hello $1\n}\ngreet world\ngreet alice",
         .expect = .{ .exit_code = 0, .stdout = "hello world\nhello alice\n" },
     },
+
+    // -------------------------------------------------------------------------
+    // str — editor-only literal-text rewrites (PLAN §12)
+    // -------------------------------------------------------------------------
+    .{
+        .name = "str: empty list is empty",
+        .source = "str",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "str: set then list",
+        .source = "str ll ls -lAh\nstr",
+        .expect = .{ .exit_code = 0, .stdout = "str 'll' 'ls -lAh'\n" },
+    },
+    .{
+        .name = "str: set then query",
+        .source = "str ll ls -lAh\nstr ll",
+        .expect = .{ .exit_code = 0, .stdout = "str 'll' 'ls -lAh'\n" },
+    },
+    .{
+        .name = "str: query unset is silent exit 1",
+        .source = "str nope",
+        .expect = .{ .exit_code = 1, .stdout = "", .stderr = "" },
+    },
+    .{
+        .name = "str: list is sorted alphabetically",
+        .source = "str zzz alpha\nstr aaa beta\nstr mmm gamma\nstr",
+        .expect = .{
+            .exit_code = 0,
+            .stdout =
+            \\str 'aaa' 'beta'
+            \\str 'mmm' 'gamma'
+            \\str 'zzz' 'alpha'
+            \\
+            ,
+        },
+    },
+    .{
+        .name = "str: erase removes one",
+        .source = "str a foo\nstr b bar\nstr -e a\nstr",
+        .expect = .{ .exit_code = 0, .stdout = "str 'b' 'bar'\n" },
+    },
+    .{
+        .name = "str: erase is idempotent when name not set",
+        .source = "str -e never_existed",
+        .expect = .{ .exit_code = 0, .stdout = "", .stderr = "" },
+    },
+    .{
+        .name = "str: erase mixes hits and misses, all-or-some clean",
+        .source = "str a foo\nstr -e a missing other\nstr",
+        .expect = .{ .exit_code = 0, .stdout = "", .stderr = "" },
+    },
+    .{
+        .name = "str: -e without args is usage error",
+        .source = "str -e",
+        .expect = .{ .exit_code = 2, .stderr = "str: -e: usage: str -e NAME [NAME...]\n" },
+    },
+    .{
+        .name = "str: reject digit-start LHS",
+        .source = "str 2x foo",
+        .expect = .{
+            .exit_code = 1,
+            .stderr = "str: invalid name '2x': must lex as a single bare ident\n",
+        },
+    },
+    .{
+        .name = "str: reject keyword LHS",
+        .source = "str if foo",
+        .expect = .{
+            .exit_code = 1,
+            .stderr = "str: invalid name 'if': is a slash keyword\n",
+        },
+    },
+    .{
+        .name = "str: reject leading-dash LHS (not -e)",
+        .source = "str -x foo",
+        .expect = .{
+            .exit_code = 1,
+            .stderr = "str: invalid name '-x': names starting with '-' clash with str -e\n",
+        },
+    },
+    .{
+        .name = "str: round-trippable single-quote escaping",
+        .source = "str x \"don't\"\nstr",
+        .expect = .{ .exit_code = 0, .stdout = "str 'x' 'don''t'\n" },
+    },
+    .{
+        .name = "str: multi-arg VALUE joins with space",
+        .source = "str g push origin main\nstr g",
+        .expect = .{ .exit_code = 0, .stdout = "str 'g' 'push origin main'\n" },
+    },
+    .{
+        .name = "str: empty value is stored, not erased",
+        .source = "str foo \"\"\nstr foo\nstr -e foo\nstr foo",
+        .expect = .{ .exit_code = 1, .stdout = "str 'foo' ''\n" },
+    },
+    .{
+        .name = "str: re-set replaces",
+        .source = "str ll first\nstr ll second\nstr",
+        .expect = .{ .exit_code = 0, .stdout = "str 'll' 'second'\n" },
+    },
+    .{
+        .name = "str: in pipeline child, set is no-op (child context)",
+        .source = "str a 1 | cat\nstr a",
+        .expect = .{ .exit_code = 1, .stdout = "" },
+    },
+    .{
+        // Slash's double-quote lexer doesn't support `\t` as an escape
+        // (it'd pass through as literal `\t`), but a literal tab byte
+        // inside a single-quoted string is fine; the validator allows
+        // tab. NUL/LF/CR can't be injected via source syntax (lexer
+        // rejects them at the string level), so those branches of the
+        // validator are exercised through the brace form's raw-byte
+        // capture path — see brace tests below.
+        .name = "str: literal tab in value is preserved",
+        .source = "str t 'a\tb'\nstr t",
+        .expect = .{ .exit_code = 0, .stdout = "str 't' 'a\tb'\n" },
+    },
+
+    // -------------------------------------------------------------------------
+    // str — brace form (raw-byte body via lexer wrapper)
+    // -------------------------------------------------------------------------
+    .{
+        .name = "str_def: simple brace body",
+        .source = "str ll { ls -lAh }\nstr ll",
+        .expect = .{ .exit_code = 0, .stdout = "str 'll' 'ls -lAh'\n" },
+    },
+    .{
+        .name = "str_def: pipe inside body needs no escaping",
+        .source = "str logs { tail -f /var/log | grep err }\nstr logs",
+        .expect = .{ .exit_code = 0, .stdout = "str 'logs' 'tail -f /var/log | grep err'\n" },
+    },
+    .{
+        .name = "str_def: balanced inner braces are preserved",
+        .source = "str awk1 { awk '{print $1}' | sort }\nstr awk1",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "str 'awk1' 'awk ''{print $1}'' | sort'\n",
+        },
+    },
+    .{
+        .name = "str_def: ampersand and semicolons inside body",
+        .source = "str chain { a && b ; c || d & e }\nstr chain",
+        .expect = .{ .exit_code = 0, .stdout = "str 'chain' 'a && b ; c || d & e'\n" },
+    },
+    .{
+        .name = "str_def: dollar signs and quotes inside body",
+        .source = "str foo { echo \"$USER\" 'don''t' }\nstr foo",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "str 'foo' 'echo \"$USER\" ''don''''t'''\n",
+        },
+    },
+    .{
+        .name = "str_def: empty brace body stores as empty",
+        .source = "str foo {}\nstr foo",
+        .expect = .{ .exit_code = 0, .stdout = "str 'foo' ''\n" },
+    },
+    .{
+        .name = "str_def: whitespace-only brace body trims to empty",
+        .source = "str foo {    \t  }\nstr foo",
+        .expect = .{ .exit_code = 0, .stdout = "str 'foo' ''\n" },
+    },
+    .{
+        .name = "str_def: leading/trailing whitespace is trimmed",
+        .source = "str foo {   ls -lAh   }\nstr foo",
+        .expect = .{ .exit_code = 0, .stdout = "str 'foo' 'ls -lAh'\n" },
+    },
+    .{
+        .name = "str_def: internal whitespace is preserved",
+        .source = "str foo { ls   -lAh }\nstr foo",
+        .expect = .{ .exit_code = 0, .stdout = "str 'foo' 'ls   -lAh'\n" },
+    },
+    .{
+        // Runtime validation rejects keyword names. The diagnostic is
+        // emitted via the standard diag sink (EV0030) — at the
+        // `slash -c` entry point, eval-time diagnostics aren't
+        // rendered to stderr (per existing behavior across eval; see
+        // EV0001/EX0001 etc.), so we only assert on the exit code.
+        .name = "str_def: rejects keyword name at runtime",
+        .source = "str if { foo }",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "str_def: re-definition replaces",
+        .source = "str ll { first }\nstr ll { second }\nstr ll",
+        .expect = .{ .exit_code = 0, .stdout = "str 'll' 'second'\n" },
+    },
+    .{
+        .name = "str_def: brace form sets, then -e erases",
+        .source = "str ll { ls -lAh }\nstr -e ll\nstr ll",
+        .expect = .{ .exit_code = 1, .stdout = "" },
+    },
+    .{
+        .name = "str_def: trailing comment is allowed",
+        .source = "str ll { ls -lAh } # quick listing\nstr ll",
+        .expect = .{ .exit_code = 0, .stdout = "str 'll' 'ls -lAh'\n" },
+    },
+    .{
+        .name = "str_def: sequence continuation after brace body",
+        .source = "str a { 1 } ; str b { 2 }\nstr",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "str 'a' '1'\nstr 'b' '2'\n",
+        },
+    },
+
+    // -------------------------------------------------------------------------
+    // Scanner: command-position state machine edge cases
+    // -------------------------------------------------------------------------
+    //
+    // Sticky NAME_EQ: env-prefix preserves command position;
+    // argument-position NAME_EQ doesn't promote it. Without these tests
+    // the brace-form lookahead in the lexer wrapper or the keystroke
+    // scanner could mis-fire on `echo FOO= str x { y }` (mistaking
+    // argument-position for sequence-start) or fail to honor
+    // `FOO=1 ll<space>` (treating env-prefix as argument).
+    .{
+        // Env-prefix ON the str_def grammar form is intentionally
+        // unsupported (str_def is a sequence_item, not a simple_command),
+        // so this should fail to parse rather than secretly succeed.
+        .name = "scanner: str_def cannot follow env-prefix on a simple_command",
+        .source = "echo FOO= str x { y }\nstr x",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        // Backslash inside the brace body has no escape semantics —
+        // it's a literal byte. The matched closing `}` is the one
+        // that returns brace depth to zero, regardless of any
+        // preceding backslash.
+        .name = "str_def: backslash inside body is a literal byte",
+        .source = "str x { a\\b }\nstr x",
+        .expect = .{ .exit_code = 0, .stdout = "str 'x' 'a\\b'\n" },
+    },
 };
 
 // =============================================================================

@@ -362,6 +362,54 @@ fn decodeSingle(alloc: Allocator, bytes: []const u8) ![]u8 {
     return alloc.realloc(out, w);
 }
 
+/// Round-trip `bytes` into a slash-parseable single-quoted word. The
+/// inverse of `decodeSingle`: wraps `bytes` in `'...'` and doubles
+/// every embedded `'` (slash's single-quote escape is `''`). Used for
+/// emitting source-faithful values from builtins that print user-set
+/// bytes back to the user — `str`'s listing form is
+/// `str 'NAME' 'VALUE'\n`.
+pub fn quoteSingleForSlash(alloc: Allocator, bytes: []const u8) ![]u8 {
+    var n_quotes: usize = 0;
+    for (bytes) |c| if (c == '\'') {
+        n_quotes += 1;
+    };
+    var out = try alloc.alloc(u8, bytes.len + n_quotes + 2);
+    out[0] = '\'';
+    var w: usize = 1;
+    for (bytes) |c| {
+        out[w] = c;
+        w += 1;
+        if (c == '\'') {
+            out[w] = '\'';
+            w += 1;
+        }
+    }
+    out[w] = '\'';
+    w += 1;
+    std.debug.assert(w == out.len);
+    return out;
+}
+
+test "word: quoteSingleForSlash round-trips through decodeSingle" {
+    const cases: []const []const u8 = &.{
+        "ls -lAh",
+        "",
+        "don't",
+        "''",
+        "'a'b'",
+        "no specials",
+        "$x and $(cmd)",
+        "tab\tnope", // sanity: literal byte preserved
+    };
+    inline for (cases) |raw| {
+        const quoted = try quoteSingleForSlash(std.testing.allocator, raw);
+        defer std.testing.allocator.free(quoted);
+        const decoded = try decodeSingle(std.testing.allocator, quoted);
+        defer std.testing.allocator.free(decoded);
+        try std.testing.expectEqualStrings(raw, decoded);
+    }
+}
+
 fn decodeDouble(alloc: Allocator, bytes: []const u8) ![]u8 {
     std.debug.assert(bytes.len >= 2 and bytes[0] == '"' and bytes[bytes.len - 1] == '"');
     const inner = bytes[1 .. bytes.len - 1];

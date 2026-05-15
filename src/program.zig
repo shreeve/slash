@@ -130,6 +130,15 @@ pub const Define = struct {
     span: Span,
 };
 
+/// `str NAME { body }` — install raw bytes into the session's
+/// `StrTable` at eval time. Body is opaque text (lexer-captured),
+/// not a child program. PLAN §12.
+pub const StrDef = struct {
+    name: []const u8,
+    body: []const u8,
+    span: Span,
+};
+
 /// `match SUBJECT { arms... }` — first-arm-wins glob-pattern dispatch.
 /// Subject is one Word that expands to a single scalar at evaluation
 /// time. Each arm has one or more literal glob patterns and a body
@@ -183,6 +192,7 @@ pub const Program = union(enum) {
     @"for": For,
     @"match": Match,
     define: Define,
+    str_def: StrDef,
 
     pub fn span(self: Program) Span {
         return switch (self) {
@@ -198,6 +208,7 @@ pub const Program = union(enum) {
             .@"for" => |f| f.span,
             .@"match" => |m| m.span,
             .define => |d| d.span,
+            .str_def => |d| d.span,
         };
     }
 };
@@ -239,6 +250,7 @@ fn lowerShape(shape: shape_mod.Shape, ctx: *const LowerContext, sink: ?Sink) any
         .@"for" => |f| try lowerFor(f, ctx, sink),
         .@"match" => |m| try lowerMatch(m, ctx, sink),
         .cmd_def => |d| try lowerCmdDef(d, ctx, sink),
+        .str_def => |d| try lowerStrDef(d, ctx),
         .word => {
             try diag.emit(sink, diag.make(
                 .lower,
@@ -376,6 +388,14 @@ fn lowerCmdDef(d: shape_mod.CmdDefShape, ctx: *const LowerContext, sink: ?Sink) 
     return put(ctx.alloc, .{ .define = .{
         .name = try ctx.alloc.dupe(u8, d.name),
         .body = body,
+        .span = d.span,
+    } });
+}
+
+fn lowerStrDef(d: shape_mod.StrDefShape, ctx: *const LowerContext) anyerror!*const Program {
+    return put(ctx.alloc, .{ .str_def = .{
+        .name = try ctx.alloc.dupe(u8, d.name),
+        .body = try ctx.alloc.dupe(u8, d.body),
         .span = d.span,
     } });
 }
@@ -603,6 +623,11 @@ pub fn clone(p: *const Program, alloc: Allocator) anyerror!*const Program {
             .body = try clone(d.body, alloc),
             .span = d.span,
         } },
+        .str_def => |d| .{ .str_def = .{
+            .name = try alloc.dupe(u8, d.name),
+            .body = try alloc.dupe(u8, d.body),
+            .span = d.span,
+        } },
     };
     return slot;
 }
@@ -730,6 +755,7 @@ fn dumpProgram(source: Source, p: *const Program, depth: u32, w: *Writer, opts: 
         .@"for" => |x| try dumpFor(source, x, depth, w, opts),
         .@"match" => |x| try dumpMatch(source, x, depth, w, opts),
         .define => |d| try dumpDefine(source, d, depth, w, opts),
+        .str_def => |d| try dumpStrDef(d, w, opts),
     }
 }
 
@@ -901,6 +927,14 @@ fn dumpFor(source: Source, x: For, depth: u32, w: *Writer, opts: DumpOptions) Wr
     try indent(w, depth + 1);
     try w.writeAll("body\n");
     try dumpProgram(source, x.body, depth + 2, w, opts);
+}
+
+fn dumpStrDef(d: StrDef, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.print("str_def {s}", .{d.name});
+    try maybeSpan(d.span, w, opts);
+    try w.writeByte('\n');
+    try indent(w, 1);
+    try w.print("body {d} bytes: {s}\n", .{ d.body.len, d.body });
 }
 
 fn dumpDefine(source: Source, d: Define, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
