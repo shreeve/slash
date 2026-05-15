@@ -33,7 +33,7 @@ the full statement of intent.
 | [`PLAN.md`](./PLAN.md) | The design constitution. Long. §1 (vision), §7 (semantic rules), §12 (in/out of scope), §14 (the §14 test) are the load-bearing parts. Everything else is reachable from there. |
 | [`CHECKLIST.md`](./CHECKLIST.md) | The operational correctness rubric. Process groups, terminal ownership, signal discipline, etc. **75/77 boxes checked** with inline evidence pointers (file/function/test for every claim). Two unchecked items both deferred for the same reason: no rapid-stop/continue stress test. |
 | [`VALIDATION.md`](./VALIDATION.md) | The empirical log. First run on 2026-05-14 was **14/14 PASS** against real interactive software (vim, less, top, ssh, python, node, nested shells, yes-pipe). Findings are tracked in numbered F-entries; F1, F2, F3 (both stickiness and placement), F4 are all FIXED. Second run on 2026-05-15 confirmed the F3 + notice closure interactively. |
-| [`ROADMAP.md`](./ROADMAP.md) | What's left. Currently the remaining interactive-UX phase — six items: three ready now, three blocked on missing zigline primitives. Two of the blockers are tracked as zigline 0.4.0; autosuggestions need ghost-text rendering, which lives in `zigline/FUTURE.md` without a specific release number. |
+| [`ROADMAP.md`](./ROADMAP.md) | What's left. Currently the remaining interactive-UX phase — four items: two ready now, two blocked on missing zigline primitives (`replace_buffer_and_accept`, transient input mode). |
 | [`README.md`](./README.md) | What slash looks like to a user. Public surface. |
 | [`ZIG-0.16.0.md`](./ZIG-0.16.0.md) | Reference for Zig 0.16's API shifts (Juicy Main, `std.Io`, `std.posix` shrinkage, format-string changes). Most LLM training cutoffs predate this; if a Zig API surprise comes up, the answer is almost certainly here. |
 
@@ -117,10 +117,10 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: **91/91 passing** — 45 in the
-unit + headless suite (`zig build test-headless`) and 46 in the PTY
-suite (`zig build test-pty`). All green and reliable on repeated
-runs. The two ex-flaky PTY tests (`Ctrl-Z stops a foreground
+**Test totals as of this handoff**: **112/112 passing** — 60 in the
+unit + headless suite (`zig build test-headless`) and 52 in the PTY
+suite (`zig build test-pty`). All green. The two ex-flaky PTY tests
+(`Ctrl-Z stops a foreground
 sleep`, `cat & SIGTTIN`) were diagnosed and fixed in commit
 `14f5e4a` — root cause was Ctrl-Z arriving before slash finished
 `fork+exec+tcsetpgrp`, with the signal silently dropped because
@@ -173,6 +173,17 @@ so the JSONL history index doesn't pollute the user's real
   search via the same `HistoryIndex`, with prefix matching, cwd
   boost, and a "user edited mid-nav → fresh search" detection. See
   commit `abab621`.
+- Intelligent tab completions — `src/completion.zig` holds the
+  slash-side spec/provider registry; `repl.zig` is only the zigline
+  adapter. Starter specs/providers cover command position (builtins,
+  PATH commands, `cmd` defs, `str` names), `git`, `cd`, `ssh`,
+  `kill`, `fg`/`bg`, `cmd`, and `str -e`. No sourced completion
+  scripts; no arbitrary slash evaluation while pressing Tab.
+- History autosuggestions — zigline hint hook renders dim ghost-text
+  suffixes from `Session.history` / `HistoryIndex` ranked prefix
+  search on fresh prompts. Right Arrow / Ctrl-F accept the rendered
+  suffix as ordinary buffer text; Enter without accept runs only the
+  typed prefix.
 - Pre-prompt status notices + live `[N] Stopped|Continued <cmd>`
   announcements for Ctrl-Z / `fg` / `bg`, replacing the inline
   `[N]` exit-status badge in the prompt with a dim-on-tty stderr
@@ -195,47 +206,11 @@ so the JSONL history index doesn't pollute the user's real
 
 ## What to do next
 
-Six items left in `ROADMAP.md`, grouped by readiness:
+Four items left in `ROADMAP.md`, grouped by readiness:
 
-### Ready now (3 items)
+### Ready now (2 items)
 
-1. **Intelligent tab completions** — per-command completion specs
-   as declarative data. Starter specs: `git`, `cd`, `ssh`, `kill`,
-   `fg`/`bg`, `cmd`, `str`. zigline 0.2.x already provides the
-   completion hook + multi-column menu (slash's `completionHook` in
-   `repl.zig` uses them); this work is the slash-side spec registry
-   and starter specs. **This is the highest-leverage next pickup.**
-   ~2–3 days for framework + first specs.
-
-   *Implementation shape:*
-   - `repl.zig` owns only the zigline `completionHook` adapter.
-   - Put slash-side data / model / ranking in a focused new module:
-     `src/completion.zig`.
-   - Specs are declarative records: command name, argument position,
-     static candidates, flag metadata, path filters, and explicit
-     provider IDs.
-   - Dynamic candidates are explicit bounded providers, not sourced
-     completion scripts and not arbitrary slash evaluation. If a
-     provider runs a command, it takes an argv vector, has a short
-     timeout, reads newline-delimited stdout, treats failure as no
-     candidates, and never mutates shell state.
-   - Command-position completion combines builtins, external PATH
-     commands, user `cmd` definitions, and relevant `str` names.
-   - The existing grammar / lexer is the source for locating
-     command/word position; do not add regex tokenization.
-
-   *Definition of done:*
-   - `cd <TAB>` lists directories only and preserves quoting.
-   - `fg %<TAB>` / `bg %<TAB>` list current job specs.
-   - `kill -<TAB>` lists signal names; `kill <TAB>` can list jobs/pids.
-   - `str -e <TAB>` lists defined `str` names.
-   - `git <TAB>` lists starter git subcommands without invoking the
-     git completion scripts.
-   - completion never executes arbitrary slash code while the user
-     is only pressing Tab.
-   - PTY tests pin each of the above.
-
-2. **Rich prompt** — extend the prompt provider set (jobs count,
+1. **Rich prompt** — extend the prompt provider set (jobs count,
    git context, virtualenv, host/user, time). Fixed providers, no
    user-defined "prompt is a function." Ship a small set of
    defaults (default, plain, minimal) and a config knob to compose
@@ -261,49 +236,26 @@ Six items left in `ROADMAP.md`, grouped by readiness:
      nonzero-status display, background / stopped job count, and
      git-provider failure fallback.
 
-3. **Syntax highlighting polish** — already shipped as a feature;
+2. **Syntax highlighting polish** — already shipped as a feature;
    expand the token classes (variables, command substitutions,
    redirects, glob parts, heredoc bodies). Always driven by the
    BaseLexer / one grammar — never a second tokenizer. Uses zigline's
    existing highlight hook. ~half day.
 
-### Blocked on zigline (3 items)
+### Blocked on zigline (2 items)
 
 Each item names the specific zigline addition it waits on. The
 recommended escalation path is to file (or contribute) the missing
 primitive in zigline before unblocking these on the slash side.
 
-4. **Autosuggestions** — dim ghost text predicted from history;
-   accept on right-arrow / Ctrl-F. The substrate (`HistoryIndex`)
-   is in place from commit `a0fd0e0` — autosuggestions must consume
-   the same ranked-prefix search API, not invent a parallel ranking
-   system.
-   - **Blocker:** zigline 0.3.1 does **not** render virtual ghost
-     text past the end of the editable buffer. The existing
-     highlight hook only styles existing buffer text. Ghost-text
-     rendering is listed in `/Users/shreeve/Data/Code/zigline/FUTURE.md`
-     as "Hints (ghost text). Right-of-cursor suggestion rendering.
-     Fish-style." It isn't tied to a specific zigline release; could
-     ship in any 0.x.
-   - **Do not fake it** by inserting bytes into the editable buffer
-     — that violates the UX semantic (the suggestion isn't the
-     user's command until they accept it).
-   - When unblocked, the wire-up is small: `repl.zig`'s existing
-     zigline config hosts the highlight, smart Up/Down, and `str`
-     hooks; the autosuggestion render hook lands in the same
-     neighborhood. Acceptance (Right Arrow / Ctrl-F) replaces the
-     editable buffer with the suggested line; normal Enter runs it.
-     PTY tests should pin: prefix renders suggestion; Right
-     Arrow / Ctrl-F accepts; Enter without accept runs only the
-     typed prefix; suggestion comes from the test XDG fixture.
-5. **`str` Enter trigger** — currently `str` only expands on Space.
+3. **`str` Enter trigger** — currently `str` only expands on Space.
    Enter on an unexpanded `str` candidate would either submit the
    LHS literally or require a second Enter — both wrong.
    - **Blocker:** zigline 0.4.0 `replace_buffer_and_accept` (a
      result variant that combines `replace_buffer` with `accept_line`
      in one step). When that lands, wire up in slash's
      `customActionHook` — the trigger detection is already there.
-6. **Smart history Ctrl-R interactive search** — substrate shipped;
+4. **Smart history Ctrl-R interactive search** — substrate shipped;
    only the modal-input UI is missing. We agreed explicitly **not**
    to fake it via in-buffer hacks (worse than not having it).
    - **Blocker:** zigline 0.4.0 transient-input-mode primitive (a

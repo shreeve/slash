@@ -97,6 +97,8 @@ What ships today:
 - `str` abbreviations (literal-bytes-to-literal-bytes editor rewrites)
 - persistent metadata-rich command history (per-cwd, frecency, dedup)
 - smart prefix-aware Up/Down navigation
+- history autosuggestions (dim ghost-text suffix; Right Arrow / Ctrl-F accepts)
+- intelligent Tab completions (`git`, `cd`, `ssh`, `kill`, `fg`/`bg`, `cmd`, `str`, PATH)
 - pre-prompt status notices (`slash: exit N (SIGNAME)`)
 - live job-state announcements (`[N] Stopped`, `[N] Continued`)
 

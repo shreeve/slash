@@ -37,6 +37,7 @@ const builtins = @import("builtins.zig");
 const exec = @import("exec.zig");
 const history_mod = @import("history.zig");
 const notice = @import("notice.zig");
+const completion = @import("completion.zig");
 
 // libc bindings — `std.c` doesn't expose these in Zig 0.16.
 extern "c" fn getpgrp() std.c.pid_t;
@@ -177,6 +178,10 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
             .ctx = @ptrCast(&hooks),
             .highlightFn = highlightHook,
         },
+        .hint = .{
+            .ctx = @ptrCast(&hooks),
+            .hintFn = hintHook,
+        },
         .custom_action = .{
             .ctx = @ptrCast(&hooks),
             .invokeFn = customActionHook,
@@ -202,6 +207,7 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
             .bytes = prompt_text,
             .width = promptDisplayWidth(prompt_text),
         };
+        hooks.fresh_prompt = pending.items.len == 0;
 
         const result = editor.readLine(prompt) catch |err| {
             std.debug.print("slash: readLine error: {s}\n", .{@errorName(err)});
@@ -360,6 +366,81 @@ fn customActionHook(
         .smart_history_prev => smartHistoryPrev(allocator, request, hooks),
         .smart_history_next => smartHistoryNext(allocator, request, hooks),
     };
+}
+
+fn hintHook(
+    ctx_ptr: *anyopaque,
+    request: zigline.HintRequest,
+) anyerror!?zigline.HintResult {
+    const hooks: *SlashHooks = @ptrCast(@alignCast(ctx_ptr));
+    if (!hooks.fresh_prompt) return null;
+    if (request.cursor_byte != request.buffer.len) return null;
+    if (request.buffer.len == 0) return null;
+
+    var cwd_buf: [4096]u8 = undefined;
+    const cwd: []const u8 = if (getcwd(&cwd_buf, cwd_buf.len)) |p|
+        std.mem.sliceTo(p, 0)
+    else
+        "?";
+
+    const suffix = try historyHintSuffix(
+        hooks.alloc,
+        hooks.session,
+        request.buffer,
+        cwd,
+    ) orelse return null;
+    if (suffix.len == 0) return null;
+    return zigline.HintResult{ .text = suffix };
+}
+
+fn historyHintSuffix(
+    alloc: Allocator,
+    session: *session_mod.Session,
+    prefix: []const u8,
+    cwd: []const u8,
+) !?[]const u8 {
+    if (prefix.len == 0) return null;
+    const idx = if (session.history) |*h| h else return null;
+    const results = try idx.search(alloc, prefix, cwd, .prefix, 8);
+    defer alloc.free(results);
+    for (results) |candidate| {
+        const line = candidate.line;
+        if (line.len <= prefix.len) continue;
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        return line[prefix.len..];
+    }
+    return null;
+}
+
+test "hint: history prefix search returns only suffix" {
+    var s = try session_mod.Session.init(std.testing.allocator, @ptrCast(@alignCast(std.c.environ)), false);
+    defer s.deinit();
+    s.history = try history_mod.HistoryIndex.init(std.testing.allocator, null);
+    try s.history.?.append("git status --short", "/repo", 0, 1);
+
+    const suffix = try historyHintSuffix(std.testing.allocator, &s, "git st", "/repo");
+    try std.testing.expectEqualStrings("atus --short", suffix.?);
+}
+
+test "hint: empty and exact prefixes produce no suggestion" {
+    var s = try session_mod.Session.init(std.testing.allocator, @ptrCast(@alignCast(std.c.environ)), false);
+    defer s.deinit();
+    s.history = try history_mod.HistoryIndex.init(std.testing.allocator, null);
+    try s.history.?.append("git status", "/repo", 0, 1);
+
+    try std.testing.expect(try historyHintSuffix(std.testing.allocator, &s, "", "/repo") == null);
+    try std.testing.expect(try historyHintSuffix(std.testing.allocator, &s, "git status", "/repo") == null);
+}
+
+test "hint: exact match does not mask longer prefix candidate" {
+    var s = try session_mod.Session.init(std.testing.allocator, @ptrCast(@alignCast(std.c.environ)), false);
+    defer s.deinit();
+    s.history = try history_mod.HistoryIndex.init(std.testing.allocator, null);
+    try s.history.?.append("git status", "/repo", 0, 1);
+    try s.history.?.append("git status --short", "/repo", 0, 1);
+
+    const suffix = try historyHintSuffix(std.testing.allocator, &s, "git status", "/repo");
+    try std.testing.expectEqualStrings(" --short", suffix.?);
 }
 
 // =============================================================================
@@ -683,6 +764,10 @@ const SlashHooks = struct {
     /// `editInEditor`'s "Ctrl-X on empty buffer pre-fills the last
     /// command" behavior.
     history: *zigline.History,
+    /// True when the active editor prompt is a new command line, false
+    /// for continuation prompts that are still accumulating a compound
+    /// form.
+    fresh_prompt: bool = true,
 
     /// Smart-Up/Down navigation state. Populated on the first Up
     /// press while the buffer is non-empty, mutated as the user
@@ -1008,7 +1093,7 @@ fn findMatchingBracket(buffer: []const u8, cursor_byte: usize) ?usize {
                 .rparen => if (paren_depth > 0) paren_stack[paren_depth - 1] else null,
                 .rbracket => if (bracket_depth > 0) bracket_stack[bracket_depth - 1] else null,
                 else => null, // cursor's byte is `}` etc. but lexer didn't tokenize it as a bracket
-                              // (probably inside a string/comment/heredoc) → no match
+                // (probably inside a string/comment/heredoc) → no match
             };
         }
 
@@ -1289,7 +1374,7 @@ fn isSpecialVarChar(c: u8) bool {
 }
 
 // -----------------------------------------------------------------------------
-// Completion — replacement-range adapter over PATH + filesystem walk
+// Completion — zigline adapter over slash-side specs/providers
 // -----------------------------------------------------------------------------
 
 fn completionHook(
@@ -1297,198 +1382,12 @@ fn completionHook(
     allocator: Allocator,
     request: zigline.CompletionRequest,
 ) anyerror!zigline.CompletionResult {
-    _ = ctx_ptr;
-    const ctx = identifyCompletionContext(request.buffer, request.cursor_byte);
-
-    var raw: std.ArrayListUnmanaged([]u8) = .empty;
-    defer {
-        for (raw.items) |s| allocator.free(s);
-        raw.deinit(allocator);
-    }
-
-    switch (ctx.kind) {
-        .command => try gatherCommandCandidates(allocator, ctx.prefix, &raw),
-        .file => try gatherFileCandidates(allocator, ctx.prefix, &raw),
-    }
-
-    var candidates: std.ArrayListUnmanaged(zigline.Candidate) = .empty;
-    errdefer {
-        for (candidates.items) |c| {
-            allocator.free(c.insert);
-            if (c.display) |d| allocator.free(d);
-        }
-        candidates.deinit(allocator);
-    }
-
-    for (raw.items) |label| {
-        // A trailing '/' on a candidate means "directory". Strip the
-        // marker for `insert` and re-attach via the per-candidate
-        // append rule the renderer will apply when only one matches.
-        const is_dir = label.len > 0 and label[label.len - 1] == '/';
-        const insert_text = try allocator.dupe(u8, if (is_dir) label[0 .. label.len - 1] else label);
-        try candidates.append(allocator, .{
-            .insert = insert_text,
-            .kind = if (ctx.kind == .command) .command else if (is_dir) .directory else .file,
-            .append = if (is_dir) '/' else if (ctx.kind == .command) ' ' else null,
-        });
-    }
-
-    return .{
-        .replacement_start = request.cursor_byte - ctx.prefix.len,
-        .replacement_end = request.cursor_byte,
-        .candidates = try candidates.toOwnedSlice(allocator),
-    };
-}
-
-const CompletionKind = enum { command, file };
-
-const CompletionContext = struct {
-    kind: CompletionKind,
-    /// Bytes of the partial token under the cursor.
-    prefix: []const u8,
-};
-
-fn identifyCompletionContext(buf: []const u8, cursor_byte: usize) CompletionContext {
-    var token_start = cursor_byte;
-    while (token_start > 0) {
-        const c = buf[token_start - 1];
-        if (isSpace(c) or c == '|' or c == ';' or c == '&' or c == '(' or c == '{') break;
-        token_start -= 1;
-    }
-    const prefix = buf[token_start..cursor_byte];
-
-    var p = token_start;
-    while (p > 0 and isSpace(buf[p - 1])) p -= 1;
-    if (p == 0) return .{ .kind = .command, .prefix = prefix };
-    const prev = buf[p - 1];
-    if (prev == ';' or prev == '|' or prev == '&' or prev == '(' or prev == '{') {
-        return .{ .kind = .command, .prefix = prefix };
-    }
-    return .{ .kind = .file, .prefix = prefix };
-}
-
-fn gatherCommandCandidates(
-    allocator: Allocator,
-    prefix: []const u8,
-    out: *std.ArrayListUnmanaged([]u8),
-) !void {
-    const path_env = std.c.getenv("PATH") orelse return;
-    const path_str = std.mem.span(path_env);
-
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    defer {
-        var it = seen.iterator();
-        while (it.next()) |e| allocator.free(e.key_ptr.*);
-        seen.deinit(allocator);
-    }
-
-    var dirs = std.mem.splitScalar(u8, path_str, ':');
-    while (dirs.next()) |dir| {
-        if (dir.len == 0) continue;
-        try enumerateMatching(allocator, dir, prefix, out, &seen, .require_executable);
-    }
-}
-
-fn gatherFileCandidates(
-    allocator: Allocator,
-    prefix: []const u8,
-    out: *std.ArrayListUnmanaged([]u8),
-) !void {
-    const slash_idx = std.mem.lastIndexOfScalar(u8, prefix, '/');
-    const dir_part: []const u8 = if (slash_idx) |i| prefix[0 .. i + 1] else "";
-    const base_part: []const u8 = if (slash_idx) |i| prefix[i + 1 ..] else prefix;
-    const dir_path: []const u8 = if (dir_part.len == 0) "." else dir_part;
-
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    defer {
-        var it = seen.iterator();
-        while (it.next()) |e| allocator.free(e.key_ptr.*);
-        seen.deinit(allocator);
-    }
-
-    try enumerateMatching(allocator, dir_path, base_part, out, &seen, .any);
-
-    if (dir_part.len > 0) {
-        for (out.items) |*cand| {
-            const old = cand.*;
-            const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ dir_part, old });
-            allocator.free(old);
-            cand.* = combined;
-        }
-    }
-}
-
-const EnumerateMode = enum { any, require_executable };
-
-fn enumerateMatching(
-    allocator: Allocator,
-    dir_path: []const u8,
-    prefix: []const u8,
-    out: *std.ArrayListUnmanaged([]u8),
-    seen: *std.StringHashMapUnmanaged(void),
-    mode: EnumerateMode,
-) !void {
-    var dir_buf: [4096]u8 = undefined;
-    if (dir_path.len >= dir_buf.len) return;
-    @memcpy(dir_buf[0..dir_path.len], dir_path);
-    dir_buf[dir_path.len] = 0;
-    const dir_z: [*:0]const u8 = @ptrCast(&dir_buf);
-
-    const dirp = std.c.opendir(dir_z) orelse return;
-    defer _ = std.c.closedir(dirp);
-
-    while (true) {
-        const ent = std.c.readdir(dirp) orelse break;
-        const name = direntName(ent);
-        if (name.len == 0) continue;
-        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-        if (name[0] == '.' and (prefix.len == 0 or prefix[0] != '.')) continue;
-        if (!std.mem.startsWith(u8, name, prefix)) continue;
-
-        if (mode == .require_executable) {
-            var full_buf: [8192]u8 = undefined;
-            const full = std.fmt.bufPrint(&full_buf, "{s}/{s}\x00", .{ dir_path, name }) catch continue;
-            const full_z: [*:0]const u8 = @ptrCast(full.ptr);
-            if (std.c.access(full_z, std.c.X_OK) != 0) continue;
-        }
-
-        const key = try allocator.dupe(u8, name);
-        const gop = try seen.getOrPut(allocator, key);
-        if (gop.found_existing) {
-            allocator.free(key);
-            continue;
-        }
-
-        var label_buf: [4096]u8 = undefined;
-        var label = name;
-        if (mode == .any) {
-            var path_buf: [8192]u8 = undefined;
-            const path = std.fmt.bufPrint(&path_buf, "{s}/{s}\x00", .{ dir_path, name }) catch name;
-            const path_z: [*:0]const u8 = @ptrCast(path.ptr);
-            var st: std.c.Stat = undefined;
-            if (std.c.fstatat(std.c.AT.FDCWD, path_z, &st, 0) == 0 and
-                (st.mode & std.c.S.IFMT) == std.c.S.IFDIR)
-            {
-                const decorated = std.fmt.bufPrint(&label_buf, "{s}/", .{name}) catch name;
-                label = decorated;
-            }
-        }
-        try out.append(allocator, try allocator.dupe(u8, label));
-    }
-}
-
-fn direntName(ent: anytype) []const u8 {
-    const T = @TypeOf(ent.*);
-    if (@hasField(T, "namlen")) {
-        const len: usize = ent.namlen;
-        return ent.name[0..len];
-    }
-    const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
-    return std.mem.span(name_ptr);
-}
-
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t';
+    const hooks: *SlashHooks = @ptrCast(@alignCast(ctx_ptr));
+    return completion.complete(allocator, .{
+        .session = hooks.session,
+        .buffer = request.buffer,
+        .cursor_byte = request.cursor_byte,
+    });
 }
 
 // =============================================================================

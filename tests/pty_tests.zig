@@ -89,6 +89,46 @@ fn clearTestHistory() void {
     _ = std.c.unlink(legacy);
 }
 
+fn seedTestHistoryJsonl(line: []const u8) !void {
+    ensurePtyTestEnv();
+    clearTestHistory();
+    const dir = "/tmp/slash-pty-tests-xdg/slash";
+    _ = std.c.mkdir(dir, @as(std.c.mode_t, 0o700));
+    const path = "/tmp/slash-pty-tests-xdg/slash/history.jsonl";
+    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return error.OpenHistorySeedFailed;
+    defer _ = std.c.close(fd);
+
+    var buf: [512]u8 = undefined;
+    const json = try std.fmt.bufPrint(
+        &buf,
+        "{{\"v\":1,\"seq\":1,\"ts\":1,\"cwd\":\"?\",\"line\":\"{s}\",\"status\":0,\"dur\":0}}\n",
+        .{line},
+    );
+    var off: usize = 0;
+    while (off < json.len) {
+        const n = std.c.write(fd, json.ptr + off, json.len - off);
+        if (n < 0) {
+            const e = std.c.errno(@as(c_int, -1));
+            if (e == .INTR or e == .AGAIN) continue;
+            return error.WriteHistorySeedFailed;
+        }
+        off += @intCast(n);
+    }
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    if (needle.len == 0) return 0;
+    var count: usize = 0;
+    var offset: usize = 0;
+    while (offset < haystack.len) {
+        const rel = std.mem.indexOf(u8, haystack[offset..], needle) orelse break;
+        count += 1;
+        offset += rel + needle.len;
+    }
+    return count;
+}
+
 const PtyPair = struct {
     master: c_int,
     slave: c_int,
@@ -1086,8 +1126,7 @@ test "slash pty: shell exit hangs up running bg jobs" {
     // `trap` registration before slash sends SIGHUP.
     const r = try runScript(alloc, &.{"--norc"}, &.{
         .{
-            .send =
-                "/bin/sh -c 'trap \"echo hupped > " ++ hup_marker ++
+            .send = "/bin/sh -c 'trap \"echo hupped > " ++ hup_marker ++
                 "; exit 0\" HUP; sleep 10' >/dev/null 2>&1 &\n",
             .settle_ms = 600,
         },
@@ -1268,8 +1307,7 @@ test "slash pty: shell exit does NOT signal disowned jobs" {
     // absent. The sleep is short so the test finishes quickly.
     const r = try runScript(alloc, &.{"--norc"}, &.{
         .{
-            .send =
-                "/bin/sh -c 'trap \"echo hupped > " ++ disown_marker ++
+            .send = "/bin/sh -c 'trap \"echo hupped > " ++ disown_marker ++
                 "\" HUP; sleep 0.4' >/dev/null 2>&1 &\n",
             .settle_ms = 200,
         },
@@ -1619,4 +1657,99 @@ test "slash pty: str does NOT expand the IDENT after `cmd` keyword" {
     // `WRONG_KW_BREAK` is absent — the terminal naturally echoes
     // the bytes we typed for the initial `str ll WRONG_KW_BREAK`.)
     try std.testing.expect(std.mem.indexOf(u8, r.out, "MARK_KW_OK") != null);
+}
+
+test "slash pty: completion cd tab completes directories only" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "cd sr\t\n", .settle_ms = 300 },
+        .{ .send = "pwd\n", .settle_ms = 500, .wait_for = "/src" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/src") != null);
+}
+
+test "slash pty: completion git tab lists static subcommands" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "git \t", .settle_ms = 800, .wait_for = "checkout" },
+        .{ .send = "\x03", .settle_ms = 100 },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "checkout") != null);
+}
+
+test "slash pty: completion kill dash inserts signal name" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "kill -K\t", .settle_ms = 300, .wait_for = "-KILL" },
+        .{ .send = "\x03", .settle_ms = 100 },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "-KILL") != null);
+}
+
+test "slash pty: completion str erase completes defined names" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "str zzz echo SHOULD_NOT_RUN\n", .settle_ms = 100 },
+        .{ .send = "str -e z\t\n", .settle_ms = 300 },
+        .{ .send = "echo BEFORE_STR_QUERY\n", .settle_ms = 300, .wait_for = "BEFORE_STR_QUERY" },
+        .{ .send = "str zzz\n", .settle_ms = 500, .wait_for = "slash: exit 1" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    const boundary = std.mem.indexOf(u8, r.out, "BEFORE_STR_QUERY").?;
+    const after = r.out[boundary..];
+    try std.testing.expect(std.mem.indexOf(u8, after, "slash: exit 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after, "str 'zzz'") == null);
+}
+
+test "slash pty: completion fg percent inserts current job spec" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30 >/dev/null 2>&1 &\n", .settle_ms = 500 },
+        .{ .send = "fg %\t\n", .settle_ms = 500 },
+        .{ .send = "\x03", .settle_ms = 300 },
+        .{ .send = "echo FG_COMPLETE_OK\n", .settle_ms = 500, .wait_for = "FG_COMPLETE_OK" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "invalid job id `%`") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "FG_COMPLETE_OK") != null);
+}
+
+test "slash pty: autosuggestion accepts history suffix with right arrow" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    try seedTestHistoryJsonl("echo SLASH_HINT_FULL");
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "echo SLASH_HINT", .settle_ms = 500, .wait_for = "_FULL" },
+        .{ .send = "\x1b[C\n", .settle_ms = 500, .wait_for = "SLASH_HINT_FULL" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "_FULL") != null);
+    try std.testing.expect(countOccurrences(r.out, "SLASH_HINT_FULL") >= 2);
 }

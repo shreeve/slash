@@ -142,3 +142,37 @@ to the next ROADMAP item — autosuggestions are the natural pickup
 since the `HistoryIndex` substrate is already in.
 
 ---
+
+## Targeted PTY Validation: 2026-05-15 21:50 UTC
+
+- commit: working tree (intelligent completions + history autosuggestions)
+- os: Darwin 25.4.0 arm64 (macOS, M-series)
+- slash binary: `bin/slash`
+- mode: automated PTY regression suite (`zig build test`)
+
+| # | test | result | note |
+|---|---|---|---|
+| 1 | `cd` completion | PASS | `cd sr<Tab>` completes to the `src/` directory and `pwd` confirms the directory change |
+| 2 | `git` completion | PASS | `git <Tab>` lists starter subcommands such as `checkout` without invoking git completion scripts |
+| 3 | `kill` signal completion | PASS | `kill -K<Tab>` completes to `-KILL` |
+| 4 | `str -e` completion | PASS | `str -e z<Tab>` targets the defined `str` name and erases it |
+| 5 | job completion | PASS | `fg %<Tab>` targets the current job spec rather than the literal `%` |
+| 6 | history autosuggestion render + accept | PASS | seeded history renders the ghost suffix; Right Arrow accepts and Enter runs the full command |
+
+**Tally:** 6 PASS, 0 FAIL, 0 SKIP.
+
+### Findings
+
+The first PTY pass caught a real `str -e` completion-context bug:
+the provider checked the current word instead of the previous word, so
+`str -e z<Tab>` missed the `str`-name provider. Fixed in
+`src/completion.zig` by checking the word before the replacement range.
+
+### Verdict
+
+The new editor-time completion and autosuggestion surfaces are pinned
+by PTY tests and by the unit/headless suite. They stay within PLAN §12:
+no shell code is evaluated at editor events, suggestions are not part
+of the command until accepted, and completion providers are bounded.
+
+---
