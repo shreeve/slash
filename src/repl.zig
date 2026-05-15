@@ -36,6 +36,7 @@ const eval = @import("eval.zig");
 const builtins = @import("builtins.zig");
 const exec = @import("exec.zig");
 const history_mod = @import("history.zig");
+const notice = @import("notice.zig");
 
 // libc bindings — `std.c` doesn't expose these in Zig 0.16.
 extern "c" fn getpgrp() std.c.pid_t;
@@ -188,6 +189,11 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
 
     var prompt_buf: [4096]u8 = undefined;
     while (true) {
+        // Drain any pre-prompt notice (last command's non-zero exit
+        // status) before rendering the prompt, so the prompt itself
+        // stays uncluttered and the failure shows up on its own line
+        // above. See `notice.zig` for format and dim-on-tty rendering.
+        if (pending.items.len == 0) notice.pendingExitStatus(session);
         const prompt_text = if (pending.items.len == 0)
             slashPrompt(&prompt_buf, session)
         else
@@ -1967,23 +1973,26 @@ extern fn strftime(buf: [*]u8, sz: usize, fmt: [*:0]const u8, tm: *const Tm) usi
 
 /// Top-level entry: dispatch to user-defined `$PROMPT` if set, else
 /// the built-in default. Returns a slice into `buf`.
+///
+/// The pre-prompt status notice (`slash: exit N`) is drained by
+/// `notice.pendingExitStatus` *before* this function is called, so
+/// neither the user prompt nor the default prompt has to worry about
+/// surfacing the badge. `%?` in `$PROMPT` still expands to the raw
+/// status integer for users who want to compose their own indicator.
 fn slashPrompt(buf: []u8, session: *session_mod.Session) []const u8 {
     if (session.vars.get("PROMPT")) |v| switch (v.value) {
-        .scalar => |raw| {
-            const out = expandPromptFormat(buf, session, raw);
-            session.status_pending = false;
-            return out;
-        },
+        .scalar => |raw| return expandPromptFormat(buf, session, raw),
         .list => {},
     };
     return renderDefaultPrompt(buf, session);
 }
 
 /// Built-in default prompt. Pure ASCII; byte length == display width.
-/// Shows `[N]` only on the prompt that immediately follows a non-zero
-/// command result (see `Session.status_pending`) — not on every
-/// subsequent prompt while `$?` happens to stay non-zero.
+/// Format: `<cwd> $ ` (or `<cwd> # ` for root). Failures fall back
+/// to a plain `$ ` so the user always sees something they can type
+/// against.
 fn renderDefaultPrompt(buf: []u8, session: *session_mod.Session) []const u8 {
+    _ = session;
     var w = std.Io.Writer.fixed(buf);
 
     var cwd_buf: [4096]u8 = undefined;
@@ -1997,22 +2006,11 @@ fn renderDefaultPrompt(buf: []u8, session: *session_mod.Session) []const u8 {
     if (std.c.getenv("HOME")) |home_env| {
         const home = std.mem.span(home_env);
         if (home.len > 0 and std.mem.startsWith(u8, cwd, home)) {
-            w.writeAll("~") catch {
-                session.status_pending = false;
-                return "$ ";
-            };
+            w.writeAll("~") catch return "$ ";
             cwd = cwd[home.len..];
         }
     }
-    w.writeAll(cwd) catch {
-        session.status_pending = false;
-        return "$ ";
-    };
-
-    if (session.status_pending and session.last_status != 0) {
-        w.print(" [{d}]", .{session.last_status}) catch {};
-    }
-    session.status_pending = false;
+    w.writeAll(cwd) catch return "$ ";
 
     const suffix: []const u8 = if (std.c.getuid() == 0) " # " else " $ ";
     w.writeAll(suffix) catch return "$ ";

@@ -28,6 +28,7 @@ const word_mod = @import("word.zig");
 const parser = @import("parser.zig");
 const slash = @import("slash.zig");
 const history_mod = @import("history.zig");
+const notice = @import("notice.zig");
 
 pub const Allocator = std.mem.Allocator;
 pub const Result = runtime.Result;
@@ -1194,11 +1195,15 @@ fn fgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
         return .{ .exited = 1 };
     }
 
-    // Echo the resumed command so the user sees what came back to the
-    // foreground (matches bash/zsh behavior).
-    if (j.command_text) |t| {
-        _ = std.c.write(1, t.ptr, t.len);
-        _ = std.c.write(1, "\n", 1);
+    // Announce only when there's an actual transition. `fg` on a
+    // stopped job is a Continued — the program was paused and is
+    // about to run again. `fg` on an already-running detached job
+    // (`sleep 30 &`, then `fg %1`) doesn't continue anything; it
+    // just brings the job to the foreground. Bash echoes the
+    // command line in that case; we elide the notice and rely on
+    // the next prompt boundary to surface any subsequent failure.
+    if (j.state == .stopped) {
+        notice.jobStateChange(session, j, .continued_fg);
     }
 
     // APUE order: give the tty to the job (handoff + termios install),
@@ -1244,7 +1249,11 @@ fn bgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
         return .{ .exited = 1 };
     }
 
-    if (j.state == .stopped) {
+    // `bg` on a stopped job is the only meaningful transition —
+    // resume in the background. On an already-running detached job
+    // it's idempotent and silent: nothing was actually continued.
+    const was_stopped = j.state == .stopped;
+    if (was_stopped) {
         for (j.processes) |*p| switch (p.state) {
             .stopped => p.state = .running,
             else => {},
@@ -1261,10 +1270,9 @@ fn bgFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
         session.last_bg_pid = j.processes[j.processes.len - 1].pid;
     }
 
-    var buf: [256]u8 = undefined;
-    const text = j.command_text orelse "<job>";
-    const msg = std.fmt.bufPrint(&buf, "[{d}] {s} &\n", .{ j.id, text }) catch "";
-    _ = std.c.write(1, msg.ptr, msg.len);
+    if (was_stopped) {
+        notice.jobStateChange(session, j, .continued_bg);
+    }
     return .{ .exited = 0 };
 }
 

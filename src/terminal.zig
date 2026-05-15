@@ -37,6 +37,7 @@ const std = @import("std");
 const session_mod = @import("session.zig");
 const job_mod = @import("job.zig");
 const exec = @import("exec.zig");
+const notice = @import("notice.zig");
 const zigline = @import("zigline");
 
 const Session = session_mod.Session;
@@ -83,38 +84,58 @@ pub fn giveToJob(session: *Session, j: *Job) void {
 
 /// Reclaim the controlling terminal for the shell after a foreground
 /// wait completes or stops. On `.stopped`, snapshot the job's current
-/// termios into `j.termios` first so a later `fg` can restore it.
-/// Then `tcsetpgrp(tty, shell_pgid)` and restore the shell's saved
-/// modes via `tcsetattr(DRAIN, shell_termios)`.
+/// termios into `j.termios` first so a later `fg` can restore it,
+/// then emit the `[N] Stopped command` pre-prompt notice. On a
+/// signaled `.done`, ask zigline to ensure its next render starts on
+/// a fresh row. Then `tcsetpgrp(tty, shell_pgid)` and restore the
+/// shell's saved modes via `tcsetattr(DRAIN, shell_termios)`.
 ///
-/// On `.done` with a signaled result, ask zigline to ensure its next
-/// render starts on a fresh row. Without this, any kernel-echoed
-/// control character (`^C`, `^\`, `^Z`) gets wiped by the editor's
-/// `\x1b[2K\r` clear-line on the next prompt redraw. Bash and zsh
-/// ensure a fresh row after a signaled foreground job for the same
-/// reason; `zigline.pokeActiveFreshRow` (v0.3.1+) is the proper
-/// hook for it — Editor-scoped lifetime, so it works between
-/// `readLine` calls (which is exactly when we're calling it).
+/// The fresh-row poke matters for both `.stopped` (kernel-echoed
+/// `^Z`) and signaled `.done` (kernel-echoed `^C` / `^\`): without
+/// it, the editor's `\x1b[2K\r` clear-line on the next prompt redraw
+/// wipes the kernel echo. Bash and zsh ensure a fresh row in the
+/// same places for the same reason. `zigline.pokeActiveFreshRow`
+/// (v0.3.1+) is the proper hook — Editor-scoped lifetime, so it
+/// works between `readLine` calls (which is exactly when we call it).
 ///
 /// `TCSADRAIN` waits for any in-flight output before the termios
 /// change so we don't truncate the program's last line.
 pub fn reclaimForShell(session: *Session, j: *Job) void {
     const tty_fd = session.controlling_tty_fd orelse return;
+
+    // Phase 1: snapshot job termios while the job still owns the tty.
+    // The snapshot is per-job; later `fg` restores it.
+    if (j.state == .stopped) {
+        if (std.posix.tcgetattr(tty_fd)) |t| {
+            j.termios = t;
+        } else |_| {}
+    }
+
+    // Phase 2: hand the tty back to the shell and restore shell modes.
+    // Notice emission below is shell metadata — it must happen with
+    // the shell as the foreground pgrp owner, not while the job's
+    // pgrp still owns the tty (Slash ignores SIGTTOU so it would
+    // technically work, but it's the wrong ownership story).
+    if (session.shell_pgid > 0) _ = exec.tcSetPgrp(tty_fd, session.shell_pgid);
+    if (session.shell_termios) |t| {
+        std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
+    }
+
+    // Phase 3: ensure the editor's next render starts on a fresh row
+    // so the kernel-echoed control character (`^C`, `^\`, `^Z`) isn't
+    // wiped by the editor's `\x1b[2K\r` clear-line. Then emit the
+    // stop notice (Ctrl-Z); the signaled-exit path lets the eventual
+    // pre-prompt `slash: exit N (SIGNAME)` notice carry the news.
     switch (j.state) {
         .stopped => {
-            if (std.posix.tcgetattr(tty_fd)) |t| {
-                j.termios = t;
-            } else |_| {}
+            zigline.pokeActiveFreshRow();
+            notice.jobStateChange(session, j, .stopped);
         },
         .done => |r| switch (r) {
             .signaled => zigline.pokeActiveFreshRow(),
             else => {},
         },
         else => {},
-    }
-    if (session.shell_pgid > 0) _ = exec.tcSetPgrp(tty_fd, session.shell_pgid);
-    if (session.shell_termios) |t| {
-        std.posix.tcsetattr(tty_fd, .DRAIN, t) catch {};
     }
 }
 

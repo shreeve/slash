@@ -389,19 +389,65 @@ test "slash pty: prompt renders with `$ ` (or `# ` for root)" {
     try std.testing.expect(has_dollar or has_hash);
 }
 
-test "slash pty: nonzero last-status appears in next prompt" {
+test "slash pty: nonzero last-status surfaces as `slash: exit N` notice" {
     if (!ptySupported()) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
-    // Run a command that exits 1, then check the next prompt contains
-    // the bracketed status. (`renderPrompt` formats it as ` [{d}]`.)
+    // After a command exits non-zero, slash prints `slash: exit N` on
+    // its own line above the next prompt — see VALIDATION.md F3 and
+    // `notice.zig`. The line replaces the old `[N]` badge that used
+    // to scoot the prompt's `$` rightward.
     const r = try runScript(alloc, &.{"--norc"}, &.{
         .{ .send = "false\n" },
         .{ .send = "exit 0\n", .settle_ms = 200 },
     });
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "slash: exit 1") != null);
+}
+
+test "slash pty: status notice names signal when foreground is Ctrl-C'd" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // Foreground `sleep 30` interrupted by Ctrl-C exits via SIGINT
+    // (status 130). The status notice spells the signal so the user
+    // can tell `exit 130` (literal) from a SIGINT-killed process.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30\n", .settle_ms = 800 },
+        .{ .send = "\x03", .settle_ms = 400 }, // Ctrl-C
+        .{ .send = "echo back\n", .settle_ms = 600, .wait_for = "back" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "slash: exit 130 (SIGINT)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "back") != null);
+}
+
+test "slash pty: status notice does not stick to subsequent prompts" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // The notice surfaces exactly once after a failed command. A
+    // subsequent successful command must not re-print the notice.
+    // Counts occurrences of the notice prefix in the captured output.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "false\n", .settle_ms = 200 },
+        .{ .send = "true\n", .settle_ms = 200 },
+        .{ .send = "echo done-checking\n", .settle_ms = 200 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+
+    var count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, r.out, i, "slash: exit ")) |idx| {
+        count += 1;
+        i = idx + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count);
 }
 
 test "slash pty: highlighter emits ANSI for keywords + strings" {
@@ -793,6 +839,162 @@ test "slash pty: Ctrl-Z stops a foreground sleep, fg resumes it" {
     try std.testing.expectEqual(@as(u8, 0), r.status);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "Stopped") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "resumed-ok") != null);
+}
+
+test "slash pty: Ctrl-Z auto-notices Stopped and fg auto-notices Continued" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // Ctrl-Z stopping a foreground job emits `[1] Stopped <command>`
+    // automatically (no need for the user to type `jobs`); `fg`
+    // resuming it emits `[1] Continued <command>`. Both lines are
+    // dimmed when stderr is a TTY; substring search ignores the
+    // dim ANSI wrapper.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30\n", .settle_ms = 800 },
+        .{ .send = "\x1a", .settle_ms = 600, .wait_for = "Stopped" }, // Ctrl-Z
+        .{ .send = "fg\n", .settle_ms = 600, .wait_for = "Continued" },
+        .{ .send = "\x03", .settle_ms = 400 },
+        .{ .send = "echo done-zfg\n", .settle_ms = 1000, .wait_for = "done-zfg" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1] Stopped sleep 30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1] Continued sleep 30") != null);
+}
+
+test "slash pty: Ctrl-Z in a sequence suspends the rest of the sequence" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // `sleep 30; true` — Ctrl-Z'ing the foreground sleep must NOT
+    // proceed to run `true`. Bash and zsh both abandon the rest of
+    // a sequence when the foreground job is stopped; the user is
+    // back at the prompt with a stopped job, and only `fg` resumes
+    // it (running just the stopped command, not the abandoned tail).
+    //
+    // The unambiguous signal is `$?` after the stop. With the
+    // sequence correctly suspended, the recorded status is the
+    // stopped sleep's placeholder (non-zero). If the sequence
+    // continued and `true` ran, `$?` would be 0. The marker
+    // `seq-status=` makes the value visible in PTY output.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30; true\n", .settle_ms = 800 },
+        .{ .send = "\x1a", .settle_ms = 600, .wait_for = "Stopped" },
+        .{ .send = "echo seq-status=$?\n", .settle_ms = 600, .wait_for = "seq-status=" },
+        .{ .send = "kill -KILL %1\n", .settle_ms = 200 },
+        .{ .send = "wait %1\n", .settle_ms = 400 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1] Stopped") != null);
+    // If the sequence ran the abandoned tail, `true` would have set
+    // `$?` to 0. Anything non-zero confirms suspension worked.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "seq-status=0") == null);
+}
+
+test "slash pty: Ctrl-Z in a pipeline emits one Stopped notice for the pipeline" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // A foreground pipeline (`sleep 30 | cat`) Ctrl-Z'd at any stage
+    // results in the aggregate Job state being `.stopped`. The notice
+    // should fire once for the pipeline as a whole, with the
+    // pipeline's display label (`<pipeline>`).
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30 | cat\n", .settle_ms = 1000 },
+        .{ .send = "\x1a", .settle_ms = 800, .wait_for = "Stopped" },
+        .{ .send = "echo pipe-stopped-ok\n", .settle_ms = 600, .wait_for = "pipe-stopped-ok" },
+        .{ .send = "kill -KILL %1\n", .settle_ms = 200 },
+        .{ .send = "wait %1\n", .settle_ms = 400 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1] Stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "pipe-stopped-ok") != null);
+}
+
+test "slash pty: bg on already-running job is silent" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // `bg %1` on a job that's already running in the background is
+    // semantically a no-op (it sets the same flags it already had).
+    // The notice should NOT fire — nothing was actually continued.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30 >/dev/null 2>&1 &\n", .settle_ms = 200 },
+        .{ .send = "echo before-bg\n", .settle_ms = 200, .wait_for = "before-bg" },
+        .{ .send = "bg %1\n", .settle_ms = 200 },
+        .{ .send = "echo after-bg\n", .settle_ms = 200, .wait_for = "after-bg" },
+        .{ .send = "kill -KILL %1\n", .settle_ms = 200 },
+        .{ .send = "wait %1\n", .settle_ms = 400 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+
+    // No `[1] Continued` between before-bg and after-bg.
+    const before_idx = std.mem.indexOf(u8, r.out, "before-bg").?;
+    const after_idx = std.mem.indexOf(u8, r.out, "after-bg").?;
+    try std.testing.expect(before_idx < after_idx);
+    const between = r.out[before_idx..after_idx];
+    try std.testing.expect(std.mem.indexOf(u8, between, "Continued") == null);
+}
+
+test "slash pty: Ctrl-Z does not emit a redundant `slash: exit` notice" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // A Ctrl-Z'd foreground job is not a completion — the job is
+    // stopped, not exited. The dedicated `[N] Stopped <command>`
+    // notice already conveys the transition; firing the exit-status
+    // notice on top would print a misleading `slash: exit 1` (the
+    // synthetic placeholder result for stopped jobs). Pin the
+    // no-redundancy invariant: between the Stopped notice and the
+    // next prompt, no `slash: exit ` line appears.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30\n", .settle_ms = 800 },
+        .{ .send = "\x1a", .settle_ms = 600, .wait_for = "Stopped" },
+        .{ .send = "echo poke\n", .settle_ms = 400, .wait_for = "poke" },
+        .{ .send = "kill -KILL %1\n", .settle_ms = 200 },
+        .{ .send = "wait %1\n", .settle_ms = 400 },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1] Stopped sleep 30") != null);
+    // The `echo poke` response confirms the prompt came back; we
+    // assert that no exit-status notice was emitted between the
+    // stop and that response.
+    const stop_idx = std.mem.indexOf(u8, r.out, "[1] Stopped").?;
+    const poke_idx = std.mem.indexOf(u8, r.out, "poke").?;
+    try std.testing.expect(stop_idx < poke_idx);
+    const between = r.out[stop_idx..poke_idx];
+    try std.testing.expect(std.mem.indexOf(u8, between, "slash: exit") == null);
+}
+
+test "slash pty: bg announces `[N] Continued <command> &`" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // `bg` on a stopped job resumes it in the background and prints
+    // `[1] Continued <command> &` so the user sees it transitioned
+    // to the same shape as a `&`-launched job.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30\n", .settle_ms = 800 },
+        .{ .send = "\x1a", .settle_ms = 600, .wait_for = "Stopped" },
+        .{ .send = "bg\n", .settle_ms = 600, .wait_for = "Continued" },
+        .{ .send = "kill -KILL %1\n", .settle_ms = 200 },
+        .{ .send = "wait %1\n", .settle_ms = 400 },
+        .{ .send = "echo bg-cont-ok\n", .settle_ms = 400, .wait_for = "bg-cont-ok" },
+        .{ .send = "exit 0\n" },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1] Continued sleep 30 &") != null);
 }
 
 test "slash pty: Ctrl-Z then bg lets the job finish without blocking" {

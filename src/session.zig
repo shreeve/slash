@@ -298,12 +298,18 @@ pub const Session = struct {
     exit_request: ?runtime.Result,
     /// Last command's exit status (for `$?`).
     last_status: u8,
+    /// Typed result of the last top-level command. `null` until the
+    /// first command runs. Carries the same information as
+    /// `last_status` plus the exited/signaled distinction, which the
+    /// status-byte form can't preserve (a process that runs `exit 130`
+    /// is byte-equivalent to one killed by SIGINT, but only the typed
+    /// form lets us label it correctly in the pre-prompt notice).
+    last_result: ?runtime.Result = null,
     /// True iff `last_status` was set by a command that hasn't yet
-    /// surfaced in a prompt render. The default prompt shows `[N]`
-    /// only when this flag is true (and `last_status != 0`), then
-    /// clears the flag — so the indicator appears on the prompt
-    /// immediately after the failure but doesn't stick to every
-    /// subsequent prompt while `$?` remains non-zero.
+    /// surfaced in a pre-prompt notice. The notice helper checks
+    /// this once per prompt and clears the flag, so the
+    /// `slash: exit N` line appears immediately after a failure but
+    /// not on every subsequent prompt while `$?` remains non-zero.
     status_pending: bool = false,
     /// PID of the most recently launched background job (for `$!`).
     /// `null` until at least one bg job has started in the session.

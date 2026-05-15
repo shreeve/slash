@@ -54,8 +54,12 @@ source  →  Shape  →  Program  →  Job
 - **`src/program.zig`** — Program kernel forms and Shape → Program
   lowering.
 - **`src/eval.zig`** — the only module that knows shell semantics.
-  Expansion, control flow, builtin dispatch.
+ Expansion, control flow, builtin dispatch.
 - **`src/exec.zig`** — POSIX plumbing only. No shell policy.
+- **`src/notice.zig`** — pre-prompt status notices (`slash: exit N
+ (SIGNAME)`) and live job-state announcements (`[N] Stopped …`,
+ `[N] Continued …`). Dim-on-tty, signal-name aware, gated on
+ interactive sessions.
 - **`src/job.zig`** — `Job` / `JobTable`, monotonic state graph, wait
   service.
 - **`src/builtins.zig`** — builtin registry and implementations.

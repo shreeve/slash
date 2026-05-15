@@ -29,7 +29,7 @@ never auto-runs them. See `PLAN.md` §1 for the full statement of intent.
 | [`AGENTS.md`](./AGENTS.md) | The contributor rules. **The §14 test** ("does this improve `Command` clarity, `Pipeline` correctness, `Program` composability, or `Job` control?") is the only filter that decides whether a feature ships. Read this first; it's the shortest. |
 | [`PLAN.md`](./PLAN.md) | The design constitution. Long. §1 (vision), §7 (semantic rules), §12 (in/out of scope), §14 (the §14 test) are the load-bearing parts. Everything else is reachable from there. |
 | [`CHECKLIST.md`](./CHECKLIST.md) | The operational correctness rubric. Process groups, terminal ownership, signal discipline, etc. **75/77 boxes checked** with inline evidence pointers (file/function/test for every claim). Two unchecked items both deferred for the same reason: no rapid-stop/continue stress test. |
-| [`VALIDATION.md`](./VALIDATION.md) | The empirical log. First run on 2026-05-14 was **14/14 PASS** against real interactive software (vim, less, top, ssh, python, node, nested shells, yes-pipe). Findings are tracked in numbered F-entries; F1, F2, F3-stickiness, F4 are FIXED, F3-placement deferred to UX phase. |
+| [`VALIDATION.md`](./VALIDATION.md) | The empirical log. First run on 2026-05-14 was **14/14 PASS** against real interactive software (vim, less, top, ssh, python, node, nested shells, yes-pipe). Findings are tracked in numbered F-entries; F1, F2, F3 (both stickiness and placement), F4 are all FIXED. |
 | [`ROADMAP.md`](./ROADMAP.md) | What's left. Currently the entire interactive UX phase + a small terminal-handoff stress test follow-up. |
 | [`README.md`](./README.md) | What slash looks like to a user. Public surface. |
 
@@ -61,6 +61,8 @@ slash/
 │   │                   #   child_event_pending, last_bg_pid)
 │   ├── repl.zig        # interactive REPL — bootstrap, prompt, signals,
 │   │                   #   zigline integration, SIGCHLD handler
+│   ├── notice.zig      # pre-prompt + live job-state stderr notices
+│   │                   #   (dim-on-tty, signal-name aware)
 │   ├── runtime.zig     # Result, Signal, status-byte conversion
 │   ├── diagnostics.zig # Diagnostic, Sink, error codes (SH/LW/EV/EX/JB)
 │   ├── headless_tests.zig  # in-process integration tests (~210 cases)
@@ -131,10 +133,12 @@ A more robust PTY harness with retry-on-timing-flake is a follow-up.
 
 **Deferred but tracked:**
 
-- **F3-placement** — `[N]` last-status indicator sits between cwd and
-  `$` in the prompt. Stickiness fix shipped (only shows once after a
-  failure), but the placement itself is awkward. Belongs to the
-  default-prompt redesign in the UX phase.
+- ~~**F3-placement**~~ — closed. The `[N]` badge moved out of the
+  prompt entirely; failures now surface as a dedicated `slash: exit N`
+  pre-prompt notice line (see `src/notice.zig`). The same module
+  also auto-announces job-state changes (`[N] Stopped`, `[N] Continued`,
+  `[N] Continued ... &`) so Ctrl-Z, `fg`, and `bg` all give immediate
+  feedback without running `jobs`.
 - **CHECKLIST §5/§13 rapid-stop/continue stress test** — single
   cycles validated, no high-frequency torture loop. Real but not
   blocking.
@@ -166,8 +170,7 @@ GPT 5.5's earlier ranking, easiest to hardest:
    declarative data. Starter specs: `git`, `cd`, `ssh`, `kill`,
    `fg`/`bg`, `cmd`. ~2-3 days for the framework + first specs.
 5. **Rich prompt** — extend providers (cwd, last-status, jobs count,
-   git context, virtualenv, host/user, time). Default-prompt redesign
-   addresses F3-placement here. ~1 day.
+   git context, virtualenv, host/user, time). ~1 day.
 6. **Syntax highlighting polish** — already shipped as a feature;
    expand the token classes. ~half day.
 

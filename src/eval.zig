@@ -58,6 +58,20 @@ const EvalOutcome = struct {
     expression_result: Result,
 };
 
+/// True when the just-evaluated foreground job ended in `.stopped`
+/// state (Ctrl-Z / SIGTSTP). Iterating containers (`evalSequence`,
+/// `evalWhile`, `evalFor`) check this after every nested
+/// `evalProgram` call and break out so subsequent items / iterations
+/// don't run while the user is suspended at the prompt — bash and
+/// zsh both abandon the rest of a sequence after a stop, and a real
+/// shell user expects the same.
+inline fn outcomeStopped(out: EvalOutcome) bool {
+    return switch (out.job.state) {
+        .stopped => true,
+        else => false,
+    };
+}
+
 /// Thrown by `break`/`continue` builtins; caught by loop evaluators.
 const LoopControl = error{
     BreakLoop,
@@ -77,11 +91,23 @@ pub fn runForeground(
     const outcome = try evalProgram(prog, session, .{ .scratch = scratch }, sink);
     drainChildEvents(session);
     session.last_status = outcome.expression_result.toStatusByte();
+    session.last_result = outcome.expression_result;
     // Mark this status as not-yet-displayed so the next prompt
-    // shows `[N]` once if non-zero (and not on every subsequent
-    // prompt while `$?` happens to stay non-zero — see
-    // `Session.status_pending`).
-    session.status_pending = true;
+    // surfaces a `slash: exit N` notice once if non-zero (and not
+    // on every subsequent prompt while `$?` happens to stay non-
+    // zero — see `Session.status_pending` and `notice.zig`).
+    //
+    // A foreground job stopped by Ctrl-Z is *not* a completion: the
+    // job's state is `.stopped`, the synthesized `expression_result`
+    // is a placeholder, and the dedicated `[N] Stopped <command>`
+    // notice already conveys the transition. Suppress the
+    // exit-status notice in that case so the user sees one line, not
+    // two.
+    const job_stopped = switch (outcome.job.state) {
+        .stopped => true,
+        else => false,
+    };
+    session.status_pending = !job_stopped;
     return outcome.expression_result;
 }
 
@@ -611,6 +637,32 @@ fn readFileToBuffer(path: []const u8, scratch: Allocator) ![]const u8 {
     return bytes;
 }
 
+/// Join argv elements with single spaces into a fresh scratch-owned
+/// slice for display in `command_text`. JobTable.create dupes the
+/// bytes into its own allocator, so the scratch lifetime ends with
+/// the surrounding eval call. Falls back to `argv[0]` on allocation
+/// failure — losing the args is better than losing the command.
+fn joinArgvForDisplay(scratch: Allocator, argv: []const []const u8) []const u8 {
+    if (argv.len == 0) return "";
+    if (argv.len == 1) return argv[0];
+    var total: usize = 0;
+    for (argv, 0..) |a, i| {
+        total += a.len;
+        if (i + 1 < argv.len) total += 1;
+    }
+    const buf = scratch.alloc(u8, total) catch return argv[0];
+    var off: usize = 0;
+    for (argv, 0..) |a, i| {
+        @memcpy(buf[off .. off + a.len], a);
+        off += a.len;
+        if (i + 1 < argv.len) {
+            buf[off] = ' ';
+            off += 1;
+        }
+    }
+    return buf;
+}
+
 fn runExternalSingle(
     c: *const Command,
     argv: []const []const u8,
@@ -646,7 +698,7 @@ fn runExternalSingle(
     // every command run.
     for (heredoc_fds.items) |fd| exec.closeFd(fd);
 
-    const j = try session.jobs.create(true, false, argv[0]);
+    const j = try session.jobs.create(true, false, joinArgvForDisplay(ctx.scratch, argv));
     var pids = [_]exec.Pid{pid};
     try session.jobs.setProcesses(j, pid, &pids);
     try serviceForeground(session, j);
@@ -784,6 +836,12 @@ fn evalSequence(
 
         drainChildEvents(session);
         if (session.exit_request != null) break;
+        // A stopped foreground job (Ctrl-Z) suspends the entire
+        // sequence — `sleep 30; echo HI` after Ctrl-Z must NOT run
+        // `echo HI`. The user is back at the prompt with a stopped
+        // job in the table; resuming via `fg` runs only the stopped
+        // command, not the abandoned tail.
+        if (outcomeStopped(out)) break;
 
         try fireSignalTraps(session, ctx, sink);
 
@@ -1076,7 +1134,7 @@ fn spawnCommandNoWait(
         return error.SpawnFailed;
     };
 
-    const j = try session.jobs.create(false, true, exe_text);
+    const j = try session.jobs.create(false, true, joinArgvForDisplay(ctx.scratch, argv.items));
     var pids = [_]exec.Pid{pid};
     try session.jobs.setProcesses(j, pid, &pids);
     session.last_bg_pid = pid;
@@ -1317,6 +1375,7 @@ fn evalWhile(
         last_result = body_outcome.expression_result;
         last_job = body_outcome.job;
         if (session.exit_request != null) break;
+        if (outcomeStopped(body_outcome)) break;
     }
 
     return .{
@@ -1382,6 +1441,7 @@ fn evalFor(
         last_result = body_outcome.expression_result;
         last_job = body_outcome.job;
         if (session.exit_request != null) break;
+        if (outcomeStopped(body_outcome)) break;
     }
 
     return .{
