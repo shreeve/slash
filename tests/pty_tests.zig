@@ -1947,12 +1947,17 @@ test "slash pty: backgrounded job finish surfaces `[N] Done` notice at next prom
     const alloc = std.testing.allocator;
     const r = try runScript(alloc, &.{"--norc"}, &.{
         // Launch a quick bg job. The `&` returns immediately; the
-        // job is detached. Give the kernel enough time to reap it
-        // before the next prompt boundary so the SIGCHLD has fired.
-        .{ .send = "sleep 0.2 &\n", .settle_ms = 200 },
-        .{ .send = "echo PRE_DONE_MARKER\n", .settle_ms = 600, .wait_for = "PRE_DONE_MARKER" },
-        // Trigger one more prompt cycle so the notification fires.
-        .{ .send = "echo POST_DONE_MARKER\n", .settle_ms = 500, .wait_for = "POST_DONE_MARKER" },
+        // job is detached. The sleep needs to be long enough that
+        // its completion outlives the PRE marker write but short
+        // enough that the test doesn't drag — and we need enough
+        // settle margin around it so a slow CI runner doesn't end
+        // up sending the next command before SIGCHLD has fired.
+        .{ .send = "sleep 0.3 &\n", .settle_ms = 300 },
+        .{ .send = "echo PRE_DONE_MARKER\n", .settle_ms = 400, .wait_for = "PRE_DONE_MARKER" },
+        // Give the sleep + SIGCHLD a comfortable window to land
+        // before the next prompt — 800 ms is well past sleep's
+        // 300 ms plus any scheduling jitter on a busy runner.
+        .{ .send = "echo POST_DONE_MARKER\n", .settle_ms = 1200, .wait_for = "POST_DONE_MARKER" },
         .{ .send = "exit 0\n", .settle_ms = 100 },
     });
     defer alloc.free(r.out);

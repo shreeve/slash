@@ -313,7 +313,10 @@ const cases: []const Case = &.{
     .{
         .name = "continue skips the current for iteration",
         .source = "for x in 1 2 skip 3 4 { if test $x = skip { continue }; echo $x }",
-        .expect = .{ .exit_code = 0, .stdout = "1\n2\n3\n4\n",  },
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "1\n2\n3\n4\n",
+        },
     },
     .{
         .name = "break exits while loop on first iteration",
@@ -580,9 +583,12 @@ const cases: []const Case = &.{
         .expect = .{ .exit_code = 0, .stdout = "echo is a shell builtin\n" },
     },
     .{
+        // macOS canonicalizes `cat` to `/bin/cat`; Linux puts it at
+        // `/usr/bin/cat`. Use `stdout_contains` so the test works
+        // on both without locking in a specific FHS layout.
         .name = "type: external command",
         .source = "type cat",
-        .expect = .{ .exit_code = 0, .stdout = "cat is /bin/cat\n" },
+        .expect = .{ .exit_code = 0, .stdout = "cat is /", .stdout_contains = true },
     },
     .{
         .name = "type: source / dot are special-dispatched builtins",
@@ -608,9 +614,11 @@ const cases: []const Case = &.{
         .expect = .{ .exit_code = 127 },
     },
     .{
+        // macOS resolves `/tmp` to `/private/tmp`; Linux keeps it as
+        // `/tmp`. Substring-check `/tmp` so both pass.
         .name = "cd -: toggles to OLDPWD and prints",
         .source = "cd /tmp; cd /; cd -",
-        .expect = .{ .exit_code = 0, .stdout = "/private/tmp\n", .stdout_contains = true },
+        .expect = .{ .exit_code = 0, .stdout = "/tmp\n", .stdout_contains = true },
     },
     .{
         .name = "cd -: errors when OLDPWD unset",
