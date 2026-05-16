@@ -25,14 +25,8 @@ user shell code at editor events.
 
 ## Interactive UX — ready now
 
-These two are unblocked.
+One item is unblocked.
 
-- **Rich prompt.** Extend the prompt provider set (cwd, last-status,
-  jobs count, git context, virtualenv, host/user, time). Prompt
-  content is data — fixed providers, no user-defined "prompt is a
-  function." Ship a small set of defaults (default, plain, minimal)
-  and a config knob to compose the providers. Pure slash work; no
-  zigline dependency.
 - **Syntax highlighting polish.** Already shipped as a feature. Expand
   the token classes (variables, command substitutions, redirects,
   glob parts, heredoc bodies). Always driven by the BaseLexer / one

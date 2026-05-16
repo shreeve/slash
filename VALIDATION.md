@@ -198,3 +198,29 @@ command-position rule while using zigline's `replace_buffer_and_accept`
 path so the submitted line is the expansion, not the abbreviation.
 
 ---
+
+## Targeted PTY Validation: 2026-05-15 23:55 UTC
+
+- commit: working tree (rich prompt presets)
+- os: Darwin 25.4.0 arm64 (macOS, M-series)
+- slash binary: `bin/slash`
+- mode: automated PTY regression suite (`zig build test-pty`)
+
+| # | test | result | note |
+|---|---|---|---|
+| 1 | `SLASH_PROMPT=minimal` | PASS | prompt is just ` $ `; cwd does not appear |
+| 2 | `SLASH_PROMPT=rich` + `VIRTUAL_ENV` | PASS | prompt prefix includes `(myvenv)` from the venv basename |
+| 3 | `SLASH_PROMPT=rich` with bg job | PASS | prompt suffix includes `[1j]` while `sleep &` is alive |
+| 4 | `$PROMPT` template precedence | PASS | a user-set `$PROMPT` overrides any `$SLASH_PROMPT` preset |
+
+**Tally:** 4 PASS, 0 FAIL, 0 SKIP.
+
+### Verdict
+
+Prompt presets compose from bounded providers (env vars, `.git/HEAD`,
+in-memory `JobTable`) and never call into the slash kernel. The
+`default` preset is the legacy `cwd $ ` baseline so existing users
+see no change; `rich` is the explicit opt-in upgrade. The existing
+`$PROMPT` template path keeps full control for users who want it.
+
+---

@@ -99,6 +99,7 @@ What ships today:
 - smart prefix-aware Up/Down navigation
 - history autosuggestions (dim ghost-text suffix; Right Arrow / Ctrl-F accepts)
 - intelligent Tab completions (`git`, `cd`, `ssh`, `kill`, `fg`/`bg`, `cmd`, `str`, PATH)
+- rich prompt presets (`SLASH_PROMPT=rich|minimal`; venv, remote-user, cwd, git branch, jobs)
 - pre-prompt status notices (`slash: exit N (SIGNAME)`)
 - live job-state announcements (`[N] Stopped`, `[N] Continued`)
 

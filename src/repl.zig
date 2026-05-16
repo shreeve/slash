@@ -38,6 +38,7 @@ const exec = @import("exec.zig");
 const history_mod = @import("history.zig");
 const notice = @import("notice.zig");
 const completion = @import("completion.zig");
+const prompt_mod = @import("prompt.zig");
 
 // libc bindings — `std.c` doesn't expose these in Zig 0.16.
 extern "c" fn getpgrp() std.c.pid_t;
@@ -1848,9 +1849,13 @@ fn isStdinTty() bool {
 //      are honored verbatim — `displayWidth` strips them when computing
 //      the wrap-aware column count zigline needs.
 //
-//   2. **Built-in default** — home-collapsed PWD + ` [N]` for nonzero
-//      last-status + ` $ ` (or ` # ` for root). Pure ASCII bytes; width
-//      equals byte length.
+//   2. **Preset path** — `prompt_mod.render` composes a preset (default,
+//      rich, or minimal) from a fixed list of providers. `$SLASH_PROMPT`
+//      selects the preset; unset means `default` (cwd + sigil — the
+//      backward-compatible legacy prompt). `rich` opts into venv +
+//      remote-user + cwd + git + jobs + sigil. Pure ASCII; width
+//      equals byte length for ASCII content, with multi-byte UTF-8
+//      counted by codepoint.
 //
 // `slashPrompt` dispatches between the two; `runRaw` calls it once per
 // prompt boundary and constructs the `zigline.Prompt` directly so the
@@ -1906,38 +1911,7 @@ fn slashPrompt(buf: []u8, session: *session_mod.Session) []const u8 {
         .scalar => |raw| return expandPromptFormat(buf, session, raw),
         .list => {},
     };
-    return renderDefaultPrompt(buf, session);
-}
-
-/// Built-in default prompt. Pure ASCII; byte length == display width.
-/// Format: `<cwd> $ ` (or `<cwd> # ` for root). Failures fall back
-/// to a plain `$ ` so the user always sees something they can type
-/// against.
-fn renderDefaultPrompt(buf: []u8, session: *session_mod.Session) []const u8 {
-    _ = session;
-    var w = std.Io.Writer.fixed(buf);
-
-    var cwd_buf: [4096]u8 = undefined;
-    const got = std.c.getcwd(&cwd_buf, cwd_buf.len);
-    var cwd: []const u8 = "?";
-    if (got != null) {
-        const len = std.mem.len(@as([*:0]u8, @ptrCast(got)));
-        cwd = cwd_buf[0..len];
-    }
-
-    if (std.c.getenv("HOME")) |home_env| {
-        const home = std.mem.span(home_env);
-        if (home.len > 0 and std.mem.startsWith(u8, cwd, home)) {
-            w.writeAll("~") catch return "$ ";
-            cwd = cwd[home.len..];
-        }
-    }
-    w.writeAll(cwd) catch return "$ ";
-
-    const suffix: []const u8 = if (std.c.getuid() == 0) " # " else " $ ";
-    w.writeAll(suffix) catch return "$ ";
-
-    return w.buffered();
+    return prompt_mod.render(buf, session, prompt_mod.selectPreset(session));
 }
 
 /// Expand `%`-codes in `raw` against the current shell state, writing

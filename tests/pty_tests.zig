@@ -66,6 +66,11 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 /// (which we'd otherwise read on every spawn — slow, and would let
 /// PTY-test events bleed into the user's interactive history).
 /// Idempotent: safe to call from every test.
+///
+/// Also pins `SLASH_PROMPT=plain` so the test harness sees a stable
+/// `cwd $ ` prompt regardless of whether the runner happens to be
+/// inside a git repo, a venv, or has detached jobs lying around.
+/// Tests that exercise other presets explicitly override this.
 fn ensurePtyTestEnv() void {
     const dir = "/tmp/slash-pty-tests-xdg";
     _ = std.c.mkdir(dir, @as(std.c.mode_t, 0o700));
@@ -75,6 +80,11 @@ fn ensurePtyTestEnv() void {
     // under HOME / XDG_DATA_HOME, both of which are now empty until
     // a test explicitly populates them.
     _ = setenv("HOME", dir, 1);
+    // Leave SLASH_PROMPT unset by default — the `default` preset is
+    // the legacy `cwd $ ` baseline, so the existing tests that
+    // depend on a plain prompt continue to pass without explicit
+    // env setup. Tests that exercise other presets set SLASH_PROMPT
+    // explicitly and restore it in their defer.
 }
 
 /// Truncate the test JSONL history file so a test asserting about
@@ -1781,4 +1791,80 @@ test "slash pty: autosuggestion accepts history suffix with right arrow" {
     try std.testing.expectEqual(@as(u8, 0), r.status);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "_FULL") != null);
     try std.testing.expect(countOccurrences(r.out, "SLASH_HINT_FULL") >= 2);
+}
+
+test "slash pty: SLASH_PROMPT=minimal renders just the sigil" {
+    if (!ptySupported()) return error.SkipZigTest;
+    _ = setenv("SLASH_PROMPT", "minimal", 1);
+    defer _ = unsetenv("SLASH_PROMPT");
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "echo MINIMAL_OK\n", .settle_ms = 300, .wait_for = "MINIMAL_OK" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // Cwd MUST NOT appear in the prompt under minimal. The HOME env
+    // is the test's XDG sandbox path; if the prompt rendered cwd we
+    // would see that path's basename in `r.out` outside of the
+    // command echo. Use the sandbox dir itself as the negative
+    // marker.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "/tmp/slash-pty-tests-xdg") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "MINIMAL_OK") != null);
+}
+
+test "slash pty: SLASH_PROMPT=rich with VIRTUAL_ENV shows venv basename" {
+    if (!ptySupported()) return error.SkipZigTest;
+    _ = setenv("SLASH_PROMPT", "rich", 1);
+    _ = setenv("VIRTUAL_ENV", "/opt/slash-pty-fixture/myvenv", 1);
+    defer {
+        _ = unsetenv("SLASH_PROMPT");
+        _ = unsetenv("VIRTUAL_ENV");
+    }
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "echo VENV_PROMPT_OK\n", .settle_ms = 300, .wait_for = "VENV_PROMPT_OK" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "(myvenv)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "VENV_PROMPT_OK") != null);
+}
+
+test "slash pty: SLASH_PROMPT=rich surfaces backgrounded job count" {
+    if (!ptySupported()) return error.SkipZigTest;
+    _ = setenv("SLASH_PROMPT", "rich", 1);
+    defer _ = unsetenv("SLASH_PROMPT");
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "sleep 30 >/dev/null 2>&1 &\n", .settle_ms = 400 },
+        .{ .send = "echo JOBS_PROMPT_OK\n", .settle_ms = 400, .wait_for = "JOBS_PROMPT_OK" },
+        .{ .send = "kill -KILL %1\n", .settle_ms = 200 },
+        .{ .send = "wait %1\n", .settle_ms = 400 },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1j]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "JOBS_PROMPT_OK") != null);
+}
+
+test "slash pty: PROMPT format template still wins over SLASH_PROMPT preset" {
+    if (!ptySupported()) return error.SkipZigTest;
+    _ = setenv("SLASH_PROMPT", "minimal", 1);
+    defer _ = unsetenv("SLASH_PROMPT");
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "export PROMPT=\"PROMPT_TEMPLATE_WIN> \"\n", .settle_ms = 200 },
+        .{ .send = "echo CUSTOM_PROMPT_OK\n", .settle_ms = 400, .wait_for = "CUSTOM_PROMPT_OK" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "PROMPT_TEMPLATE_WIN>") != null);
 }

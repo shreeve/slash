@@ -33,7 +33,7 @@ the full statement of intent.
 | [`PLAN.md`](./PLAN.md) | The design constitution. Long. §1 (vision), §7 (semantic rules), §12 (in/out of scope), §14 (the §14 test) are the load-bearing parts. Everything else is reachable from there. |
 | [`CHECKLIST.md`](./CHECKLIST.md) | The operational correctness rubric. Process groups, terminal ownership, signal discipline, etc. **75/77 boxes checked** with inline evidence pointers (file/function/test for every claim). Two unchecked items both deferred for the same reason: no rapid-stop/continue stress test. |
 | [`VALIDATION.md`](./VALIDATION.md) | The empirical log. First run on 2026-05-14 was **14/14 PASS** against real interactive software (vim, less, top, ssh, python, node, nested shells, yes-pipe). Findings are tracked in numbered F-entries; F1, F2, F3 (both stickiness and placement), F4 are all FIXED. Second run on 2026-05-15 confirmed the F3 + notice closure interactively. |
-| [`ROADMAP.md`](./ROADMAP.md) | What's left. Currently the remaining interactive-UX phase — three items: two ready now, one blocked on the zigline transient input mode primitive. |
+| [`ROADMAP.md`](./ROADMAP.md) | What's left. Currently the remaining interactive-UX phase — two items: syntax highlighting polish (ready now) and the Ctrl-R interactive search blocked on the zigline transient input mode primitive. |
 | [`README.md`](./README.md) | What slash looks like to a user. Public surface. |
 | [`ZIG-0.16.0.md`](./ZIG-0.16.0.md) | Reference for Zig 0.16's API shifts (Juicy Main, `std.Io`, `std.posix` shrinkage, format-string changes). Most LLM training cutoffs predate this; if a Zig API surprise comes up, the answer is almost certainly here. |
 
@@ -117,8 +117,8 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: **114/114 passing** — 60 in the
-unit + headless suite (`zig build test-headless`) and 54 in the PTY
+**Test totals as of this handoff**: **125/125 passing** — 67 in the
+unit + headless suite (`zig build test-headless`) and 58 in the PTY
 suite (`zig build test-pty`). All green. The two ex-flaky PTY tests
 (`Ctrl-Z stops a foreground
 sleep`, `cat & SIGTTIN`) were diagnosed and fixed in commit
@@ -185,6 +185,15 @@ so the JSONL history index doesn't pollute the user's real
   search on fresh prompts. Right Arrow / Ctrl-F accept the rendered
   suffix as ordinary buffer text; Enter without accept runs only the
   typed prefix.
+- Rich prompt presets — `src/prompt.zig` composes prompt fragments
+  from a fixed provider set (venv, remote-user, cwd, git branch,
+  job count, sigil) into named presets (`default`, `rich`,
+  `minimal`). `default` is the backward-compatible `cwd $ ` baseline
+  that ships when nothing is configured; `rich` is the opt-in
+  upgrade. `$SLASH_PROMPT` selects the preset; the existing
+  `$PROMPT` format-template path still wins when set. Providers
+  are bounded reads (env vars, `.git/HEAD`, `JobTable`); none
+  evaluate slash code.
 - Pre-prompt status notices + live `[N] Stopped|Continued <cmd>`
   announcements for Ctrl-Z / `fg` / `bg`, replacing the inline
   `[N]` exit-status badge in the prompt with a dim-on-tty stderr
@@ -207,37 +216,11 @@ so the JSONL history index doesn't pollute the user's real
 
 ## What to do next
 
-Three items left in `ROADMAP.md`, grouped by readiness:
+Two items left in `ROADMAP.md`, grouped by readiness:
 
-### Ready now (2 items)
+### Ready now (1 item)
 
-1. **Rich prompt** — extend the prompt provider set (jobs count,
-   git context, virtualenv, host/user, time). Fixed providers, no
-   user-defined "prompt is a function." Ship a small set of
-   defaults (default, plain, minimal) and a config knob to compose
-   the providers. Pure slash work, no zigline dependency. **Smallest,
-   quickest dopamine.** ~1 day.
-
-   *Implementation shape:*
-   - Put prompt providers in a focused module: `src/prompt.zig` (or
-     extend the existing `expandPromptFormat` machinery in `repl.zig`
-     if the expansion stays bounded).
-   - Providers read from `Session`, cwd / env, and cached status only;
-     they never evaluate slash code.
-   - Providers must be bounded and fast. Git context degrades to
-     empty on timeout / error.
-   - Config selects a preset and / or a provider list; no prompt
-     function hook.
-   - Use the existing `$PROMPT` / `~/.slashrc` mechanism for selection;
-     do **not** introduce a general prompt scripting / config subsystem
-     just to ship presets.
-
-   *Definition of done:*
-   - PTY tests cover the default prompt, plain / minimal presets,
-     nonzero-status display, background / stopped job count, and
-     git-provider failure fallback.
-
-2. **Syntax highlighting polish** — already shipped as a feature;
+1. **Syntax highlighting polish** — already shipped as a feature;
    expand the token classes (variables, command substitutions,
    redirects, glob parts, heredoc bodies). Always driven by the
    BaseLexer / one grammar — never a second tokenizer. Uses zigline's
@@ -247,7 +230,7 @@ Three items left in `ROADMAP.md`, grouped by readiness:
 
 One item waits on a zigline input-mode primitive.
 
-3. **Smart history Ctrl-R interactive search** — substrate shipped;
+2. **Smart history Ctrl-R interactive search** — substrate shipped;
    only the modal-input UI is missing. We agreed explicitly **not**
    to fake it via in-buffer hacks (worse than not having it).
    - **Blocker:** zigline 0.4.0 transient-input-mode primitive (a
