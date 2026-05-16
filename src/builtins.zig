@@ -16,11 +16,6 @@
 
 const std = @import("std");
 const runtime = @import("runtime.zig");
-
-// `std.c.fstatat`/`std.c.stat` aren't portably exposed across Linux
-// and macOS in Zig 0.16. Bind `stat(2)` directly — the `std.c.Stat`
-// struct shape is per-target so the libc symbol's layout matches.
-extern "c" fn stat(pathname: [*:0]const u8, buf: *std.c.Stat) c_int;
 const session_mod = @import("session.zig");
 const vars_mod = @import("vars.zig");
 const job_mod = @import("job.zig");
@@ -33,6 +28,7 @@ const word_mod = @import("word.zig");
 const parser = @import("parser.zig");
 const slash = @import("slash.zig");
 const history_mod = @import("history.zig");
+const portable_stat = @import("portable_stat.zig");
 const notice = @import("notice.zig");
 
 pub const Allocator = std.mem.Allocator;
@@ -372,18 +368,16 @@ fn runUnaryTest(op: []const u8, arg: []const u8) !Result {
     pathbuf[arg.len] = 0;
     const path_z: [*:0]const u8 = @ptrCast(&pathbuf);
 
-    var st: std.c.Stat = undefined;
-    if (stat(path_z, &st) != 0) return .{ .exited = 1 };
-    const mode = st.mode;
-    const is_dir = (mode & std.c.S.IFMT) == std.c.S.IFDIR;
-    const is_reg = (mode & std.c.S.IFMT) == std.c.S.IFREG;
-    if (std.mem.eql(u8, op, "-e")) return .{ .exited = 0 };
-    if (std.mem.eql(u8, op, "-f")) return .{ .exited = if (is_reg) 0 else 1 };
-    if (std.mem.eql(u8, op, "-d")) return .{ .exited = if (is_dir) 0 else 1 };
-    if (std.mem.eql(u8, op, "-s")) return .{ .exited = if (st.size > 0) 0 else 1 };
     if (std.mem.eql(u8, op, "-r")) return .{ .exited = if (std.c.access(path_z, std.c.R_OK) == 0) 0 else 1 };
     if (std.mem.eql(u8, op, "-w")) return .{ .exited = if (std.c.access(path_z, std.c.W_OK) == 0) 0 else 1 };
     if (std.mem.eql(u8, op, "-x")) return .{ .exited = if (std.c.access(path_z, std.c.X_OK) == 0) 0 else 1 };
+    // Portable kind + size lookup; routes through statx on Linux
+    // and fstatat on macOS (see `src/portable_stat.zig`).
+    const info = portable_stat.statPath(path_z) orelse return .{ .exited = 1 };
+    if (std.mem.eql(u8, op, "-e")) return .{ .exited = 0 };
+    if (std.mem.eql(u8, op, "-f")) return .{ .exited = if (info.kind == .file) 0 else 1 };
+    if (std.mem.eql(u8, op, "-d")) return .{ .exited = if (info.kind == .directory) 0 else 1 };
+    if (std.mem.eql(u8, op, "-s")) return .{ .exited = if (info.size > 0) 0 else 1 };
     return .{ .exited = 2 };
 }
 

@@ -29,10 +29,7 @@ const job = @import("job.zig");
 const builtins = @import("builtins.zig");
 const session_mod = @import("session.zig");
 const vars_mod = @import("vars.zig");
-
-// Bind `stat(2)` directly: `std.c.fstatat`/`std.c.stat` aren't
-// portably exposed across Linux and macOS in Zig 0.16's `std.c`.
-extern "c" fn stat(pathname: [*:0]const u8, buf: *std.c.Stat) c_int;
+const portable_stat = @import("portable_stat.zig");
 
 pub const Allocator = std.mem.Allocator;
 pub const Result = runtime.Result;
@@ -2507,8 +2504,7 @@ fn pathExists(path: []const u8) bool {
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
     const path_z: [*:0]const u8 = @ptrCast(&buf);
-    var st: std.c.Stat = undefined;
-    return stat(path_z, &st) == 0;
+    return portable_stat.statPath(path_z) != null;
 }
 
 fn isDirectory(path: []const u8) bool {
@@ -2517,7 +2513,6 @@ fn isDirectory(path: []const u8) bool {
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
     const path_z: [*:0]const u8 = @ptrCast(&buf);
-    var st: std.c.Stat = undefined;
-    if (stat(path_z, &st) != 0) return false;
-    return (st.mode & std.c.S.IFMT) == std.c.S.IFDIR;
+    const info = portable_stat.statPath(path_z) orelse return false;
+    return info.kind == .directory;
 }
