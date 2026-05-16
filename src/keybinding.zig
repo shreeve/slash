@@ -110,17 +110,34 @@ pub const BindingKey = struct {
 };
 
 /// Normalize a `BindingKey` so two semantically-equivalent chords
-/// hash to the same slot. Terminals can't distinguish `Ctrl-x` from
-/// `Ctrl-X` (both transmit byte 0x18), and zigline's parser emits
-/// the lowercase form for ctrl-modified ASCII letters. So a user
-/// `key Ctrl-X foo` binding must match a runtime `KeyEvent{ char='x',
-/// mods.ctrl=true }`. Lowercasing at both store time (in
-/// `parseKeySpec`) and lookup time (here) makes the two sides agree
-/// without depending on which one fires first or which case the
-/// user happened to type.
+/// hash to the same slot.
+///
+/// ASCII letters with a modifier other than just Shift get
+/// lowercased. Two reasons:
+///
+///   - **Ctrl-X vs Ctrl-x**: terminals transmit the same byte
+///     (0x18) for both, so the case the user typed in the spec
+///     cannot influence what the editor sees. zigline emits the
+///     lowercase form by convention.
+///
+///   - **Alt-L vs Alt-l**: terminals transmit DIFFERENT bytes
+///     (`\e L` vs `\e l`), so technically they're distinguishable
+///     — but on real keyboards, pressing Option/Alt + L without
+///     also holding Shift sends `\e l`. Users who write
+///     `key Alt-L "ls -la\n"` overwhelmingly mean "the L key with
+///     Alt", not "Alt-Shift-L", and silently storing the
+///     case-sensitive form means their binding never fires. The
+///     trade-off is losing the ability to bind Alt-Shift-X as
+///     distinct from Alt-X via `key Alt-X` syntax — users who
+///     genuinely need that distinction can spell it explicitly
+///     as `Shift-Alt-X`.
+///
+/// Plain letters with only the Shift modifier (or no modifier
+/// at all) keep their case — that's a typed character, not a
+/// keyboard shortcut, and the case is meaningful.
 pub fn normalizeForLookup(bk: BindingKey) BindingKey {
     if (bk.code != .char) return bk;
-    if (!bk.mods.ctrl) return bk;
+    if (!bk.mods.ctrl and !bk.mods.alt) return bk;
     if (bk.char >= 'A' and bk.char <= 'Z') {
         var out = bk;
         out.char = bk.char + 32; // ASCII to-lower
@@ -560,14 +577,45 @@ test "parseKeySpec: case-insensitive modifiers; ctrl-letter forced lowercase" {
     try std.testing.expect(std.meta.eql(lower, upper));
 }
 
-test "parseKeySpec: Alt-modified letters PRESERVE case (no normalization)" {
-    // No ctrl modifier → no normalization. `Alt-X` and `Alt-x` are
-    // distinguishable on modern terminals; user gets what they typed.
+test "parseKeySpec: Alt-X and Alt-x are the same binding (case-folded)" {
+    // POLS: typing Option+L on the keyboard sends `\e l` (lowercase)
+    // because there's no Shift. Most users write `key Alt-L` thinking
+    // of "the L key with Alt", not "Alt-Shift-L". Storing the
+    // case-sensitive form means `key Alt-L` silently never fires
+    // when the user actually presses Option+L. So Alt-letter
+    // normalizes the same way Ctrl-letter does — both spellings
+    // resolve to the lowercase canonical form.
     const alt_lower = try parseKeySpec("Alt-x");
     const alt_upper = try parseKeySpec("Alt-X");
     try std.testing.expectEqual(@as(u21, 'x'), alt_lower.char);
-    try std.testing.expectEqual(@as(u21, 'X'), alt_upper.char);
-    try std.testing.expect(!std.meta.eql(alt_lower, alt_upper));
+    try std.testing.expectEqual(@as(u21, 'x'), alt_upper.char);
+    try std.testing.expect(std.meta.eql(alt_lower, alt_upper));
+}
+
+test "Alt-L stored binding matches both `\\el` and `\\eL` events" {
+    // Regression for the originally-reported bug: pressing
+    // Option+l (no Shift) sends `\e l` (lowercase). Without
+    // Alt-letter normalization, `key Alt-L` only matched
+    // `\e L` (Option+Shift+L), silently never firing in the
+    // common case.
+    const alloc = std.testing.allocator;
+    var t = Table.init(alloc);
+    defer t.deinit();
+
+    const stored = try parseKeySpec("Alt-L");
+    try t.putChord(stored, .{ .action = .move_left });
+
+    const event_lower = BindingKey.fromKeyEvent(.{
+        .code = .{ .char = 'l' },
+        .mods = .{ .alt = true },
+    }).?;
+    try std.testing.expect(t.lookupChord(event_lower) != null);
+
+    const event_upper = BindingKey.fromKeyEvent(.{
+        .code = .{ .char = 'L' },
+        .mods = .{ .alt = true },
+    }).?;
+    try std.testing.expect(t.lookupChord(event_upper) != null);
 }
 
 test "parseKeySpec: multi-modifier chord" {
@@ -627,12 +675,16 @@ test "parseKeySpec: rejects unknown key" {
     try std.testing.expectError(error.UnknownKey, parseKeySpec("Ctrl-Banana"));
 }
 
-test "formatKey: canonical Alt- not Esc-" {
+test "formatKey: canonical Alt- not Esc-, and Alt-letter case-folded" {
+    // `Esc-P` canonicalizes to `Alt-p` — `Alt-` is the canonical
+    // modifier name; the letter case-folds to lowercase because
+    // Alt-letter chords don't distinguish case (see
+    // `normalizeForLookup`).
     const k = try parseKeySpec("Esc-P");
     var buf: [64]u8 = undefined;
     var stream = std.Io.Writer.fixed(&buf);
     try formatKey(k, &stream);
-    try std.testing.expectEqualStrings("Alt-P", stream.buffered());
+    try std.testing.expectEqualStrings("Alt-p", stream.buffered());
 }
 
 test "formatKey: multi-modifier formatting is stable" {
@@ -713,9 +765,12 @@ test "parseKeySpec: Ctrl-X stores lowercase char (matches zigline event)" {
     try std.testing.expect(k.mods.ctrl);
 }
 
-test "parseKeySpec: Alt-X preserves case (no ctrl modifier to collide)" {
+test "parseKeySpec: Alt-X normalizes to lowercase (matches Option+X event)" {
+    // Updated post-fix: Alt-letter case-folds the same way
+    // Ctrl-letter does. See the `parseKeySpec: Alt-X and Alt-x
+    // are the same binding` test below for the rationale.
     const k = try parseKeySpec("Alt-X");
-    try std.testing.expectEqual(@as(u21, 'X'), k.char);
+    try std.testing.expectEqual(@as(u21, 'x'), k.char);
 }
 
 test "parseKeySpec: Esc (bare) aliases the Escape key" {

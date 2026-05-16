@@ -401,10 +401,11 @@ const cases: []const Case = &.{
     },
     .{
         .name = "key: empty `key` lists installed bindings (canonical form)",
-        // `Esc-P` canonicalizes to `Alt-P` on listing; the listing
-        // includes the action name from the registry.
+        // `Esc-P` canonicalizes to `Alt-p` on listing — `Alt-` is
+        // the canonical modifier name, and Alt-letter case-folds
+        // to lowercase (matches the byte sequence Option+P emits).
         .source = "key Esc-P history-prev-prefix; key",
-        .expect = .{ .exit_code = 0, .stdout = "Alt-P", .stdout_contains = true },
+        .expect = .{ .exit_code = 0, .stdout = "Alt-p", .stdout_contains = true },
     },
     .{
         .name = "key: listing shows literal-text bindings re-encoded",
@@ -470,11 +471,11 @@ const cases: []const Case = &.{
     .{
         .name = "key: rebinding the same chord replaces (no duplicate)",
         // Two binds of `Alt-Z`, then `key` should list it once.
-        // Output should contain exactly one line starting with `Alt-Z`.
+        // Canonical form lowercases the letter (Alt-letter case-fold).
         .source = "key Alt-Z history-prev-prefix; key Alt-Z \"echo X\\n\"; key",
         .expect = .{
             .exit_code = 0,
-            .stdout = "Alt-Z \t\"echo X\\n\"\n",
+            .stdout = "Alt-z \t\"echo X\\n\"\n",
             .stdout_contains = true,
         },
     },
