@@ -52,6 +52,45 @@ pub const JobNoticeKind = enum {
     done,
 };
 
+/// Announce backgrounded jobs that finished since the previous prompt.
+/// Polls for any pending SIGCHLD events first so a sleep that finished
+/// while the user was sitting at the prompt becomes visible at the
+/// next Enter (bash/zsh default-mode timing). Mid-prompt announcement
+/// in the style of bash `set -b` would require a zigline `printAbove`
+/// primitive that hasn't shipped yet.
+///
+/// Only backgrounded jobs surface notices — foreground completions
+/// already go through the exit-status notice and re-announcing them
+/// would be redundant. Each job is announced exactly once via the
+/// per-job `notified_done` bit.
+pub fn pendingDoneJobs(session: *Session) void {
+    if (!session.interactive) return;
+
+    // Drain any uncollected SIGCHLD events so .done transitions are
+    // visible. Cheap when nothing is pending — waitpid(WNOHANG) is a
+    // single syscall that returns immediately when the kernel has
+    // nothing to report.
+    job_mod.service(&session.jobs, .poll, null) catch {};
+
+    for (session.jobs.list()) |j| {
+        if (j.processes.len == 0) continue;
+        if (!j.detached) continue;
+        if (j.notified_done) continue;
+        switch (j.state) {
+            .done => {},
+            else => continue,
+        }
+        // Set the bit BEFORE firing the notice so even a future
+        // `jobStateChange` that grows side effects (or fails partway)
+        // cannot re-announce the same completion on a later prompt.
+        // Worst case: the user sees no notice for this job once and
+        // still finds it via `jobs`. Re-announcement noise would be
+        // strictly worse.
+        j.notified_done = true;
+        jobStateChange(session, j, .done);
+    }
+}
+
 /// Drain a pending exit-status notice. No-op when the flag is clear,
 /// the last status was zero, or the session isn't interactive. Always
 /// clears the flag so a subsequent prompt is silent.

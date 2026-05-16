@@ -60,6 +60,12 @@ pub const Job = struct {
     /// shell's cooked-mode settings. `null` for any job that was never
     /// stopped or that wasn't a foreground job.
     termios: ?std.posix.termios = null,
+    /// True once a `.done` notice has been surfaced for this job's
+    /// transition into the `.done` state. Prevents re-announcing the
+    /// same backgrounded job's completion across multiple prompts.
+    /// Foreground job completions are reported via the exit-status
+    /// notice machinery, not this flag.
+    notified_done: bool = false,
 };
 
 // =============================================================================
@@ -105,6 +111,7 @@ pub const JobTable = struct {
             .detached = detached,
             .command_text = if (command_text) |t| try self.alloc.dupe(u8, t) else null,
             .termios = null,
+            .notified_done = false,
         };
         self.next_id += 1;
         try self.jobs.append(self.alloc, j);

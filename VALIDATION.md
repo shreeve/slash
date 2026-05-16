@@ -284,3 +284,26 @@ not auto-submit, matching the bash/zsh contract that Ctrl-R is for
 *finding* a command, not running one.
 
 ---
+
+## Targeted PTY Validation: 2026-05-15 23:80 UTC
+
+- commit: working tree (between-prompts `[N] Done` notices)
+- os: Darwin 25.4.0 arm64 (macOS, M-series)
+- slash binary: `bin/slash`
+- mode: automated PTY regression (`zig build test-pty`)
+
+| # | test | result | note |
+|---|---|---|---|
+| 1 | bg job `[N] Done` notice | PASS | `sleep 0.2 &` plus a follow-up command produces exactly one `[1] Done sleep` line between the two prompts |
+| 2 | foreground completion silence | PASS | a plain `echo` does NOT trigger any spurious `] Done echo` line |
+
+**Tally:** 2 PASS, 0 FAIL, 0 SKIP.
+
+### Verdict
+
+Matches bash/zsh `set +b` default-mode timing — backgrounded jobs
+announce at the next prompt boundary, not mid-prompt. Mid-prompt
+`set -b` semantics would require a zigline `printAbove` primitive
+that hasn't shipped yet.
+
+---

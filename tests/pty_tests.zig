@@ -1940,3 +1940,47 @@ test "slash pty: Ctrl-R Esc aborts without modifying the buffer" {
         try std.testing.expect(std.mem.indexOf(u8, window, "SLASH_ABORTED_HISTORY_LINE") == null);
     }
 }
+
+test "slash pty: backgrounded job finish surfaces `[N] Done` notice at next prompt" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        // Launch a quick bg job. The `&` returns immediately; the
+        // job is detached. Give the kernel enough time to reap it
+        // before the next prompt boundary so the SIGCHLD has fired.
+        .{ .send = "sleep 0.2 &\n", .settle_ms = 200 },
+        .{ .send = "echo PRE_DONE_MARKER\n", .settle_ms = 600, .wait_for = "PRE_DONE_MARKER" },
+        // Trigger one more prompt cycle so the notification fires.
+        .{ .send = "echo POST_DONE_MARKER\n", .settle_ms = 500, .wait_for = "POST_DONE_MARKER" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // `[1] Done sleep` should appear between the two markers — bash
+    // and zsh `set +b` semantics: backgrounded job completions land
+    // at the next prompt boundary, not mid-prompt. Notice fires
+    // exactly once per job (the `notified_done` bit) so a third
+    // prompt would not re-announce it.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1] Done sleep") != null);
+    // And it should fire only once — the second prompt cycle must
+    // not re-announce.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(r.out, "[1] Done sleep"));
+}
+
+test "slash pty: foreground command completion does NOT trigger a Done notice" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "echo FG_NO_DONE_MARKER\n", .settle_ms = 400, .wait_for = "FG_NO_DONE_MARKER" },
+        .{ .send = "echo SECOND_PROMPT_MARKER\n", .settle_ms = 400, .wait_for = "SECOND_PROMPT_MARKER" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // Foreground completions go through the exit-status notice path,
+    // not the `[N] Done` machinery. Confirm no spurious Done line
+    // surfaces for the simple `echo` command.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "] Done echo") == null);
+}

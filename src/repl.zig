@@ -199,11 +199,16 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
 
     var prompt_buf: [4096]u8 = undefined;
     while (true) {
-        // Drain any pre-prompt notice (last command's non-zero exit
-        // status) before rendering the prompt, so the prompt itself
-        // stays uncluttered and the failure shows up on its own line
-        // above. See `notice.zig` for format and dim-on-tty rendering.
-        if (pending.items.len == 0) notice.pendingExitStatus(session);
+        // Drain pre-prompt notices before rendering the prompt: any
+        // backgrounded jobs that finished since the last command
+        // first, then the last command's non-zero exit status. The
+        // prompt itself stays uncluttered; both kinds of news land
+        // on their own dim lines above. See `notice.zig` for format
+        // and dim-on-tty rendering.
+        if (pending.items.len == 0) {
+            notice.pendingDoneJobs(session);
+            notice.pendingExitStatus(session);
+        }
         const prompt_text = if (pending.items.len == 0)
             slashPrompt(&prompt_buf, session)
         else

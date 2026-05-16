@@ -117,8 +117,8 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: **142/142 passing** — 80 in the
-unit + headless suite (`zig build test-headless`) and 62 in the PTY
+**Test totals as of this handoff**: **144/144 passing** — 80 in the
+unit + headless suite (`zig build test-headless`) and 64 in the PTY
 suite (`zig build test-pty`). All green. The two ex-flaky PTY tests
 (`Ctrl-Z stops a foreground
 sleep`, `cat & SIGTTIN`) were diagnosed and fixed in commit
@@ -212,6 +212,13 @@ so the JSONL history index doesn't pollute the user's real
   replaces the main buffer with the match (one undoable Replace)
   but does NOT submit; Esc / Ctrl-G / Ctrl-C abort and restore
   the original buffer.
+- Between-prompts `[N] Done` notices for backgrounded jobs —
+  `notice.pendingDoneJobs(session)` fires once per backgrounded
+  job that has transitioned to `.done` since the previous prompt.
+  Matches bash/zsh `set +b` default-mode timing. Mid-prompt
+  ("set -b") announcements would need a zigline `printAbove`
+  primitive that hasn't shipped; for now, the user sees the
+  notice the next time they press Enter.
 - Pre-prompt status notices + live `[N] Stopped|Continued <cmd>`
   announcements for Ctrl-Z / `fg` / `bg`, replacing the inline
   `[N]` exit-status badge in the prompt with a dim-on-tty stderr
@@ -224,11 +231,13 @@ so the JSONL history index doesn't pollute the user's real
 - **CHECKLIST §5/§13 rapid-stop/continue stress test** — single
   cycles validated, no high-frequency torture loop. Real but not
   blocking.
-- **Idle-time job notifications** ("[1] Done sleep 30" appearing
-  while you're at the prompt without a foreground command driving
-  the redraw) — requires zigline to surface a wake to the
-  application as a slash-visible event variant. Slots in around
-  rich-prompt time, where it's the prerequisite that justifies it.
+- **Mid-prompt `set -b`-style job notifications** — between-prompts
+  surfacing ships (see above), but bash `set -b` (announce
+  immediately mid-prompt without waiting for Enter) needs a zigline
+  `printAbove` / `external_print` primitive to write the notice
+  above the prompt without garbling the editor's render. Listed in
+  `zigline/FUTURE.md` as "Async-safe Editor.print / printAbove".
+  Wire up the slash side once that lands.
 
 ---
 
