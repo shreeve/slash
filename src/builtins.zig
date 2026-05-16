@@ -2528,31 +2528,34 @@ fn printProbeEvent(fd: i32, ev: ProbeEvent) void {
             }
         },
         .multibyte_or_compose => {
-            // Three-part write: a header line, then a multi-line
-            // diagnostic block. Each piece fits its own small
-            // buffer; together they exceed the 256-byte ceiling
-            // a single `bufPrint` would have.
+            // Three-part write: a header line, the bind-direct
+            // suggestion, then an optional terminal-config note.
+            // The bind-direct path lets users keep their terminal
+            // settings AND have working Option-key shortcuts —
+            // slash's `parseKeySpec` accepts single-codepoint
+            // UTF-8 as a keyspec, so `key "¬" ...` works directly.
             var buf: [128]u8 = undefined;
-            // Header: render the actual character (capped) + hex bytes.
             const len = @min(ev.raw.len, 10);
             const header = std.fmt.bufPrint(&buf, "  {s}", .{ev.raw[0..len]}) catch return;
             _ = writeAllToFd(fd, header);
-            // Pad to column 22 so the hex column lines up with the
-            // rest of the output.
             const pad_count: usize = if (len < 22) @as(usize, 22) - len - 2 else 1;
             var i: usize = 0;
             while (i < pad_count) : (i += 1) _ = writeAllToFd(fd, " ");
             writeHexBytesToFd(fd, ev.raw);
             _ = writeAllToFd(fd, "\n");
-            // Multi-line diagnostic body — emit as a single static
-            // string so the buffer-size question doesn't recur.
-            _ = writeAllToFd(fd,
-                \\    ↑ multi-byte UTF-8 or macOS compose char (Option-X with terminal in compose mode).
-                \\      Enable Meta in your terminal preferences to bind Option-X:
-                \\        Terminal.app: Profile → Keyboard → "Use Option as Meta key"
-                \\        iTerm2:       Profile → Keys → "Left Option Key" → Esc+
-                \\
-            );
+
+            // Suggest binding to the exact bytes — works regardless
+            // of terminal config. Echo the char back so the user
+            // can copy-paste it into their .slashrc.
+            _ = writeAllToFd(fd, "    ↑ multi-byte char (macOS compose-mode Option-key, or just a Unicode char you typed).\n");
+            _ = writeAllToFd(fd, "      Easiest fix — bind to this character directly:\n");
+            _ = writeAllToFd(fd, "        key \"");
+            _ = writeAllToFd(fd, ev.raw[0..len]);
+            _ = writeAllToFd(fd, "\" some-action\n");
+            _ = writeAllToFd(fd, "      OR (only if you want `Alt-X` / `Option-X` spellings to work everywhere)\n");
+            _ = writeAllToFd(fd, "      enable Meta in your terminal preferences:\n");
+            _ = writeAllToFd(fd, "        Terminal.app: Profile → Keyboard → \"Use Option as Meta key\"\n");
+            _ = writeAllToFd(fd, "        iTerm2:       Profile → Keys → \"Left Option Key\" → Esc+\n");
         },
         .unknown_short => {
             printOneLine(fd, "  (unknown short seq)   ", .{}, ev.raw, "\n", .{});

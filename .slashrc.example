@@ -78,26 +78,50 @@
 # and slash names it + shows the raw bytes, with a hint when the
 # bytes look like macOS Option-as-compose-char.
 #
-# IMPORTANT for macOS users: Option-X bindings only fire if your
-# terminal sends `\e X` when you press Option. By default both
-# Terminal.app and iTerm2 send the macOS compose character (`Option-L`
-# = `¬`) instead. To fix:
+# Two paths on macOS for Option-key bindings:
 #
-#   - Terminal.app: Profile → Keyboard → check "Use Option as Meta key"
-#   - iTerm2:       Profile → Keys → "Left Option Key" → set to "Esc+"
+#   1. EASIEST — bind directly to the compose character your
+#      terminal emits. Run `key --probe`, press Option+L, copy
+#      the character it prints (`¬`), and paste it as the keyspec:
 #
-# Once that's flipped, every Option-X binding below will fire.
+#        key "¬" "ls -la\n"           # press Option+L to run ls -la
+#        key "ø" "git status\n"       # press Option+O to run git status
+#        key "®" history-prev-prefix  # press Option+R
+#
+#      No terminal-config changes needed. Works alongside any
+#      other Unicode you type.
+#
+#   2. CLASSIC — enable Meta in your terminal preferences so the
+#      Option key sends `\e X` like every other Unix shell expects:
+#
+#        Terminal.app: Profile → Keyboard → check "Use Option as Meta key"
+#        iTerm2:       Profile → Keys → "Left Option Key" → set to "Esc+"
+#
+#      Once flipped, you can use `key Alt-L` / `key Option-L` style
+#      spellings, and Option-key shortcuts work in every TUI on
+#      your Mac (vim, emacs, tmux, etc.).
+#
+# Both work. Pick what's least invasive for your setup.
 
 # History navigation (these are seeded as defaults — listed here
 # so you know they exist):
 # key Alt-P history-prev-prefix       # match history backward by prefix
 # key Alt-N history-next-prefix       # match history forward by prefix
 
-# Universal shortcuts (uncomment any you'd actually use):
+# Universal shortcuts using Path 2 (terminal config flipped):
 # key Option-L "ls -la\n"             # list current dir
 # key Option-G "git status\n"         # git status
 # key Option-D "cd ~/Code\n"          # jump to your code dir
 # key Option-H "cd ~\n"               # go home
+
+# Equivalent shortcuts using Path 1 (no terminal config; bind to
+# the compose chars your terminal emits — run `key --probe` and
+# copy the chars from there. The ones below are US-QWERTY default;
+# yours may differ):
+# key "¬" "ls -la\n"                  # Option+L
+# key "©" "git status\n"              # Option+G
+# key "∂" "cd ~/Code\n"               # Option+D
+# key "˙" "cd ~\n"                    # Option+H
 
 # Pipe whatever's on the prompt into less:
 # key Option-\\ " | less\n"

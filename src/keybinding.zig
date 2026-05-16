@@ -419,13 +419,27 @@ pub fn parseKeySpec(text: []const u8) ParseError!BindingKey {
     if (matchFunctionKey(rest)) |n| {
         return normalizeForLookup(.{ .code = .function, .function = n, .mods = mods });
     }
-    // Single character — most common case (`Ctrl-X`, `Alt-P`).
-    // ASCII-only for now; Unicode bindings are exotic and zsh doesn't
-    // support them portably either.
+    // Single ASCII character — most common case (`Ctrl-X`, `Alt-P`).
     if (rest.len == 1) {
         const c = rest[0];
         if (c < 0x20 or c >= 0x7f) return error.UnknownKey;
         return normalizeForLookup(.{ .code = .char, .char = @as(u21, c), .mods = mods });
+    }
+    // Single-codepoint UTF-8 — lets users bind directly to whatever
+    // character their terminal emits, even when it isn't a chord
+    // slash can name as `Alt-X` / `Ctrl-X`. The big payoff is
+    // macOS without "Use Option as Meta" enabled: Option+L emits
+    // `¬` (0xc2 0xac), so users who don't want to flip the
+    // Terminal.app setting can write `key "¬" "ls -la\n"` and
+    // pressing Option+L still fires the binding. zigline decodes
+    // the same UTF-8 bytes into `KeyEvent{ char = 0xAC }`, which
+    // hits the same slot via `BindingKey.fromKeyEvent`.
+    if (std.unicode.utf8ValidateSlice(rest)) {
+        const seq_len = std.unicode.utf8ByteSequenceLength(rest[0]) catch return error.UnknownKey;
+        if (seq_len == rest.len and seq_len > 1) {
+            const cp = std.unicode.utf8Decode(rest) catch return error.UnknownKey;
+            return normalizeForLookup(.{ .code = .char, .char = cp, .mods = mods });
+        }
     }
     return error.UnknownKey;
 }
@@ -606,6 +620,37 @@ test "parseKeySpec: Alt-X and Alt-x are the same binding (case-folded)" {
     try std.testing.expectEqual(@as(u21, 'x'), alt_lower.char);
     try std.testing.expectEqual(@as(u21, 'x'), alt_upper.char);
     try std.testing.expect(std.meta.eql(alt_lower, alt_upper));
+}
+
+test "parseKeySpec: single-codepoint UTF-8 char (compose-char workaround)" {
+    // Mac users without "Use Option as Meta" enabled see
+    // Option+L emit `¬` (U+00AC = 0xc2 0xac in UTF-8). They
+    // can bind to that codepoint directly instead of fighting
+    // their terminal settings.
+    const k = try parseKeySpec("¬");
+    try std.testing.expectEqual(BindingKey.CodeTag.char, k.code);
+    try std.testing.expectEqual(@as(u21, 0xAC), k.char);
+    try std.testing.expect(!k.mods.alt);
+    try std.testing.expect(!k.mods.ctrl);
+}
+
+test "parseKeySpec: UTF-8 binding matches zigline's decoded KeyEvent" {
+    // End-to-end: `key "¬" ...` stores BindingKey{char=0xAC};
+    // zigline reads bytes `\xc2 \xac`, decodes as one codepoint,
+    // delivers `KeyEvent{ .code = .char = 0xAC }`. They must
+    // resolve to the same hashmap slot or the binding doesn't fire.
+    const alloc = std.testing.allocator;
+    var t = Table.init(alloc);
+    defer t.deinit();
+
+    const stored = try parseKeySpec("¬");
+    try t.putChord(stored, .{ .literal = try alloc.dupe(u8, "ls -la\n") });
+
+    const event = BindingKey.fromKeyEvent(.{
+        .code = .{ .char = 0xAC },
+        .mods = .{},
+    }).?;
+    try std.testing.expect(t.lookupChord(event) != null);
 }
 
 test "Alt-L stored binding matches both `\\el` and `\\eL` events" {
