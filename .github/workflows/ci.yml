@@ -39,10 +39,28 @@ jobs:
           ref: v0.5.0
           path: zigline
 
+      # Install Zig 0.16.0 directly from ziglang.org. The
+      # mlugg/setup-zig@v1 action's release index hadn't picked up
+      # 0.16.0 at the time of writing (first run failed with HTTP
+      # 404 fetching from the stale URL pattern). The manual install
+      # is small and avoids future action-index drift.
       - name: Install Zig 0.16.0
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.16.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=0.16.0
+          os=$(uname -s | tr '[:upper:]' '[:lower:]')
+          arch=$(uname -m)
+          # ziglang.org uses zig-{arch}-{os}-{version}.tar.xz.
+          tarball="zig-${arch}-${os}-${version}.tar.xz"
+          url="https://ziglang.org/download/${version}/${tarball}"
+          echo "Fetching $url"
+          mkdir -p "$HOME/.zig"
+          curl --fail --location --silent --show-error "$url" -o /tmp/zig.tar.xz
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/.zig"
+          dest="$HOME/.zig/zig-${arch}-${os}-${version}"
+          echo "$dest" >> "$GITHUB_PATH"
+          "$dest/zig" version
 
       - name: Build
         working-directory: slash
