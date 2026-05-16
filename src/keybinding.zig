@@ -540,8 +540,21 @@ pub fn formatKey(k: BindingKey, w: anytype) !void {
         .char => {
             if (k.char == ' ') {
                 try w.writeAll("Space");
-            } else {
+            } else if (k.char < 0x80) {
                 try w.writeByte(@intCast(k.char));
+            } else {
+                // Non-ASCII codepoint — encode as UTF-8 so the
+                // terminal renders the actual character instead
+                // of a single illegal byte showing as `�`. This
+                // matters for `key "¬" ...`-style bindings where
+                // the keyspec is a Unicode character that the
+                // user pasted from `key --probe`.
+                var utf8: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(k.char, &utf8) catch {
+                    try w.print("U+{x:0>4}", .{k.char});
+                    return;
+                };
+                try w.writeAll(utf8[0..len]);
             }
         },
         .function => try w.print("F{d}", .{k.function}),
@@ -746,6 +759,18 @@ test "formatKey: canonical Alt- not Esc-, and Alt-letter case-folded" {
     var stream = std.Io.Writer.fixed(&buf);
     try formatKey(k, &stream);
     try std.testing.expectEqualStrings("Alt-p", stream.buffered());
+}
+
+test "formatKey: non-ASCII codepoint encodes as UTF-8 (renders correctly)" {
+    // Regression for a bug where `key "¬" "..."` listed back as
+    // `�` because we wrote the raw codepoint byte (0xAC) instead
+    // of UTF-8-encoding it (0xc2 0xac). The terminal would show
+    // the replacement character.
+    const k = try parseKeySpec("¬");
+    var buf: [16]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    try formatKey(k, &stream);
+    try std.testing.expectEqualStrings("¬", stream.buffered());
 }
 
 test "formatKey: multi-modifier formatting is stable" {
