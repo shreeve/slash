@@ -1,6 +1,6 @@
 .{
     .name = .slash,
-    .version = "0.0.0",
+    .version = "1.1.0",
     .fingerprint = 0x7ce47f15c15a83c,
 
     // Slash is written against Zig 0.16.0 APIs (Juicy Main, std.Io, std.process.Init,
