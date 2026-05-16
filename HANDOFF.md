@@ -124,7 +124,9 @@ suite (`zig build test-pty`). All green.
 GitHub Actions CI runs `zig build` + `test-headless` + `test-pty`
 on both `ubuntu-latest` and `macos-latest` for every push and PR
 to `main`. Workflow lives at `.github/workflows/ci.yml` and pins
-zigline to the matching tagged release. The two ex-flaky PTY tests
+zigline to the matching tagged release. Both jobs are green —
+Linux PTY validation discovered three real portability issues
+(F5–F7 in `VALIDATION.md`); all fixed. The two ex-flaky PTY tests
 (`Ctrl-Z stops a foreground
 sleep`, `cat & SIGTTIN`) were diagnosed and fixed in commit
 `14f5e4a` — root cause was Ctrl-Z arriving before slash finished

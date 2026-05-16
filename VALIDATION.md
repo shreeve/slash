@@ -332,6 +332,48 @@ load, and the post-storm prompt recovery.
 
 ---
 
+## CI: Linux PTY validation live: 2026-05-15 24:10 UTC
+
+- workflow: `.github/workflows/ci.yml`
+- matrix: `ubuntu-latest`, `macos-latest`
+- zigline: pinned to `v0.5.0` via sibling-repo checkout
+- Zig: 0.16.0 (downloaded from `ziglang.org` per platform)
+
+The CI build process exposed real Linux-portability bugs that
+macOS-only development had hidden:
+
+- **F5: `std.c.fstatat` macOS-only.** Zig 0.16's `std.c.Stat` is
+  `void` on Linux — the stdlib steers callers toward `statx(2)`
+  and drops the per-glibc `struct stat` shape. **FIXED**: added
+  `src/portable_stat.zig` with a narrow `Info { kind, size }`
+  surface that routes through `statx` on Linux and `fstatat` on
+  macOS. Four call sites in `builtins.zig`, `completion.zig`,
+  and `eval.zig` migrated.
+- **F6: macOS-baked headless test expectations.** `type cat`
+  expected `/bin/cat`; `cd -` expected `/private/tmp`. Both fail
+  on Linux's `/usr/bin/cat` + `/tmp`. **FIXED**: switched to
+  `stdout_contains` substrings that work on both.
+- **F7: bg-job-notice timing race in the new PTY test.**
+  `sleep 0.2 & + settle 200` could race the SIGCHLD on a slow
+  CI runner. **FIXED**: restructured to use `wait %1` for
+  deterministic sync; matched on `Done sleep` without the
+  job-number prefix (which depends on test ordering).
+
+| # | check | linux | macos |
+|---|---|---|---|
+| 1 | `zig build` | PASS | PASS |
+| 2 | `zig build test-headless` (80 tests) | PASS | PASS |
+| 3 | `zig build test-pty` (65 tests, includes the 10-cycle stress test) | PASS | PASS |
+| 4 | `./bin/slash --version` smoke | PASS | PASS |
+
+Linux PTY validation is now continuous — any regression that
+breaks the `linux` branch of the harness's `TIOCSCTTY` /
+`TIOCSWINSZ` / `O_NOCTTY` switches, or any timing race that
+doesn't reproduce on macOS, surfaces as a red check on the PR
+before merge.
+
+---
+
 ## GitHub Actions CI: 2026-05-15 24:00 UTC
 
 - workflow: `.github/workflows/ci.yml`
