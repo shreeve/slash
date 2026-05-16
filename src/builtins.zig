@@ -2067,9 +2067,22 @@ fn keyList(session: *session_mod.Session, io: BuiltinIo) anyerror!Result {
 }
 
 fn keyListActions(io: BuiltinIo) anyerror!Result {
-    // No allocation needed — write each name + `\n` straight to
-    // the fd. Action-name strings are static (StaticStringMap).
-    for (keybinding.actionNames()) |name| {
+    // `keybinding.actionNames()` returns the registry's keys in
+    // whatever order `StaticStringMap` packed them — empirically
+    // shortest-first, which is unhelpful for skimming. Copy the
+    // pointers into a small stack array and sort alphabetically.
+    // Allocation-free for any registry that fits in `buf`; the
+    // current registry is ~40 entries.
+    var buf: [128][]const u8 = undefined;
+    const src = keybinding.actionNames();
+    const n = @min(src.len, buf.len);
+    for (src[0..n], 0..) |s, i| buf[i] = s;
+    std.sort.heap([]const u8, buf[0..n], {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lt);
+    for (buf[0..n]) |name| {
         _ = writeAllToFd(io.stdout, name);
         _ = writeAllToFd(io.stdout, "\n");
     }

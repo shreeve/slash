@@ -341,8 +341,10 @@ pub fn lookupAction(name: []const u8) ?RegistryAction {
     return registry_map.get(name);
 }
 
-/// Iterator-style listing for `key --actions`. Returns sorted keys
-/// at comptime — same order on every call, no allocation.
+/// Iterator-style listing for `key --actions`. Returns the
+/// registry's keys in `StaticStringMap`'s packed order (empirically
+/// shortest-first; not alphabetical). Callers that want sorted
+/// output sort post-hoc — see `keyListActions` in `builtins.zig`.
 pub fn actionNames() []const []const u8 {
     return registry_map.keys();
 }
