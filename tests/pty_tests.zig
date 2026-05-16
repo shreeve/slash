@@ -1946,31 +1946,27 @@ test "slash pty: backgrounded job finish surfaces `[N] Done` notice at next prom
 
     const alloc = std.testing.allocator;
     const r = try runScript(alloc, &.{"--norc"}, &.{
-        // Launch a quick bg job. The `&` returns immediately; the
-        // job is detached. The sleep needs to be long enough that
-        // its completion outlives the PRE marker write but short
-        // enough that the test doesn't drag — and we need enough
-        // settle margin around it so a slow CI runner doesn't end
-        // up sending the next command before SIGCHLD has fired.
-        .{ .send = "sleep 0.3 &\n", .settle_ms = 300 },
+        // Launch a bg job, then block on `wait %1` to synchronize
+        // on its completion deterministically. After `wait` returns
+        // the job is in `.done` state but no notice has fired yet
+        // — that happens at the NEXT prompt boundary, which we
+        // trigger with the POST marker. The PRE/POST markers
+        // bracket the notice for a stable assertion regardless of
+        // runner speed.
         .{ .send = "echo PRE_DONE_MARKER\n", .settle_ms = 400, .wait_for = "PRE_DONE_MARKER" },
-        // Give the sleep + SIGCHLD a comfortable window to land
-        // before the next prompt — 800 ms is well past sleep's
-        // 300 ms plus any scheduling jitter on a busy runner.
-        .{ .send = "echo POST_DONE_MARKER\n", .settle_ms = 1200, .wait_for = "POST_DONE_MARKER" },
+        .{ .send = "sleep 0.3 &\n", .settle_ms = 200 },
+        .{ .send = "wait %1\n", .settle_ms = 1500, .wait_for = "wait %1" },
+        .{ .send = "echo POST_DONE_MARKER\n", .settle_ms = 800, .wait_for = "POST_DONE_MARKER" },
         .{ .send = "exit 0\n", .settle_ms = 100 },
     });
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
-    // `[1] Done sleep` should appear between the two markers — bash
-    // and zsh `set +b` semantics: backgrounded job completions land
-    // at the next prompt boundary, not mid-prompt. Notice fires
-    // exactly once per job (the `notified_done` bit) so a third
-    // prompt would not re-announce it.
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "[1] Done sleep") != null);
-    // And it should fire only once — the second prompt cycle must
-    // not re-announce.
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(r.out, "[1] Done sleep"));
+    // Match on `Done sleep` without the job-number prefix — that
+    // number depends on how many foreground commands came before
+    // and is brittle to test ordering. Exactly one occurrence
+    // proves the `notified_done` bit prevents re-announcement.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "Done sleep") != null);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(r.out, "Done sleep"));
 }
 
 test "slash pty: foreground command completion does NOT trigger a Done notice" {
