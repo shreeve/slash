@@ -13,8 +13,9 @@ concurrency:
 
 jobs:
   # Build + run the full test suite (headless + PTY) on every supported OS.
-  # Slash uses the sibling-repo zigline path dependency, so this job checks
-  # out both repos side by side and runs `zig build test` from inside slash.
+  # `zigline` is pinned by URL + hash in `build.zig.zon`; the Zig package
+  # manager fetches and caches it during `zig build`, so only the slash
+  # repo needs to be checked out.
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -29,13 +30,16 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - name: Check out slash
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Install Zig 0.16.0 directly from ziglang.org. The
-      # mlugg/setup-zig@v1 action's release index hadn't picked up
+      # `mlugg/setup-zig@v1` action's release index hadn't picked up
       # 0.16.0 at the time of writing (first run failed with HTTP
       # 404 fetching from the stale URL pattern). The manual install
-      # is small and avoids future action-index drift.
+      # is small and avoids future action-index drift, and is also
+      # node-runtime-independent so we're insulated from the
+      # actions/runner Node 20 → Node 24 transition (announced
+      # 2025-09-19, enforced 2026-09-16).
       - name: Install Zig 0.16.0
         shell: bash
         run: |
@@ -65,9 +69,6 @@ jobs:
           dest="$HOME/.zig/zig-${arch}-${os}-${version}"
           echo "$dest" >> "$GITHUB_PATH"
           "$dest/zig" version
-
-      # zigline is pinned by URL + hash in `build.zig.zon`; the Zig
-      # package manager fetches and caches it on first build.
 
       - name: Build
         run: zig build
