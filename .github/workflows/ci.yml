@@ -18,6 +18,11 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # 10-minute ceiling per job. Local runs finish in ~1 min on
+    # macOS and Linux; anything taking 10× that is wedged in a
+    # PTY wait_for and we want the CI to fail loud rather than
+    # silently consume runner minutes for an hour.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
