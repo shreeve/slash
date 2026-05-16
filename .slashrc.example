@@ -78,50 +78,37 @@
 # and slash names it + shows the raw bytes, with a hint when the
 # bytes look like macOS Option-as-compose-char.
 #
-# Two paths on macOS for Option-key bindings:
+# macOS Option-key bindings: `key Option-L "ls -la\n"` works on
+# any Mac out of the box, regardless of terminal preferences.
+# Slash internally handles both wire formats:
 #
-#   1. EASIEST — bind directly to the compose character your
-#      terminal emits. Run `key --probe`, press Option+L, copy
-#      the character it prints (`¬`), and paste it as the keyspec:
+#   - Terminal config flipped to "Use Option as Meta key" → terminal
+#     sends `\e L` bytes → slash hits the Alt-L binding slot directly.
+#   - Terminal config in default compose mode → terminal sends `¬`
+#     (U+00AC, 2 UTF-8 bytes) → slash's keyboard-layout table
+#     reverse-resolves the codepoint to `Option-L` and fires the
+#     same binding.
 #
-#        key "¬" "ls -la\n"           # press Option+L to run ls -la
-#        key "ø" "git status\n"       # press Option+O to run git status
-#        key "®" history-prev-prefix  # press Option+R
+# Default layout is US-QWERTY. Non-US layouts can use `key --probe`
+# to discover what their terminal emits and bind to that codepoint
+# directly with `key "char" ...`. A pluggable layout API is
+# scaffolded for future en_GB / de_DE / dvorak / etc. support.
 #
-#      No terminal-config changes needed. Works alongside any
-#      other Unicode you type.
-#
-#   2. CLASSIC — enable Meta in your terminal preferences so the
-#      Option key sends `\e X` like every other Unix shell expects:
-#
-#        Terminal.app: Profile → Keyboard → check "Use Option as Meta key"
-#        iTerm2:       Profile → Keys → "Left Option Key" → set to "Esc+"
-#
-#      Once flipped, you can use `key Alt-L` / `key Option-L` style
-#      spellings, and Option-key shortcuts work in every TUI on
-#      your Mac (vim, emacs, tmux, etc.).
-#
-# Both work. Pick what's least invasive for your setup.
+# Dead-key positions on US-QWERTY (`Option-E`/`Option-I`/`Option-N`/
+# `Option-U` emit combining diacritics, not standalone chars) only
+# fire via the Meta-key path; slash warns at bind time.
 
 # History navigation (these are seeded as defaults — listed here
 # so you know they exist):
 # key Alt-P history-prev-prefix       # match history backward by prefix
 # key Alt-N history-next-prefix       # match history forward by prefix
 
-# Universal shortcuts using Path 2 (terminal config flipped):
+# Universal shortcuts (uncomment any you'd actually use). These
+# work on US-QWERTY macOS without any terminal-preference changes.
 # key Option-L "ls -la\n"             # list current dir
 # key Option-G "git status\n"         # git status
 # key Option-D "cd ~/Code\n"          # jump to your code dir
 # key Option-H "cd ~\n"               # go home
-
-# Equivalent shortcuts using Path 1 (no terminal config; bind to
-# the compose chars your terminal emits — run `key --probe` and
-# copy the chars from there. The ones below are US-QWERTY default;
-# yours may differ):
-# key "¬" "ls -la\n"                  # Option+L
-# key "©" "git status\n"              # Option+G
-# key "∂" "cd ~/Code\n"               # Option+D
-# key "˙" "cd ~\n"                    # Option+H
 
 # Pipe whatever's on the prompt into less:
 # key Option-\\ " | less\n"

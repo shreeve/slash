@@ -330,16 +330,28 @@ fn slashKeymapLookup(key: zigline.KeyEvent) ?zigline.Action {
     // emacs map), so users can always rebind a built-in.
     if (builtins.currentSession()) |session| {
         if (keybinding.BindingKey.fromKeyEvent(key)) |bk| {
-            if (session.keybindings.lookupChord(bk)) |target| {
-                switch (target) {
-                    .action => |a| return a,
-                    .literal => |bytes| {
-                        // Stash for the custom-action hook. Slice is
-                        // borrowed from the binding table, valid for
-                        // the lifetime of the binding.
-                        session.user_literal_pending = bytes;
-                        return zigline.Action{ .custom = @intFromEnum(ActionId.dispatch_user_literal) };
-                    },
+            if (dispatchUserBinding(session, bk)) |action| return action;
+
+            // macOS Option-key fallback: if the event is a single
+            // multi-byte codepoint with no modifiers (the shape
+            // macOS Terminal / iTerm2 emit when Option+letter is
+            // pressed in compose mode — `Option-L` → `¬` =
+            // 0x00AC), consult the active keyboard layout to
+            // reverse-derive the originating Option-letter, then
+            // retry the lookup against `Alt-<letter>`. Result:
+            // `key Option-L "ls -la\n"` fires on Option+L
+            // regardless of whether the terminal has "Use Option
+            // as Meta key" enabled.
+            if (bk.code == .char and bk.char >= 0x80 and
+                !bk.mods.ctrl and !bk.mods.alt and !bk.mods.shift)
+            {
+                if (session.keyboard_layout.composeToOptionLetter(bk.char)) |letter| {
+                    const synth = keybinding.normalizeForLookup(.{
+                        .code = .char,
+                        .char = @as(u21, letter),
+                        .mods = .{ .alt = true },
+                    });
+                    if (dispatchUserBinding(session, synth)) |action| return action;
                 }
             }
         }
@@ -388,6 +400,26 @@ fn slashKeymapLookup(key: zigline.KeyEvent) ?zigline.Action {
 }
 
 const slash_keymap: zigline.Keymap = .{ .lookupFn = slashKeymapLookup };
+
+/// Resolve a user binding to its zigline action. Literal bindings
+/// stash their payload on `session.user_literal_pending` and route
+/// to a dispatch custom action; named-action bindings return the
+/// `zigline.Action` directly. Returns `null` on miss so the caller
+/// can chain a fallback (e.g. the macOS-compose-char layout
+/// reverse-lookup).
+fn dispatchUserBinding(
+    session: *session_mod.Session,
+    bk: keybinding.BindingKey,
+) ?zigline.Action {
+    const target = session.keybindings.lookupChord(bk) orelse return null;
+    switch (target) {
+        .action => |a| return a,
+        .literal => |bytes| {
+            session.user_literal_pending = bytes;
+            return zigline.Action{ .custom = @intFromEnum(ActionId.dispatch_user_literal) };
+        },
+    }
+}
 
 fn customActionHook(
     ctx_ptr: *anyopaque,

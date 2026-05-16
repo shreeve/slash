@@ -8,6 +8,7 @@ const vars = @import("vars.zig");
 const program_mod = @import("program.zig");
 const history_mod = @import("history.zig");
 const keybinding = @import("keybinding.zig");
+const keyboard_layouts = @import("keyboard_layouts.zig");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -369,6 +370,14 @@ pub const Session = struct {
     /// is borrowed from the binding's `BindingTarget.literal`;
     /// never freed via this pointer.
     user_literal_pending: ?[]const u8 = null,
+    /// Active keyboard layout for the macOS-Option-key reverse-
+    /// resolution path in `slashKeymapLookup`. When a multi-byte
+    /// compose char arrives (e.g. `¬` from Option+L without
+    /// "Use Option as Meta"), the lookup consults this layout's
+    /// `composeToOptionLetter` to derive the Alt-letter chord
+    /// the user actually meant. Default: US-QWERTY; future
+    /// non-US layouts plug in via `$SLASH_KEYBOARD`.
+    keyboard_layout: *const keyboard_layouts.Layout = &keyboard_layouts.us_qwerty,
     /// PATH lookup memoization. Keys and values are owned by `alloc`.
     /// `path_cache_signature` is a dup'd snapshot of `$PATH` at the time
     /// the cache was last validated; on mismatch the cache is dropped

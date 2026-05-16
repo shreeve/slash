@@ -24,6 +24,7 @@ const terminal_mod = @import("terminal.zig");
 const shape_mod = @import("shape.zig");
 const program_mod = @import("program.zig");
 const keybinding = @import("keybinding.zig");
+const keyboard_layouts = @import("keyboard_layouts.zig");
 const zigline_mod = @import("zigline");
 const diag = @import("diagnostics.zig");
 const word_mod = @import("word.zig");
@@ -2010,7 +2011,36 @@ fn keyBind(
     const owned = try session.alloc.dupe(u8, target_text);
     errdefer session.alloc.free(owned);
     try session.keybindings.putChord(parsed, .{ .literal = owned });
+
+    // Soft warning: if the binding is for an Option-letter dead
+    // key on the active layout (Option+E/I/N/U on US-QWERTY),
+    // pressing Option+letter in compose-char mode emits no
+    // standalone codepoint, so the macOS-compose-char fallback
+    // path can't reverse-fire this binding. The terminal-Meta
+    // path (`\e <letter>` bytes) still works if the user has
+    // "Use Option as Meta key" enabled, so this is a hint not
+    // an error.
+    maybeWarnDeadKey(session, io, parsed, spec);
     return .{ .exited = 0 };
+}
+
+fn maybeWarnDeadKey(
+    session: *session_mod.Session,
+    io: BuiltinIo,
+    bk: keybinding.BindingKey,
+    spec: []const u8,
+) void {
+    if (bk.code != .char) return;
+    if (!bk.mods.alt) return;
+    if (bk.char > 0x7f) return;
+    if (!keyboard_layouts.isDeadKey(session.keyboard_layout, @intCast(bk.char))) return;
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "key: note: '{s}' is an Option-letter dead key on {s}; pressing Option+{c} in compose-char mode emits no standalone byte, so this binding will only fire if your terminal has \"Use Option as Meta key\" enabled.\n",
+        .{ spec, session.keyboard_layout.name, @as(u8, @intCast(bk.char)) },
+    ) catch return;
+    _ = writeAllToFd(io.stderr, msg);
 }
 
 fn keyDelete(

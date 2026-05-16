@@ -119,7 +119,7 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: **160/160 passing** — 96 in the
+**Test totals as of this handoff**: **166/166 passing** — 102 in the
 unit + headless suite (`zig build test-headless`) and 64 in the PTY
 suite (`zig build test-pty`). All green.
 
@@ -279,10 +279,25 @@ sequences (`Ctrl-X,Ctrl-E`, comma between chords) are reserved
 syntax with a clear v1 diagnostic; need zigline prefix-state.
 Single-codepoint UTF-8 keyspecs work too — `key "¬" "ls -la\n"`
 binds directly to whatever character your terminal emits, the
-escape hatch for macOS users who don't want to enable
-"Use Option as Meta key" in their terminal preferences (Option+L
-emits `¬` in compose mode; zigline decodes to `KeyEvent{char=0xAC}`
+escape hatch for non-US layouts (Option+L on US-QWERTY emits
+`¬` in compose mode; zigline decodes to `KeyEvent{char=0xAC}`
 which hits the same hashmap slot as the parsed `¬` keyspec).
+
+US-QWERTY macOS users don't need to know about compose chars at
+all though: `src/keyboard_layouts.zig` carries a reverse table
+from compose codepoint → originating Option-letter, and
+`slashKeymapLookup`'s fallback path reverse-resolves
+`KeyEvent{char=0xAC}` to `Alt-l` after a direct miss. Effect:
+`key Option-L "ls -la\n"` fires on Option+L in ANY terminal
+config — both the compose-char wire path AND the Meta wire
+path route to the single canonical `Alt-l` binding slot. Dead
+keys (Option-{E/I/N/U} on US-QWERTY emit combining diacritics,
+not standalone codepoints) get a soft warning at bind time
+since their reverse-resolution path is unavailable; they still
+work via the Meta wire path. `Session.keyboard_layout` is a
+`*const Layout` defaulting to `us_qwerty`; future en_GB /
+de_DE / dvorak / etc. plug in via `$SLASH_KEYBOARD` (selector
+not yet wired).
 Lookup goes through `builtins.currentSession()` from inside
 `slashKeymapLookup` (no zigline context-bearing keymap API yet).
 For literal bindings, the lookup stashes bytes on
@@ -378,7 +393,7 @@ reading those files first.
 
 A short pre-commit ritual that's caught real bugs across this session:
 
-1. **`zig build test`** — must be 160/160 green (or whatever the new
+1. **`zig build test`** — must be 166/166 green (or whatever the new
    total is after your tests). A single red test means the commit
    isn't ready.
 2. **§14 self-test** — say out loud which axis the change improves
