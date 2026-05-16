@@ -10,6 +10,10 @@ const session_mod = @import("session.zig");
 const slash = @import("slash.zig");
 const zigline = @import("zigline");
 
+// Bind `stat(2)` directly: `std.c.fstatat`/`std.c.stat` aren't
+// portably exposed across Linux and macOS in Zig 0.16's `std.c`.
+extern "c" fn stat(pathname: [*:0]const u8, buf: *std.c.Stat) c_int;
+
 pub const Allocator = std.mem.Allocator;
 
 pub const Request = struct {
@@ -396,7 +400,7 @@ fn enumerateDir(
         const full = std.fmt.bufPrint(&full_buf, "{s}/{s}\x00", .{ dir_path, name }) catch continue;
         const full_z: [*:0]const u8 = @ptrCast(full.ptr);
         var st: std.c.Stat = undefined;
-        const have_stat = std.c.fstatat(std.c.AT.FDCWD, full_z, &st, 0) == 0;
+        const have_stat = stat(full_z, &st) == 0;
         const is_dir = have_stat and (st.mode & std.c.S.IFMT) == std.c.S.IFDIR;
 
         if (mode == .directories and !is_dir) continue;

@@ -49,9 +49,21 @@ jobs:
         run: |
           set -euo pipefail
           version=0.16.0
-          os=$(uname -s | tr '[:upper:]' '[:lower:]')
-          arch=$(uname -m)
-          # ziglang.org uses zig-{arch}-{os}-{version}.tar.xz.
+          uname_os=$(uname -s | tr '[:upper:]' '[:lower:]')
+          uname_arch=$(uname -m)
+          # ziglang.org uses zig-{arch}-{os}-{version}.tar.xz, where
+          # `os` and `arch` follow Zig's own triple naming
+          # (`aarch64-macos`, not `arm64-darwin`).
+          case "$uname_os" in
+            darwin) os=macos ;;
+            linux)  os=linux ;;
+            *)      echo "unsupported os: $uname_os" >&2; exit 1 ;;
+          esac
+          case "$uname_arch" in
+            arm64|aarch64) arch=aarch64 ;;
+            x86_64|amd64)  arch=x86_64 ;;
+            *) echo "unsupported arch: $uname_arch" >&2; exit 1 ;;
+          esac
           tarball="zig-${arch}-${os}-${version}.tar.xz"
           url="https://ziglang.org/download/${version}/${tarball}"
           echo "Fetching $url"

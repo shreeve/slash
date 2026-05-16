@@ -30,6 +30,10 @@ const builtins = @import("builtins.zig");
 const session_mod = @import("session.zig");
 const vars_mod = @import("vars.zig");
 
+// Bind `stat(2)` directly: `std.c.fstatat`/`std.c.stat` aren't
+// portably exposed across Linux and macOS in Zig 0.16's `std.c`.
+extern "c" fn stat(pathname: [*:0]const u8, buf: *std.c.Stat) c_int;
+
 pub const Allocator = std.mem.Allocator;
 pub const Result = runtime.Result;
 pub const Sink = diag.Sink;
@@ -142,7 +146,7 @@ fn evalProgram(
         .conditional => |c| try evalConditional(c, session, ctx, sink),
         .@"while" => |w| try evalWhile(w, session, ctx, sink),
         .@"for" => |f| try evalFor(f, session, ctx, sink),
-        .@"match" => |m| try evalMatch(m, session, ctx, sink),
+        .match => |m| try evalMatch(m, session, ctx, sink),
         .define => |d| try evalDefine(d, session, ctx, sink),
         .str_def => |d| try evalStrDef(d, session, sink),
     };
@@ -167,9 +171,12 @@ fn evalCommand(
     const exe_text = try expandWordToScalar(c.exe, session, ctx.scratch, sink);
     if (exe_text.len == 0) {
         try diag.emit(sink, diag.make(
-            .eval, .@"error", "EV0001",
+            .eval,
+            .@"error",
+            "EV0001",
             "command name expanded to empty",
-            .{ .name = "<eval>", .text = "" }, c.span,
+            .{ .name = "<eval>", .text = "" },
+            c.span,
         ));
         return makeFailedOutcome(session, "<empty>", .{ .exited = 127 });
     }
@@ -290,8 +297,12 @@ fn runShellContextBuiltinWithRedirects(
         }
         applyRedirInParent(op) catch {
             try diag.emit(sink, diag.make(
-                .exec, .@"error", "EX0003",
-                "redirect failed", .{ .name = "<eval>", .text = "" }, c.span,
+                .exec,
+                .@"error",
+                "EX0003",
+                "redirect failed",
+                .{ .name = "<eval>", .text = "" },
+                c.span,
             ));
             restore(saved.items);
             return makeFailedOutcome(session, argv[0], .{ .exited = 1 });
@@ -530,9 +541,12 @@ fn runExecCommand(
     const msg = std.fmt.bufPrint(&msg_buf, "exec: {s}: {s}\n", .{ exe_text, reason }) catch "exec: failed\n";
     _ = std.c.write(2, msg.ptr, msg.len);
     try diag.emit(sink, diag.make(
-        .exec, .@"error", "EX0001",
+        .exec,
+        .@"error",
+        "EX0001",
         reason,
-        .{ .name = "<eval>", .text = "" }, c.span,
+        .{ .name = "<eval>", .text = "" },
+        c.span,
     ));
     const code: u8 = switch (errno) {
         .ACCES => 126,
@@ -688,8 +702,12 @@ fn runExternalSingle(
             .{ argv[0], @errorName(err) },
         ) catch "spawn failed";
         try diag.emit(sink, diag.make(
-            .exec, .@"error", "EX0001",
-            msg, .{ .name = "<eval>", .text = "" }, c.span,
+            .exec,
+            .@"error",
+            "EX0001",
+            msg,
+            .{ .name = "<eval>", .text = "" },
+            c.span,
         ));
         return makeFailedOutcome(session, argv[0], .{ .exited = 127 });
     };
@@ -742,9 +760,12 @@ fn evalPipeline(
             .command => |*cc| cc,
             else => {
                 try diag.emit(sink, diag.make(
-                    .eval, .@"error", "EV0010",
+                    .eval,
+                    .@"error",
+                    "EV0010",
                     "pipeline stage must be a command",
-                    .{ .name = "<eval>", .text = "" }, stage_prog.span(),
+                    .{ .name = "<eval>", .text = "" },
+                    stage_prog.span(),
                 ));
                 return error.UnsupportedPipelineStage;
             },
@@ -968,8 +989,12 @@ fn evalSubshell(
     const rc = std.c.fork();
     if (rc < 0) {
         try diag.emit(sink, diag.make(
-            .exec, .@"error", "EX0002",
-            "fork failed", .{ .name = "<eval>", .text = "" }, s.span,
+            .exec,
+            .@"error",
+            "EX0002",
+            "fork failed",
+            .{ .name = "<eval>", .text = "" },
+            s.span,
         ));
         return makeFailedOutcome(session, "<subshell>", .{ .exited = 127 });
     }
@@ -1056,9 +1081,12 @@ fn evalDetached(
         .command, .pipeline => {},
         else => {
             try diag.emit(sink, diag.make(
-                .eval, .@"error", "EV0011",
+                .eval,
+                .@"error",
+                "EV0011",
                 "detached body must be a command or pipeline",
-                .{ .name = "<eval>", .text = "" }, d.span,
+                .{ .name = "<eval>", .text = "" },
+                d.span,
             ));
             return makeFailedOutcome(session, "<detached>", .{ .exited = 127 });
         },
@@ -1128,8 +1156,12 @@ fn spawnCommandNoWait(
             .{ exe_text, @errorName(err) },
         ) catch "spawn failed";
         try diag.emit(sink, diag.make(
-            .exec, .@"error", "EX0001",
-            msg, .{ .name = "<eval>", .text = "" }, c.span,
+            .exec,
+            .@"error",
+            "EX0001",
+            msg,
+            .{ .name = "<eval>", .text = "" },
+            c.span,
         ));
         return error.SpawnFailed;
     };
@@ -1256,8 +1288,12 @@ fn evalStrDef(
             .{ d.name, reason },
         ) catch "str: invalid name";
         try diag.emit(sink, diag.make(
-            .eval, .@"error", "EV0030",
-            msg, .{ .name = "<eval>", .text = "" }, d.span,
+            .eval,
+            .@"error",
+            "EV0030",
+            msg,
+            .{ .name = "<eval>", .text = "" },
+            d.span,
         ));
         return makeFailedOutcome(session, "str", .{ .exited = 1 });
     }
@@ -1269,8 +1305,12 @@ fn evalStrDef(
             .{reason},
         ) catch "str: invalid body";
         try diag.emit(sink, diag.make(
-            .eval, .@"error", "EV0031",
-            msg, .{ .name = "<eval>", .text = "" }, d.span,
+            .eval,
+            .@"error",
+            "EV0031",
+            msg,
+            .{ .name = "<eval>", .text = "" },
+            d.span,
         ));
         return makeFailedOutcome(session, "str", .{ .exited = 1 });
     }
@@ -2468,7 +2508,7 @@ fn pathExists(path: []const u8) bool {
     buf[path.len] = 0;
     const path_z: [*:0]const u8 = @ptrCast(&buf);
     var st: std.c.Stat = undefined;
-    return std.c.fstatat(std.c.AT.FDCWD, path_z, &st, 0) == 0;
+    return stat(path_z, &st) == 0;
 }
 
 fn isDirectory(path: []const u8) bool {
@@ -2478,6 +2518,6 @@ fn isDirectory(path: []const u8) bool {
     buf[path.len] = 0;
     const path_z: [*:0]const u8 = @ptrCast(&buf);
     var st: std.c.Stat = undefined;
-    if (std.c.fstatat(std.c.AT.FDCWD, path_z, &st, 0) != 0) return false;
+    if (stat(path_z, &st) != 0) return false;
     return (st.mode & std.c.S.IFMT) == std.c.S.IFDIR;
 }

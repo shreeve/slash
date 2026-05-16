@@ -16,6 +16,11 @@
 
 const std = @import("std");
 const runtime = @import("runtime.zig");
+
+// `std.c.fstatat`/`std.c.stat` aren't portably exposed across Linux
+// and macOS in Zig 0.16. Bind `stat(2)` directly — the `std.c.Stat`
+// struct shape is per-target so the libc symbol's layout matches.
+extern "c" fn stat(pathname: [*:0]const u8, buf: *std.c.Stat) c_int;
 const session_mod = @import("session.zig");
 const vars_mod = @import("vars.zig");
 const job_mod = @import("job.zig");
@@ -214,7 +219,8 @@ fn cdFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!R
                     .scalar => |p| p,
                     else => "",
                 } else ""
-            else "";
+            else
+                "";
             if (old.len == 0) {
                 _ = writeAllToFd(io.stderr, "cd: OLDPWD not set\n");
                 return .{ .exited = 1 };
@@ -367,7 +373,7 @@ fn runUnaryTest(op: []const u8, arg: []const u8) !Result {
     const path_z: [*:0]const u8 = @ptrCast(&pathbuf);
 
     var st: std.c.Stat = undefined;
-    if (std.c.fstatat(std.c.AT.FDCWD, path_z, &st, 0) != 0) return .{ .exited = 1 };
+    if (stat(path_z, &st) != 0) return .{ .exited = 1 };
     const mode = st.mode;
     const is_dir = (mode & std.c.S.IFMT) == std.c.S.IFDIR;
     const is_reg = (mode & std.c.S.IFMT) == std.c.S.IFREG;
@@ -1720,8 +1726,7 @@ fn historyFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyer
         } else if (std.mem.eql(u8, a, "--json")) {
             json_out = true;
         } else if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
-            _ = writeAllToFd(io.stdout,
-                "history                  list recent (default 50)\n" ++
+            _ = writeAllToFd(io.stdout, "history                  list recent (default 50)\n" ++
                 "history -n COUNT         list COUNT most-recent\n" ++
                 "history -s QUERY         ranked substring search\n" ++
                 "history -p PREFIX        ranked prefix search\n" ++
