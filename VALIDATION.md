@@ -303,8 +303,15 @@ not auto-submit, matching the bash/zsh contract that Ctrl-R is for
 
 Matches bash/zsh `set +b` default-mode timing — backgrounded jobs
 announce at the next prompt boundary, not mid-prompt. Mid-prompt
-`set -b` semantics would require a zigline `printAbove` primitive
-that hasn't shipped yet.
+`set -b` semantics ship as an opt-in via `$SLASH_NOTIFY=immediate`,
+routed through zigline v0.6.0's `Editor.printAbove` from inside the
+`on_wake` hook. Verified manually with a real `bin/slash --norc`:
+`sleep 1 & ; echo TYPED` (no Enter) produces the dim `[1] Done
+sleep 1` line above the in-progress prompt buffer at t≈1s, prompt
++ buffer re-render below, Enter then executes `echo TYPED`. The
+`notice.drainDoneJobs` unit tests cover the dispatch + per-job
+`notified_done` latch contract that prevents on_wake and the
+between-prompts path from double-announcing the same completion.
 
 ---
 

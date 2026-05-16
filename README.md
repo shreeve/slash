@@ -102,7 +102,7 @@ What ships today:
 - intelligent Tab completions (`git`, `cd`, `ssh`, `kill`, `fg`/`bg`, `cmd`, `str`, PATH)
 - rich prompt presets (`SLASH_PROMPT=rich|minimal`; venv, remote-user, cwd, git branch, jobs)
 - pre-prompt status notices (`slash: exit N (SIGNAME)`)
-- live job-state announcements (`[N] Stopped`, `[N] Continued`)
+- live job-state announcements (`[N] Stopped`, `[N] Continued`, `[N] Done`; mid-prompt opt-in via `$SLASH_NOTIFY=immediate`)
 
 See [`ROADMAP.md`](./ROADMAP.md) for remaining release work.
 

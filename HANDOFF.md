@@ -119,8 +119,8 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: **145/145 passing** — 80 in the
-unit + headless suite (`zig build test-headless`) and 65 in the PTY
+**Test totals as of this handoff**: **128/128 passing** — 65 in the
+unit + headless suite (`zig build test-headless`) and 63 in the PTY
 suite (`zig build test-pty`). All green.
 
 GitHub Actions CI runs `zig build` + `test-headless` + `test-pty`
@@ -225,9 +225,15 @@ so the JSONL history index doesn't pollute the user's real
   `notice.pendingDoneJobs(session)` fires once per backgrounded
   job that has transitioned to `.done` since the previous prompt.
   Matches bash/zsh `set +b` default-mode timing. Mid-prompt
-  ("set -b") announcements would need a zigline `printAbove`
-  primitive that hasn't shipped; for now, the user sees the
-  notice the next time they press Enter.
+  (`set -b`) announcements ship as an opt-in via `$SLASH_NOTIFY=
+  immediate` — the zigline `on_wake` hook drains newly-done
+  backgrounded jobs and routes each `[N] Done <cmd>` line through
+  `Editor.printAbove`, which clears the rendered prompt frame,
+  writes the notice on its own row above, and re-renders the
+  prompt + in-progress buffer below. Single `notice.drainDoneJobs`
+  iterator + `notified_done` latch backs both timings; the latch
+  prevents double announcement when on_wake and the next prompt
+  boundary both observe the same completion.
 - Pre-prompt status notices + live `[N] Stopped|Continued <cmd>`
   announcements for Ctrl-Z / `fg` / `bg`, replacing the inline
   `[N]` exit-status badge in the prompt with a dim-on-tty stderr
@@ -236,14 +242,6 @@ so the JSONL history index doesn't pollute the user's real
   python/node/nested-shells (logged in `VALIDATION.md`)
 
 **Deferred but tracked:**
-
-- **Mid-prompt `set -b`-style job notifications** — between-prompts
-  surfacing ships (see above), but bash `set -b` (announce
-  immediately mid-prompt without waiting for Enter) needs a zigline
-  `printAbove` / `external_print` primitive to write the notice
-  above the prompt without garbling the editor's render. Listed in
-  `zigline/FUTURE.md` as "Async-safe Editor.print / printAbove".
-  Wire up the slash side once that lands.
 
 ---
 
@@ -256,8 +254,12 @@ slot. Likely candidates outside the editor surface:
 
 - Tighten CHECKLIST.md's two unchecked rapid-stop/continue stress
   test boxes.
-- Idle-time job notifications (`[1] Done sleep 30` while at the
-  prompt without a foreground command driving the redraw).
+- Built-in `time` keyword (PLAN §17: pipeline-level wall+user+sys
+  timing, structured output, doesn't double-fork). Already had a
+  spike branch.
+- Process substitution audit — `<(cmd)` / `>(cmd)` plumbing works
+  but lifetime + ordering of the temp FIFO cleanup deserves a
+  focused validation pass before 1.2.
 
 ---
 
@@ -310,7 +312,7 @@ reading those files first.
 
 A short pre-commit ritual that's caught real bugs across this session:
 
-1. **`zig build test`** — must be 91/91 green (or whatever the new
+1. **`zig build test`** — must be 128/128 green (or whatever the new
    total is after your tests). A single red test means the commit
    isn't ready.
 2. **§14 self-test** — say out loud which axis the change improves

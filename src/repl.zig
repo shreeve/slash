@@ -191,6 +191,10 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
             .ctx = @ptrCast(&hooks),
             .updateFn = transientSearchHook,
         },
+        .on_wake = .{
+            .ctx = @ptrCast(&hooks),
+            .onWakeFn = onWakeHook,
+        },
     });
     defer editor.deinit();
 
@@ -498,6 +502,96 @@ fn runTransientSearch(
         ) catch "(failing-i-search): ";
     return .{ .preview = null, .status = status };
 }
+
+// =============================================================================
+// Mid-prompt job notifications — `$SLASH_NOTIFY=immediate` opt-in
+// =============================================================================
+//
+// zigline's `on_wake` hook fires on every non-key wake (signal-pipe
+// poke, SIGWINCH) before the read loop re-renders. Slash's SIGCHLD
+// handler already calls `pokeActiveSignalPipe()`, so this hook is the
+// natural drain point: scan for newly-`.done` backgrounded jobs and
+// route each `[N] Done <cmd>` notice through `editor.printAbove`,
+// which finalizes the rendered block, writes the notice on its own
+// row above, and re-renders the prompt + the user's in-progress
+// buffer below.
+//
+// Behavior is opt-in via `$SLASH_NOTIFY` (read from `session.vars`
+// first, then the inherited env):
+//
+//   - unset / `between` / anything unrecognized → default. The
+//     between-prompts `notice.pendingDoneJobs` path (called from the
+//     runRaw loop just before each prompt) is the only announcer.
+//     Mirrors bash/zsh `set +b`.
+//   - `immediate` → on_wake announces as soon as SIGCHLD has been
+//     processed. Mirrors bash/zsh `set -b`. The `notified_done` bit
+//     on `Job` prevents the between-prompts path from re-announcing
+//     the same completion at the next prompt.
+
+const NotifyMode = enum { between, immediate };
+
+fn currentNotifyMode(session: *session_mod.Session) NotifyMode {
+    // Two-layer lookup that matches bash/zsh `set -b` / `set +b`
+    // semantics where toggling the option mid-session takes effect:
+    //
+    //   - If the session var exists (assigned via `NAME=val` or
+    //     `export NAME=val` at the prompt), it is fully
+    //     authoritative. Only scalar `"immediate"` enables immediate
+    //     mode; every other present value means `.between`.
+    //   - If the session var is ABSENT (never assigned, or removed
+    //     via `unset SLASH_NOTIFY` which deletes the entry), the
+    //     inherited environment provides the fallback. `unset` after
+    //     a shell-side assignment thus exposes whatever the parent
+    //     environment had at launch, matching POSIX `unset` /
+    //     `getenv` semantics.
+    if (session.vars.get("SLASH_NOTIFY")) |v| switch (v.value) {
+        .scalar => |s| return if (std.mem.eql(u8, s, "immediate")) .immediate else .between,
+        else => return .between,
+    };
+    if (std.c.getenv("SLASH_NOTIFY")) |p| {
+        if (std.mem.eql(u8, std.mem.span(p), "immediate")) return .immediate;
+    }
+    return .between;
+}
+
+/// `on_wake` adapter: drains any newly-`.done` backgrounded jobs and
+/// prints `[N] Done` notices above the prompt via `editor.printAbove`,
+/// then returns to zigline which re-renders the prompt + buffer below.
+///
+/// Always clears `session.child_event_pending` (via
+/// `eval.drainChildEvents`) — even in `.between` mode. Without this,
+/// the first SIGCHLD pokes the signal pipe, this hook fires, but the
+/// flag stays set; the SIGCHLD handler's coalescing check
+/// (`swap(true) == false`) then silently DROPS every subsequent
+/// SIGCHLD's pipe-poke until something else (eval safe-point, next
+/// command) clears it. That kills mid-prompt notifications for any
+/// job that finishes after the first one in the same prompt-window.
+fn onWakeHook(ctx_ptr: *anyopaque, editor: *zigline.Editor) void {
+    const hooks: *SlashHooks = @ptrCast(@alignCast(ctx_ptr));
+    eval.drainChildEvents(hooks.session);
+    if (currentNotifyMode(hooks.session) != .immediate) return;
+
+    var sink = PrintAboveSink{ .editor = editor };
+    notice.drainDoneJobs(hooks.session, .{
+        .ctx = @ptrCast(&sink),
+        .writeFn = PrintAboveSink.write,
+    });
+}
+
+/// `notice.DoneWriter` that routes through `editor.printAbove`. The
+/// dim-ANSI wrap matches the stderr notice's visual treatment so a
+/// user toggling `$SLASH_NOTIFY` between `between` and `immediate`
+/// sees the same line shape, only at a different moment.
+const PrintAboveSink = struct {
+    editor: *zigline.Editor,
+
+    fn write(ctx_ptr: *anyopaque, text: []const u8) void {
+        const self: *PrintAboveSink = @ptrCast(@alignCast(ctx_ptr));
+        var buf: [320]u8 = undefined;
+        const wrapped = std.fmt.bufPrint(&buf, "\x1b[2m{s}\x1b[0m\n", .{text}) catch return;
+        self.editor.printAbove(wrapped) catch {};
+    }
+};
 
 fn hintHook(
     ctx_ptr: *anyopaque,

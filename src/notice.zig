@@ -52,23 +52,37 @@ pub const JobNoticeKind = enum {
     done,
 };
 
-/// Announce backgrounded jobs that finished since the previous prompt.
-/// Polls for any pending SIGCHLD events first so a sleep that finished
-/// while the user was sitting at the prompt becomes visible at the
-/// next Enter (bash/zsh default-mode timing). Mid-prompt announcement
-/// in the style of bash `set -b` would require a zigline `printAbove`
-/// primitive that hasn't shipped yet.
+/// Caller-supplied sink for `drainDoneJobs`. Receives the formatted
+/// `[N] Done <cmd>` text WITHOUT a trailing newline; the writer is
+/// responsible for whatever decoration (dim ANSI, CRLF, etc.) matches
+/// the output channel it's targeting.
+pub const DoneWriter = struct {
+    ctx: *anyopaque,
+    writeFn: *const fn (ctx: *anyopaque, text: []const u8) void,
+};
+
+/// Poll for any uncollected SIGCHLD events, then iterate backgrounded
+/// jobs that have just transitioned to `.done`. For each, mark
+/// `notified_done = true` and hand the formatted text to `writer`.
 ///
-/// Only backgrounded jobs surface notices — foreground completions
-/// already go through the exit-status notice and re-announcing them
-/// would be redundant. Each job is announced exactly once via the
-/// per-job `notified_done` bit.
-pub fn pendingDoneJobs(session: *Session) void {
+/// Two writers share this iteration:
+///
+///   - `pendingDoneJobs` (between-prompts, default mode) wraps a
+///     stderr `writeLineDim` writer; matches bash/zsh `set +b`
+///     timing.
+///   - `repl.onWakeHook` (mid-prompt, `$SLASH_NOTIFY=immediate`
+///     opt-in) wraps a `zigline.Editor.printAbove` writer; matches
+///     bash/zsh `set -b` timing.
+///
+/// The `notified_done` bit is set BEFORE the writer is called so a
+/// writer failure / partial print can't re-announce the same job on
+/// the next iteration.
+pub fn drainDoneJobs(session: *Session, writer: DoneWriter) void {
     if (!session.interactive) return;
 
     // Drain any uncollected SIGCHLD events so .done transitions are
-    // visible. Cheap when nothing is pending — waitpid(WNOHANG) is a
-    // single syscall that returns immediately when the kernel has
+    // visible. Cheap when nothing is pending — `waitpid(WNOHANG)` is
+    // a single syscall that returns immediately when the kernel has
     // nothing to report.
     job_mod.service(&session.jobs, .poll, null) catch {};
 
@@ -80,15 +94,38 @@ pub fn pendingDoneJobs(session: *Session) void {
             .done => {},
             else => continue,
         }
-        // Set the bit BEFORE firing the notice so even a future
-        // `jobStateChange` that grows side effects (or fails partway)
-        // cannot re-announce the same completion on a later prompt.
-        // Worst case: the user sees no notice for this job once and
-        // still finds it via `jobs`. Re-announcement noise would be
-        // strictly worse.
+        var buf: [256]u8 = undefined;
+        const text = formatDone(j, &buf) orelse {
+            j.notified_done = true;
+            continue;
+        };
         j.notified_done = true;
-        jobStateChange(session, j, .done);
+        writer.writeFn(writer.ctx, text);
     }
+}
+
+const StderrSink = struct {
+    fn write(ctx: *anyopaque, text: []const u8) void {
+        _ = ctx;
+        writeLineDim(text);
+    }
+};
+
+/// Announce backgrounded jobs that finished since the previous prompt.
+/// Polls for any pending SIGCHLD events first so a sleep that finished
+/// while the user was sitting at the prompt becomes visible at the
+/// next Enter (bash/zsh `set +b` default timing). Routes through
+/// `drainDoneJobs` so the same iteration logic backs both the
+/// between-prompts path and the mid-prompt `set -b` path in
+/// `repl.onWakeHook`.
+pub fn pendingDoneJobs(session: *Session) void {
+    // `StderrSink.write` ignores its ctx, but `*anyopaque` shouldn't
+    // ever be passed an `undefined` pointer value — feed it the
+    // session so it's always a valid address.
+    drainDoneJobs(session, .{
+        .ctx = @ptrCast(session),
+        .writeFn = StderrSink.write,
+    });
 }
 
 /// Drain a pending exit-status notice. No-op when the flag is clear,
@@ -256,4 +293,102 @@ test "notice: formatExit falls back to status-byte heuristic" {
     // No typed Result; status 137 → 128 + 9 → SIGKILL.
     const text = formatExit(null, 137, &buf).?;
     try std.testing.expectEqualStrings("slash: exit 137 (SIGKILL)", text);
+}
+
+test "notice: drainDoneJobs feeds the writer once per newly-done bg job" {
+    // Build a minimal interactive Session, hand-construct a Job that
+    // matches what `notice.drainDoneJobs` looks for (backgrounded,
+    // `.done` with a zero exit, non-empty processes list,
+    // `command_text` set, `notified_done = false`), then route it
+    // through a recording `DoneWriter` instead of stderr.
+    //
+    // Verifies three contract points that the production `on_wake`
+    // path in `repl.zig` (and the between-prompts wrapper) depends on:
+    //
+    //   1. The writer is called exactly once, with the expected
+    //      `[N] Done <cmd>` text (no trailing newline — the writer
+    //      decorates).
+    //   2. `notified_done` flips to true.
+    //   3. A second call to `drainDoneJobs` is a no-op (idempotent —
+    //      this is how mid-prompt and between-prompts paths avoid
+    //      double-announcing the same completion).
+    const job_module = @import("job.zig");
+
+    const alloc = std.testing.allocator;
+    var s = try Session.init(alloc, @ptrCast(@alignCast(std.c.environ)), true);
+    defer s.deinit();
+
+    const j = try s.jobs.create(false, true, "sleep 1");
+    // Hand-shape a single-process, done-with-status-0 job. The real
+    // path arrives here via `JobTable.applyEvent` after a SIGCHLD
+    // reap; we skip the kernel round-trip and assemble the same
+    // end-state directly.
+    const procs = try alloc.alloc(job_module.Process, 1);
+    procs[0] = .{ .pid = 12345, .state = .{ .done = .{ .exited = 0 } } };
+    j.processes = procs;
+    j.state = .{ .done = .{ .exited = 0 } };
+    j.result = .{ .exited = 0 };
+    j.notified_done = false;
+
+    const Recorder = struct {
+        calls: usize = 0,
+        last: [256]u8 = undefined,
+        last_len: usize = 0,
+
+        fn write(ctx: *anyopaque, text: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            const n = @min(text.len, self.last.len);
+            @memcpy(self.last[0..n], text[0..n]);
+            self.last_len = n;
+        }
+    };
+    var rec: Recorder = .{};
+    drainDoneJobs(&s, .{ .ctx = @ptrCast(&rec), .writeFn = Recorder.write });
+    try std.testing.expectEqual(@as(usize, 1), rec.calls);
+    try std.testing.expectEqualStrings("[1] Done sleep 1", rec.last[0..rec.last_len]);
+    try std.testing.expect(j.notified_done);
+
+    // Second call must be a no-op — the latch prevents double
+    // announcement across overlapping wake / prompt-boundary
+    // drain paths.
+    drainDoneJobs(&s, .{ .ctx = @ptrCast(&rec), .writeFn = Recorder.write });
+    try std.testing.expectEqual(@as(usize, 1), rec.calls);
+
+    // Hand the job's process slice back to the allocator the way the
+    // real teardown path does; `JobTable.deinit` will free it.
+}
+
+test "notice: drainDoneJobs skips foreground completions and pending jobs" {
+    const job_module = @import("job.zig");
+
+    const alloc = std.testing.allocator;
+    var s = try Session.init(alloc, @ptrCast(@alignCast(std.c.environ)), true);
+    defer s.deinit();
+
+    // Foreground done — should be ignored (foreground completions go
+    // through the exit-status notice, not the `[N] Done` channel).
+    const fg = try s.jobs.create(true, false, "echo hi");
+    const fg_procs = try alloc.alloc(job_module.Process, 1);
+    fg_procs[0] = .{ .pid = 1, .state = .{ .done = .{ .exited = 0 } } };
+    fg.processes = fg_procs;
+    fg.state = .{ .done = .{ .exited = 0 } };
+
+    // Backgrounded but still running — not done, must not announce.
+    const bg_running = try s.jobs.create(false, true, "sleep 100");
+    const bg_running_procs = try alloc.alloc(job_module.Process, 1);
+    bg_running_procs[0] = .{ .pid = 2, .state = .running };
+    bg_running.processes = bg_running_procs;
+    bg_running.state = .running;
+
+    const Recorder = struct {
+        calls: usize = 0,
+        fn write(ctx: *anyopaque, _: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+        }
+    };
+    var rec: Recorder = .{};
+    drainDoneJobs(&s, .{ .ctx = @ptrCast(&rec), .writeFn = Recorder.write });
+    try std.testing.expectEqual(@as(usize, 0), rec.calls);
 }
