@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel older runs on the same branch when a new push lands.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Build + run the full test suite (headless + PTY) on every supported OS.
+  # Slash uses the sibling-repo zigline path dependency, so this job checks
+  # out both repos side by side and runs `zig build test` from inside slash.
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out slash
+        uses: actions/checkout@v4
+        with:
+          path: slash
+
+      # zigline is a sibling path dependency from `slash/build.zig.zon`
+      # (`../zigline`). Check it out at the same workspace level so the
+      # relative path resolves at build time. Pin to the tagged release
+      # matching slash's current zigline target.
+      - name: Check out zigline
+        uses: actions/checkout@v4
+        with:
+          repository: shreeve/zigline
+          ref: v0.5.0
+          path: zigline
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+
+      - name: Build
+        working-directory: slash
+        run: zig build
+
+      - name: Headless tests
+        working-directory: slash
+        run: zig build test-headless
+
+      - name: PTY tests
+        working-directory: slash
+        # The PTY suite spawns `bin/slash` against a real pseudo-terminal.
+        # Linux runners under GitHub Actions support `/dev/ptmx` plus the
+        # `TIOCSCTTY` / `TIOCSWINSZ` ioctls the harness uses. macOS runners
+        # have the same primitives under different numeric constants;
+        # the harness branches on `builtin.target.os.tag` to pick.
+        run: zig build test-pty
+
+      - name: Smoke test the binary
+        working-directory: slash
+        run: ./bin/slash --version

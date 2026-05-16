@@ -331,3 +331,24 @@ monotonically), the SIGCHLD safe-point reaping path under burst
 load, and the post-storm prompt recovery.
 
 ---
+
+## GitHub Actions CI: 2026-05-15 24:00 UTC
+
+- workflow: `.github/workflows/ci.yml`
+- matrix: `ubuntu-latest`, `macos-latest`
+- zigline: pinned to `v0.5.0` via sibling-repo checkout
+- Zig: 0.16.0 via `mlugg/setup-zig@v1`
+
+Every push and PR to `main` runs:
+- `zig build`
+- `zig build test-headless` (80 tests)
+- `zig build test-pty` (65 tests, including the 10-cycle Ctrl-Z/fg
+  stress test)
+- `./bin/slash --version` smoke check
+
+Linux validation lives in CI — any regression that breaks the
+`linux` branch of the PTY harness's `TIOCSCTTY` / `TIOCSWINSZ` /
+`O_NOCTTY` switches, or any timing race that doesn't reproduce on
+macOS, surfaces as a red check on the PR before merge.
+
+---
