@@ -382,6 +382,102 @@ const cases: []const Case = &.{
         .source = "time if true { echo yes }",
         .expect = .{ .exit_code = 0, .stdout = "yes\n" },
     },
+    // ----------------------------------------------------------------
+    // `key` builtin — user-configurable key bindings
+    // ----------------------------------------------------------------
+    //
+    // These cases exercise the builtin's surface (parser + listing +
+    // diagnostics + storage). The actual dispatch path requires
+    // interactive raw mode and lives in the PTY suite.
+    .{
+        .name = "key: bind to a named action succeeds silently",
+        .source = "key Esc-P history-prev-prefix",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "key: bind to a literal string succeeds silently",
+        .source = "key Alt-L \"ls -la\\n\"",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "key: empty `key` lists installed bindings (canonical form)",
+        // `Esc-P` canonicalizes to `Alt-P` on listing; the listing
+        // includes the action name from the registry.
+        .source = "key Esc-P history-prev-prefix; key",
+        .expect = .{ .exit_code = 0, .stdout = "Alt-P", .stdout_contains = true },
+    },
+    .{
+        .name = "key: listing shows literal-text bindings re-encoded",
+        .source = "key Alt-L \"ls -la\\n\"; key",
+        .expect = .{ .exit_code = 0, .stdout = "\"ls -la\\n\"", .stdout_contains = true },
+    },
+    .{
+        .name = "key: unknown action name errors with a helpful hint",
+        .source = "key Alt-Q foo-bar-baz",
+        .expect = .{
+            .exit_code = 1,
+            .stderr = "unknown action 'foo-bar-baz'",
+            .stderr_contains = true,
+        },
+    },
+    .{
+        .name = "key: snake_case action name errors AND suggests kebab",
+        // `word_backward` is snake_case; slash's registry has
+        // `word-backward`. Critical: must NOT silently bind as
+        // literal text (the original draft did and GPT 5.5 caught
+        // it). The diagnostic should mention both the typo'd name
+        // and the kebab suggestion.
+        .source = "key Alt-Q word_backward",
+        .expect = .{
+            .exit_code = 1,
+            .stderr = "did you mean 'word-backward'",
+            .stderr_contains = true,
+        },
+    },
+    .{
+        .name = "key: multi-chord syntax rejected with a precise diagnostic",
+        // The comma-separated form is RESERVED for v2; v1 must surface
+        // a clear "needs zigline" message instead of silently parsing
+        // wrong or treating as raw bytes.
+        .source = "key Ctrl-X,Ctrl-E edit-in-editor",
+        .expect = .{
+            .exit_code = 2,
+            .stderr = "multi-chord",
+            .stderr_contains = true,
+        },
+    },
+    .{
+        .name = "key: empty spec rejected",
+        .source = "key \"\" history-prev-prefix",
+        .expect = .{ .exit_code = 2 },
+    },
+    .{
+        .name = "key: -d removes a binding (idempotent on missing)",
+        .source = "key Alt-Z history-prev-prefix; key -d Alt-Z; key -d Alt-Z",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "key: --reset clears all user bindings",
+        .source = "key Alt-A history-prev-prefix; key Alt-B history-next-prefix; key --reset; key",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "key: --actions lists every registered action",
+        // Spot-check three representative entries.
+        .source = "key --actions",
+        .expect = .{ .exit_code = 0, .stdout = "history-prev-prefix", .stdout_contains = true },
+    },
+    .{
+        .name = "key: rebinding the same chord replaces (no duplicate)",
+        // Two binds of `Alt-Z`, then `key` should list it once.
+        // Output should contain exactly one line starting with `Alt-Z`.
+        .source = "key Alt-Z history-prev-prefix; key Alt-Z \"echo X\\n\"; key",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "Alt-Z \t\"echo X\\n\"\n",
+            .stdout_contains = true,
+        },
+    },
     .{
         .name = "time emits a `real` line to stderr",
         .source = "time true",

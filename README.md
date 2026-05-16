@@ -103,6 +103,7 @@ What ships today:
 - rich prompt presets (`SLASH_PROMPT=rich|minimal`; venv, remote-user, cwd, git branch, jobs)
 - pre-prompt status notices (`slash: exit N (SIGNAME)`)
 - live job-state announcements (`[N] Stopped`, `[N] Continued`, `[N] Done`; mid-prompt opt-in via `$SLASH_NOTIFY=immediate`)
+- user-configurable key bindings via the `key` builtin (`key Alt-L "ls -la\n"` to bind a literal; `key Esc-P history-prev-prefix` to bind a named editor action; `key --actions` to list them)
 
 See [`ROADMAP.md`](./ROADMAP.md) for remaining release work.
 

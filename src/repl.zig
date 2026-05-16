@@ -39,6 +39,7 @@ const history_mod = @import("history.zig");
 const notice = @import("notice.zig");
 const completion = @import("completion.zig");
 const prompt_mod = @import("prompt.zig");
+const keybinding = @import("keybinding.zig");
 
 // libc bindings — `std.c` doesn't expose these in Zig 0.16.
 extern "c" fn getpgrp() std.c.pid_t;
@@ -306,21 +307,10 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
 // Slash-defined custom-action IDs. Zigline's `Action.custom: u32` is the
 // dispatch tag the keymap returns; the editor invokes `customActionHook`
 // with this ID to run the action.
-const ActionId = enum(u32) {
-    edit_in_editor = 1,
-    /// Space pressed at command position — try to expand a session
-    /// `str` before inserting the literal space (PLAN §12).
-    expand_str_space = 2,
-    /// Enter pressed at command position — expand a session `str`
-    /// and accept the rewritten line in one editor action.
-    expand_str_enter = 3,
-    /// Up arrow / Ctrl-P — smart prefix-aware history navigation when
-    /// the buffer is non-empty; chronological zigline history when
-    /// the buffer is empty.
-    smart_history_prev = 4,
-    /// Down arrow / Ctrl-N — counterpart to `smart_history_prev`.
-    smart_history_next = 5,
-};
+// Single source of truth for slash-side custom-action IDs lives in
+// `keybinding.zig` (so the action registry can address them by name);
+// alias here so repl.zig switch arms read naturally.
+const ActionId = keybinding.SlashCustomAction;
 
 // `execvp` isn't exposed in `std.c` for our target. Declare the minimum
 // extern so `editInEditor` can spawn `$VISUAL`/`$EDITOR` by basename.
@@ -334,6 +324,27 @@ extern fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 /// Single-key Ctrl-X is the prototype binding until zigline adds the
 /// binding-table API (their v1.0 blocker #2).
 fn slashKeymapLookup(key: zigline.KeyEvent) ?zigline.Action {
+    // User bindings checked first. The `key` builtin populates
+    // `session.keybindings`; matching this key short-circuits every
+    // downstream resolution path (including zigline's default
+    // emacs map), so users can always rebind a built-in.
+    if (builtins.currentSession()) |session| {
+        if (keybinding.BindingKey.fromKeyEvent(key)) |bk| {
+            if (session.keybindings.lookupChord(bk)) |target| {
+                switch (target) {
+                    .action => |a| return a,
+                    .literal => |bytes| {
+                        // Stash for the custom-action hook. Slice is
+                        // borrowed from the binding table, valid for
+                        // the lifetime of the binding.
+                        session.user_literal_pending = bytes;
+                        return zigline.Action{ .custom = @intFromEnum(ActionId.dispatch_user_literal) };
+                    },
+                }
+            }
+        }
+    }
+
     if (key.mods.ctrl) {
         switch (key.code) {
             .char => |c| switch (c) {
@@ -392,7 +403,56 @@ fn customActionHook(
         .expand_str_enter => expandStrEnter(allocator, request, hooks),
         .smart_history_prev => smartHistoryPrev(allocator, request, hooks),
         .smart_history_next => smartHistoryNext(allocator, request, hooks),
+        .dispatch_user_literal => dispatchUserLiteral(allocator, request, hooks),
     };
+}
+
+/// Handler for a user-defined literal-text key binding fired via
+/// `slashKeymapLookup`. The literal bytes were stashed on
+/// `session.user_literal_pending` at lookup time; this hook reads
+/// them back, inserts at the cursor, and (if the trailing byte is
+/// a newline) immediately accepts the line — same semantics as
+/// zsh `bindkey -s "...\n"`, which describes the action as "push
+/// the string back as if typed."
+///
+/// The "as if typed" framing is what drives the buffer-preserving
+/// behavior: if the user has already typed `foo ` and then
+/// presses a binding for `"bar\n"`, the result is exactly `foo bar`
+/// followed by Enter — NOT `bar` (which an earlier draft did via
+/// `replace_buffer_and_accept = body`).
+fn dispatchUserLiteral(
+    allocator: Allocator,
+    request: zigline.CustomActionRequest,
+    hooks: *SlashHooks,
+) anyerror!zigline.CustomActionResult {
+    const session = hooks.session;
+    const pending = session.user_literal_pending orelse return .no_op;
+    session.user_literal_pending = null;
+    if (pending.len == 0) return .no_op;
+
+    const last = pending[pending.len - 1];
+    const trailing_accept = last == '\n' or last == '\r';
+    const body = if (trailing_accept) pending[0 .. pending.len - 1] else pending;
+
+    if (!trailing_accept) {
+        // Plain insert at cursor. Zigline keeps whatever the user
+        // typed before / after; the user submits with Enter.
+        return .{ .insert_text = try allocator.dupe(u8, body) };
+    }
+
+    // Insert at cursor AND accept in one editor action. There's no
+    // `insert_text_and_accept` variant, so we synthesize the
+    // composite buffer (pre + body + post) and use
+    // `replace_buffer_and_accept`. The user's typed bytes are
+    // preserved.
+    const cursor = @min(request.cursor_byte, request.buffer.len);
+    const before = request.buffer[0..cursor];
+    const after = request.buffer[cursor..];
+    var composite = try allocator.alloc(u8, before.len + body.len + after.len);
+    @memcpy(composite[0..before.len], before);
+    @memcpy(composite[before.len .. before.len + body.len], body);
+    @memcpy(composite[before.len + body.len ..], after);
+    return .{ .replace_buffer_and_accept = composite };
 }
 
 // =============================================================================

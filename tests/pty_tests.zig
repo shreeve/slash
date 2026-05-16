@@ -1986,6 +1986,30 @@ test "slash pty: backgrounded job finish surfaces `[N] Done` notice at next prom
 // both notification paths share. Between-prompts timing stays
 // covered by `backgrounded job finish surfaces a [N] Done` above.
 
+test "slash pty: `key` literal-with-newline binding fires + auto-accepts" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    // Whole flow in one script: bind Alt-Q to a literal that ends
+    // in `\n`, then trigger via `\x1bQ` (the byte sequence terminals
+    // send for Alt-Q / Meta-Q). The trailing newline means the
+    // binding both inserts AND accepts in one editor action, so
+    // the echo's stdout shows up as part of the same prompt cycle.
+    //
+    // No `wait_for = "$"` on the bind step — the startup prompt
+    // already contains `$`, so that race would match prematurely
+    // and proceed before slash had read the bind command. Fixed
+    // settle_ms is more reliable.
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "key Alt-Q \"echo KEY_LITERAL_FIRED\\n\"\n", .settle_ms = 400 },
+        .{ .send = "\x1bQ", .settle_ms = 1000, .wait_for = "KEY_LITERAL_FIRED" },
+        .{ .send = "exit 0\n", .settle_ms = 200 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "KEY_LITERAL_FIRED") != null);
+}
+
 test "slash pty: foreground command completion does NOT trigger a Done notice" {
     if (!ptySupported()) return error.SkipZigTest;
 

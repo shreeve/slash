@@ -335,6 +335,7 @@ test {
     _ = @import("eval.zig");
     _ = @import("repl.zig");
     _ = @import("history.zig");
+    _ = @import("keybinding.zig");
 }
 
 fn printUsage() void {

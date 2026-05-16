@@ -23,6 +23,8 @@ const exec_mod = @import("exec.zig");
 const terminal_mod = @import("terminal.zig");
 const shape_mod = @import("shape.zig");
 const program_mod = @import("program.zig");
+const keybinding = @import("keybinding.zig");
+const zigline_mod = @import("zigline");
 const diag = @import("diagnostics.zig");
 const word_mod = @import("word.zig");
 const parser = @import("parser.zig");
@@ -105,6 +107,7 @@ pub fn init(alloc: Allocator) !BuiltinSet {
     try set.table.put(alloc, "trap", .{ .name = "trap", .run = trapFn });
     try set.table.put(alloc, "str", .{ .name = "str", .run = strFn });
     try set.table.put(alloc, "history", .{ .name = "history", .run = historyFn });
+    try set.table.put(alloc, "key", .{ .name = "key", .run = keyFn });
     return set;
 }
 
@@ -1856,4 +1859,306 @@ fn writeJsonStringSimple(
         } else try out.append(alloc, b),
     };
     try out.append(alloc, '"');
+}
+
+// =============================================================================
+// `key` builtin — user-configurable key bindings
+// =============================================================================
+//
+// Forms:
+//
+//   key                       List all bindings, canonical form, one per line.
+//   key --actions             List every registered action with kebab-name.
+//   key --reset               Drop every user binding (back to slash defaults).
+//   key -d KEYSPEC            Remove the binding for KEYSPEC.
+//   key KEYSPEC action-name   Bind KEYSPEC to a named editor action.
+//   key KEYSPEC "literal"     Bind KEYSPEC to literal text (\n = accept).
+//
+// Disambiguation rule for the third arg:
+//
+//   - If it's all kebab-case identifier characters AND matches a
+//     registered action name → bind to the action.
+//   - If it's all kebab-case identifier characters but the registry
+//     doesn't know it → error with a hint ("did you mean a literal?
+//     quote it explicitly").
+//   - Otherwise (contains whitespace, control chars, punctuation,
+//     etc.) → bind to literal text.
+
+fn keyFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    const args = argv[1..];
+
+    // `--actions` reads from a static map; it works even in a child
+    // context (e.g. `key --actions | grep history`) where there's
+    // no session pointer.
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "--actions")) {
+        return keyListActions(io);
+    }
+
+    const session = switch (ctx) {
+        .shell => |s| s,
+        // Everything else either mutates session state (bind / -d /
+        // --reset) or reads it (list bindings). The forked stage of
+        // a pipeline doesn't carry a session reference, so silently
+        // no-op success — matches `cd`'s behavior in a pipeline.
+        // `key | grep ...` is unsupported by design; pipe through a
+        // shell-context wrapper if needed.
+        .child => return .{ .exited = 0 },
+    };
+
+    if (args.len == 0) return keyList(session, io);
+    if (std.mem.eql(u8, args[0], "--reset")) {
+        session.keybindings.clearAll();
+        return .{ .exited = 0 };
+    }
+    if (std.mem.eql(u8, args[0], "-d") or std.mem.eql(u8, args[0], "--delete")) {
+        if (args.len < 2) {
+            _ = writeAllToFd(io.stderr, "key: -d: usage: key -d KEYSPEC\n");
+            return .{ .exited = 2 };
+        }
+        return keyDelete(session, io, args[1]);
+    }
+
+    if (args.len < 2) {
+        _ = writeAllToFd(io.stderr, "key: usage: key KEYSPEC ACTION-OR-STRING\n");
+        return .{ .exited = 2 };
+    }
+
+    return keyBind(session, io, args[0], args[1]);
+}
+
+fn keyBind(
+    session: *session_mod.Session,
+    io: BuiltinIo,
+    spec: []const u8,
+    target_text: []const u8,
+) anyerror!Result {
+    const parsed = keybinding.parseKeySpec(spec) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = switch (err) {
+            error.EmptyKeySpec => "key: empty key specification",
+            error.UnknownModifier => "key: unknown modifier in key specification",
+            error.UnknownKey => "key: unknown key name in key specification",
+            error.MultiChordNotSupported => "key: multi-chord bindings (Ctrl-X,Ctrl-E) need zigline v0.7+",
+            error.InvalidEscape => "key: invalid escape in key specification",
+        };
+        const out = std.fmt.bufPrint(&buf, "{s}: '{s}'\n", .{ msg, spec }) catch "key: bad spec\n";
+        _ = writeAllToFd(io.stderr, out);
+        return .{ .exited = 2 };
+    };
+
+    // Three-way disambiguation:
+    //   1. Pure kebab-case ident → action registry lookup.
+    //   2. Snake_case-looking ident (contains `_`, only word chars)
+    //      → typo of an action; error with a "did you mean kebab?"
+    //      hint. Never silently binds as literal, because
+    //      `key Alt-F forward_word` is overwhelmingly more likely
+    //      to be a typo than a deliberate "type this snake_case
+    //      string literally" request.
+    //   3. Anything else (whitespace, punctuation, escapes) → literal.
+    if (isKebabIdent(target_text)) {
+        const reg = keybinding.lookupAction(target_text) orelse {
+            var buf: [256]u8 = undefined;
+            const out = std.fmt.bufPrint(
+                &buf,
+                "key: unknown action '{s}' (run `key --actions` to list; to bind a literal string, quote it: key {s} \"{s}\")\n",
+                .{ target_text, spec, target_text },
+            ) catch "key: unknown action\n";
+            _ = writeAllToFd(io.stderr, out);
+            return .{ .exited = 1 };
+        };
+        const action = switch (reg) {
+            .builtin => |a| a,
+            .custom => |c| zigline_mod.Action{ .custom = @intFromEnum(c) },
+        };
+        try session.keybindings.putChord(parsed, .{ .action = action });
+        return .{ .exited = 0 };
+    }
+
+    if (isSnakeIdent(target_text)) {
+        // Convert to kebab and check the registry. If a match
+        // exists, surface a precise "you wrote snake_case; slash
+        // uses kebab-case" hint. If not, still error — snake_case-
+        // looking bare words are never literal text.
+        var kebab_buf: [128]u8 = undefined;
+        const kebab = snakeToKebab(target_text, &kebab_buf) catch {
+            _ = writeAllToFd(io.stderr, "key: action name too long\n");
+            return .{ .exited = 1 };
+        };
+        var msg_buf: [256]u8 = undefined;
+        const out = if (keybinding.lookupAction(kebab) != null)
+            std.fmt.bufPrint(
+                &msg_buf,
+                "key: unknown action '{s}' (did you mean '{s}'? slash action names are kebab-case, not snake_case)\n",
+                .{ target_text, kebab },
+            ) catch "key: unknown action\n"
+        else
+            std.fmt.bufPrint(
+                &msg_buf,
+                "key: unknown action '{s}' (looks like an action name but no match; run `key --actions` to list, or quote for a literal: key {s} \"{s}\")\n",
+                .{ target_text, spec, target_text },
+            ) catch "key: unknown action\n";
+        _ = writeAllToFd(io.stderr, out);
+        return .{ .exited = 1 };
+    }
+
+    // Literal-text binding. Dupe into session-arena so the slice
+    // outlives this builtin call's argv buffer.
+    const owned = try session.alloc.dupe(u8, target_text);
+    errdefer session.alloc.free(owned);
+    try session.keybindings.putChord(parsed, .{ .literal = owned });
+    return .{ .exited = 0 };
+}
+
+fn keyDelete(
+    session: *session_mod.Session,
+    io: BuiltinIo,
+    spec: []const u8,
+) anyerror!Result {
+    const parsed = keybinding.parseKeySpec(spec) catch {
+        var buf: [256]u8 = undefined;
+        const out = std.fmt.bufPrint(&buf, "key: bad spec: '{s}'\n", .{spec}) catch "key: bad spec\n";
+        _ = writeAllToFd(io.stderr, out);
+        return .{ .exited = 2 };
+    };
+    if (session.keybindings.removeChord(parsed)) {
+        return .{ .exited = 0 };
+    }
+    // No binding present — `key -d` is idempotent; exit 0 to keep
+    // scripts smooth, matching zsh `bindkey -r`.
+    return .{ .exited = 0 };
+}
+
+fn keyList(session: *session_mod.Session, io: BuiltinIo) anyerror!Result {
+    const Entry = struct { key: keybinding.BindingKey, target: keybinding.BindingTarget };
+    var entries = std.ArrayListUnmanaged(Entry).empty;
+    defer entries.deinit(session.alloc);
+    var it = session.keybindings.chord.iterator();
+    while (it.next()) |kv| {
+        try entries.append(session.alloc, .{ .key = kv.key_ptr.*, .target = kv.value_ptr.* });
+    }
+    // Stable order: lexicographic by canonical key text.
+    std.sort.heap(Entry, entries.items, {}, struct {
+        fn lt(_: void, a: Entry, b: Entry) bool {
+            var buf_a: [64]u8 = undefined;
+            var buf_b: [64]u8 = undefined;
+            var wa = std.Io.Writer.fixed(&buf_a);
+            var wb = std.Io.Writer.fixed(&buf_b);
+            keybinding.formatKey(a.key, &wa) catch return false;
+            keybinding.formatKey(b.key, &wb) catch return false;
+            return std.mem.lessThan(u8, wa.buffered(), wb.buffered());
+        }
+    }.lt);
+
+    var out_buf = std.ArrayListUnmanaged(u8).empty;
+    defer out_buf.deinit(session.alloc);
+    for (entries.items) |e| {
+        var key_text: [64]u8 = undefined;
+        var ws = std.Io.Writer.fixed(&key_text);
+        keybinding.formatKey(e.key, &ws) catch continue;
+        try out_buf.print(session.alloc, "{s} \t", .{ws.buffered()});
+        switch (e.target) {
+            .action => |a| try formatActionForList(session.alloc, &out_buf, a),
+            .literal => |bytes| try formatLiteralForList(session.alloc, &out_buf, bytes),
+        }
+        try out_buf.append(session.alloc, '\n');
+    }
+    _ = writeAllToFd(io.stdout, out_buf.items);
+    return .{ .exited = 0 };
+}
+
+fn keyListActions(io: BuiltinIo) anyerror!Result {
+    // No allocation needed — write each name + `\n` straight to
+    // the fd. Action-name strings are static (StaticStringMap).
+    for (keybinding.actionNames()) |name| {
+        _ = writeAllToFd(io.stdout, name);
+        _ = writeAllToFd(io.stdout, "\n");
+    }
+    return .{ .exited = 0 };
+}
+
+fn formatActionForList(
+    alloc: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    action: zigline_mod.Action,
+) !void {
+    // Reverse-lookup: find a kebab-name in the registry that maps to
+    // this exact action. For builtin variants this is O(N) over the
+    // registry, which is fine for a 30-entry table that's only
+    // walked when the user runs `key`.
+    for (keybinding.actionNames()) |name| {
+        const reg = keybinding.lookupAction(name).?;
+        const same = switch (reg) {
+            .builtin => |a| std.meta.activeTag(a) == std.meta.activeTag(action) and
+                (action == .custom and a == .custom and a.custom == action.custom or action != .custom),
+            .custom => |c| action == .custom and action.custom == @intFromEnum(c),
+        };
+        if (same) {
+            try out.appendSlice(alloc, name);
+            return;
+        }
+    }
+    try out.appendSlice(alloc, "<unknown-action>");
+}
+
+fn formatLiteralForList(
+    alloc: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    bytes: []const u8,
+) !void {
+    try out.append(alloc, '"');
+    for (bytes) |b| switch (b) {
+        '"' => try out.appendSlice(alloc, "\\\""),
+        '\\' => try out.appendSlice(alloc, "\\\\"),
+        '\n' => try out.appendSlice(alloc, "\\n"),
+        '\r' => try out.appendSlice(alloc, "\\r"),
+        '\t' => try out.appendSlice(alloc, "\\t"),
+        else => if (b < 0x20) {
+            var u_buf: [8]u8 = undefined;
+            const formatted = std.fmt.bufPrint(&u_buf, "\\x{x:0>2}", .{b}) catch "";
+            try out.appendSlice(alloc, formatted);
+        } else try out.append(alloc, b),
+    };
+    try out.append(alloc, '"');
+}
+
+fn isKebabIdent(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        const ok = (c >= 'a' and c <= 'z') or
+            (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or
+            c == '-';
+        if (!ok) return false;
+    }
+    // Mustn't start or end with a hyphen — that's never a valid
+    // action name in the registry and looks like a flag fragment.
+    if (s[0] == '-' or s[s.len - 1] == '-') return false;
+    return true;
+}
+
+/// True if the string looks like an action-name typo using
+/// snake_case rather than slash's canonical kebab-case. Used to
+/// produce a friendlier diagnostic instead of silently binding
+/// `forward_word` as literal text.
+fn isSnakeIdent(s: []const u8) bool {
+    if (s.len == 0) return false;
+    var has_underscore = false;
+    for (s) |c| {
+        const ok = (c >= 'a' and c <= 'z') or
+            (c >= 'A' and c <= 'Z') or
+            (c >= '0' and c <= '9') or
+            c == '_' or c == '-';
+        if (!ok) return false;
+        if (c == '_') has_underscore = true;
+    }
+    if (s[0] == '_' or s[s.len - 1] == '_') return false;
+    return has_underscore;
+}
+
+fn snakeToKebab(s: []const u8, buf: []u8) ![]u8 {
+    if (s.len > buf.len) return error.NameTooLong;
+    for (s, 0..) |c, i| {
+        buf[i] = if (c == '_') '-' else c;
+    }
+    return buf[0..s.len];
 }

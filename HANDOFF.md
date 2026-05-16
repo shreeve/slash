@@ -119,8 +119,8 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: **128/128 passing** — 65 in the
-unit + headless suite (`zig build test-headless`) and 63 in the PTY
+**Test totals as of this handoff**: **156/156 passing** — 92 in the
+unit + headless suite (`zig build test-headless`) and 64 in the PTY
 suite (`zig build test-pty`). All green.
 
 GitHub Actions CI runs `zig build` + `test-headless` + `test-pty`
@@ -263,6 +263,29 @@ Regression covered by `stress: 200 <(cmd) iterations leak no fds
 or zombies`. Full audit in `VALIDATION.md` under "Targeted
 Headless Validation: 2026-05-16 06:50 UTC".
 
+The `key` builtin shipped — user-configurable keybindings, two
+forms: `key KEYSPEC bare-ident` (named editor action from the
+`keybinding.zig` registry) or `key KEYSPEC "literal text"` (insert
+literal bytes; trailing `\n` = also accept, exactly like zsh
+`bindkey -s`). KEYSPEC uses hyphens to join modifiers
+(`Ctrl-X`, `Alt-Left`, `Ctrl-Alt-Right`, `Shift-F7`) with
+`Esc-X`/`Meta-X`/`Alt-X` as three synonyms (terminals collapse to
+the same wire bytes, zigline emits one `KeyEvent`). Multi-chord
+sequences (`Ctrl-X,Ctrl-E`, comma between chords) are reserved
+syntax with a clear v1 diagnostic; need zigline prefix-state to
+ship. Lookup goes through `builtins.currentSession()` from inside
+`slashKeymapLookup` (no zigline context-bearing keymap API yet).
+For literal bindings, the lookup stashes bytes on
+`session.user_literal_pending` and routes to a dispatch custom
+action that preserves the user's typed buffer (insert at cursor,
+not replace). `Ctrl`-modified ASCII letters normalize to lowercase
+at both store time and event time so bindings actually fire (the
+first draft missed this and GPT 5.5 caught it). 156/156 tests
+green. Listing: `key`, `key --actions`, `key -d KEYSPEC`,
+`key --reset`. Use `cmd NAME { body }` + `key K "NAME\n"` for
+multi-line bound actions — keeps `key` itself from growing
+language semantics (PLAN §14).
+
 The `time` keyword shipped as the first behavioral wrapper in the
 kernel. Lives at `sequence_item` level in the grammar; accepts
 pipelines, blocks, and all four control-flow constructs
@@ -329,7 +352,7 @@ reading those files first.
 
 A short pre-commit ritual that's caught real bugs across this session:
 
-1. **`zig build test`** — must be 129/129 green (or whatever the new
+1. **`zig build test`** — must be 156/156 green (or whatever the new
    total is after your tests). A single red test means the commit
    isn't ready.
 2. **§14 self-test** — say out loud which axis the change improves

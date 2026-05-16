@@ -7,6 +7,7 @@ const runtime = @import("runtime.zig");
 const vars = @import("vars.zig");
 const program_mod = @import("program.zig");
 const history_mod = @import("history.zig");
+const keybinding = @import("keybinding.zig");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -352,6 +353,22 @@ pub const Session = struct {
     /// point (typically right after the foreground job completes, or
     /// in `Session.deinit` for any stragglers).
     proc_subs: std.ArrayListUnmanaged(ProcSubEntry) = .empty,
+    /// User-configurable key bindings (the `key` builtin). The
+    /// keymap adapter in `repl.zig` consults this table before
+    /// falling through to zigline's default emacs lookup, so user
+    /// bindings always win on conflict. Initialized to a real
+    /// `Table` in `Session.init`; `undefined` here only because
+    /// the struct's literal initializer can't call `init`.
+    keybindings: keybinding.Table = undefined,
+    /// Slot for a literal-text binding's payload while the editor
+    /// dispatches it. The keymap lookup runs first (knows the
+    /// `KeyEvent`), stashes the literal bytes here, and returns
+    /// `Action{ .custom = dispatch_user_literal }`; the custom-
+    /// action hook (which has no `KeyEvent` parameter) reads back
+    /// from this slot and emits the actual insert + accept. Slice
+    /// is borrowed from the binding's `BindingTarget.literal`;
+    /// never freed via this pointer.
+    user_literal_pending: ?[]const u8 = null,
     /// PATH lookup memoization. Keys and values are owned by `alloc`.
     /// `path_cache_signature` is a dup'd snapshot of `$PATH` at the time
     /// the cache was last validated; on mismatch the cache is dropped
@@ -377,6 +394,7 @@ pub const Session = struct {
             .vars = vars.VarStore.init(alloc),
             .defs = DefStore.init(alloc),
             .strs = StrTable.init(alloc),
+            .keybindings = keybinding.Table.init(alloc),
             .traps = TrapTable.init(alloc),
             .envp = envp,
             .interactive = interactive,
@@ -398,6 +416,7 @@ pub const Session = struct {
         // shipping zombies up to init.
         self.drainProcSubsAtExit();
         self.proc_subs.deinit(self.alloc);
+        self.keybindings.deinit();
         self.jobs.deinit();
         self.builtins.deinit(self.alloc);
         self.vars.deinit();
