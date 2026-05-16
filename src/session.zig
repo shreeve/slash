@@ -15,8 +15,17 @@ pub const Allocator = std.mem.Allocator;
 extern "c" fn getpgrp() std.c.pid_t;
 
 pub const ProcSubEntry = struct {
+    /// Fd open in the parent process pointing at the pipe end the
+    /// exec'd child inherits via `/dev/fd/N`. Always strip
+    /// `FD_CLOEXEC` before recording so the inherit works.
     parent_fd: i32,
+    /// Pid of the forked side child running the `<(prog)` /
+    /// `>(prog)` body. Reaped at the next `drainProcSubs` cadence.
     pid: i32,
+    /// True once `drainProcSubs` has closed `parent_fd`. A retry
+    /// pass on an unreaped survivor must NOT re-close (would
+    /// double-close, possibly the wrong fd if it was recycled).
+    closed: bool = false,
 };
 
 /// Tabulated signals supported by `trap`. The values are sequential
@@ -381,7 +390,13 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
-        self.drainProcSubs();
+        // Use the escalating-reap path here. A typical shell exit
+        // path has already flushed proc_subs via per-command
+        // `drainProcSubs` calls; this catches the rare case where
+        // a side child outlived its parent command (slow flusher,
+        // misbehaved reader). SIGTERM + blocking wait beats
+        // shipping zombies up to init.
+        self.drainProcSubsAtExit();
         self.proc_subs.deinit(self.alloc);
         self.jobs.deinit();
         self.builtins.deinit(self.alloc);
@@ -400,16 +415,135 @@ pub const Session = struct {
     /// Closing the parent's end is what lets a `>(...)` reader see
     /// EOF, so this is called right after the foreground job for a
     /// command finishes (PLAN §7 Rule 25).
+    ///
+    /// Two-pass reap. Most side children are dead by the time we get
+    /// here — the parent-side close above either:
+    ///
+    ///   - delivers SIGPIPE to a `<(prog)` writer that's still
+    ///     trying to push bytes (default action: terminate), or
+    ///   - delivers EOF to a `>(prog)` reader that then exits its
+    ///     read loop naturally.
+    ///
+    /// `WNOHANG` catches the common path. The retry list survives
+    /// the call: any child still alive (e.g. a `>(slow-flush)` that
+    /// hasn't finished its post-EOF cleanup yet) gets re-attempted
+    /// at the next `drainProcSubs` (called once per foreground
+    /// command + once at session teardown). Without this, an
+    /// unreaped child becomes a zombie that lives until the slash
+    /// process itself exits — a slow fd/PID leak in long sessions
+    /// that lean on `<(...)` / `>(...)` heavily.
+    ///
+    /// At session teardown the leftover list gets a SIGTERM nudge
+    /// and a blocking wait via `drainProcSubsAtExit` so we don't
+    /// ship zombies up to init.
     pub fn drainProcSubs(self: *Session) void {
-        for (self.proc_subs.items) |entry| {
-            _ = std.c.close(entry.parent_fd);
-            // Best-effort reap; the side child has typically already
-            // exited by the time we get here, but a stuck child won't
-            // wedge the parent — `WNOHANG` returns immediately.
+        // In-place compaction. No allocation in the reaper path:
+        // an OOM here would silently drop tracking and re-introduce
+        // the zombie leak the audit just fixed.
+        var write_idx: usize = 0;
+        for (self.proc_subs.items) |entry_in| {
+            var entry = entry_in;
+            if (!entry.closed) {
+                _ = std.c.close(entry.parent_fd);
+                entry.closed = true;
+            }
             var status: c_int = 0;
-            _ = std.c.waitpid(entry.pid, &status, std.c.W.NOHANG);
+            const rc = std.c.waitpid(entry.pid, &status, std.c.W.NOHANG);
+            if (rc == entry.pid) {
+                // Reaped cleanly — drop.
+                continue;
+            }
+            if (rc == 0) {
+                // Still alive — retain for the next reap pass.
+                self.proc_subs.items[write_idx] = entry;
+                write_idx += 1;
+                continue;
+            }
+            // rc < 0 (and notionally also rc > 0 with a different pid,
+            // which POSIX says can't happen for a non-`-1` first arg).
+            // Inspect errno:
+            //   - EINTR: signal interrupted us; retain and retry next pass.
+            //   - ECHILD: child already gone (someone else reaped it, or
+            //     it never existed) — DROP. Critically: we must NOT
+            //     keep this entry around because a later `SIGTERM`/
+            //     `SIGKILL` pass would signal a recycled PID and could
+            //     murder an unrelated process.
+            //   - other: treat as fatal-to-this-entry; drop.
+            const err = std.c.errno(rc);
+            if (err == .INTR) {
+                self.proc_subs.items[write_idx] = entry;
+                write_idx += 1;
+            }
+            // ECHILD or anything else: fall through to drop.
         }
-        self.proc_subs.clearRetainingCapacity();
+        self.proc_subs.shrinkRetainingCapacity(write_idx);
+    }
+
+    /// Final reap pass at session teardown. Four-phase escalation:
+    ///
+    ///   1. `drainProcSubs` (WNOHANG) catches the typical case.
+    ///   2. Poll-grace window (100ms) — well-behaved post-EOF
+    ///      children flush + exit naturally inside this window
+    ///      (e.g. `>(wc -c)` reading EOF, writing its byte count,
+    ///      exiting).
+    ///   3. SIGTERM survivors, then a SECOND poll-grace (100ms)
+    ///      for the polite-shutdown path to complete.
+    ///   4. SIGKILL anyone STILL alive, then blocking `waitpid`
+    ///      with EINTR retry. SIGKILL is unmaskable so the wait
+    ///      can't wedge indefinitely.
+    ///
+    /// Bounded total: ~200ms grace + the kernel's SIGKILL delivery
+    /// + blocking wait for an unmaskable death. Slash never hangs
+    /// forever on session teardown, no matter what a hostile or
+    /// buggy side child does. Data loss for SIGKILL'd processes is
+    /// the price; the alternative is wedging the shell on exit.
+    pub fn drainProcSubsAtExit(self: *Session) void {
+        self.drainProcSubs();
+        if (self.proc_subs.items.len == 0) return;
+
+        // Phase 2: short polling grace window. Each pass reaps
+        // anything that has exited since the previous one.
+        graceReap(self, 100, 5);
+        if (self.proc_subs.items.len == 0) return;
+
+        // Phase 3: polite termination.
+        for (self.proc_subs.items) |entry| {
+            _ = std.c.kill(entry.pid, std.c.SIG.TERM);
+        }
+        graceReap(self, 100, 5);
+        if (self.proc_subs.items.len == 0) return;
+
+        // Phase 4: SIGKILL + EINTR-safe blocking wait. SIGKILL is
+        // unblockable, so each `waitpid` reaps within a kernel
+        // tick. The EINTR retry guards against SIGCHLD (delivered
+        // when the kill takes effect) interrupting the wait.
+        for (self.proc_subs.items) |entry| {
+            _ = std.c.kill(entry.pid, std.c.SIG.KILL);
+        }
+        for (self.proc_subs.items) |entry| {
+            while (true) {
+                var status: c_int = 0;
+                const rc = std.c.waitpid(entry.pid, &status, 0);
+                if (rc == entry.pid) break;
+                if (rc < 0) {
+                    const err = std.c.errno(rc);
+                    if (err == .INTR) continue;
+                    break; // ECHILD or unexpected — give up on this one
+                }
+                break;
+            }
+        }
+        self.proc_subs.shrinkRetainingCapacity(0);
+    }
+
+    fn graceReap(self: *Session, total_ms: u32, step_ms: u32) void {
+        var elapsed: u32 = 0;
+        while (elapsed < total_ms and self.proc_subs.items.len > 0) {
+            var pfd: std.c.pollfd = .{ .fd = -1, .events = 0, .revents = 0 };
+            _ = std.c.poll(@ptrCast(&pfd), 0, @intCast(step_ms));
+            elapsed += step_ms;
+            self.drainProcSubs();
+        }
     }
 
     /// Free every cached entry but leave the table allocated.

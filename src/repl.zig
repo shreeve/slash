@@ -210,6 +210,14 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
         // on their own dim lines above. See `notice.zig` for format
         // and dim-on-tty rendering.
         if (pending.items.len == 0) {
+            // Prompt-boundary cleanup. `drainProcSubs` re-attempts
+            // reaping any side children whose post-EOF cleanup
+            // wasn't done at the per-command boundary. Without this
+            // hook, a `>(slow-flusher)` survivor could sit as a
+            // zombie until the user runs their next foreground
+            // command. Cheap when nothing's pending — single
+            // `waitpid(WNOHANG)` per entry, list is usually empty.
+            session.drainProcSubs();
             notice.pendingDoneJobs(session);
             notice.pendingExitStatus(session);
         }

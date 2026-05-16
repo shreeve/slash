@@ -1885,6 +1885,59 @@ test "stress: 200 pipeline iterations leave fd count stable" {
     }
 }
 
+test "stress: 200 `<(cmd)` iterations leak no fds or zombies" {
+    // Regression for the proc-sub teardown audit. Each iteration
+    // creates one or more side children and `/dev/fd/N` pipes via
+    // `spawnProcSubst`; `drainProcSubs` must reap and close them
+    // before the next iteration runs. A WNOHANG-and-forget bug
+    // would leave the parent fd open AND the child as a zombie,
+    // both detectable here.
+    const alloc = std.testing.allocator;
+    _ = drainZombies();
+    const baseline = countOpenFds();
+
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        // `diff <(echo a) <(echo a) && true` — two side children,
+        // one foreground reader, plus a follow-on so the
+        // `drainProcSubs` cadence runs at end-of-command before the
+        // session goes away.
+        const source_text = "/usr/bin/diff <(/bin/echo a) <(/bin/echo a) >/dev/null && true";
+        const source = diag.Source{ .name = "<procsub-stress>", .text = source_text };
+        const parsed = try shape.parse(source, a, null);
+        const ctx = program.LowerContext{ .alloc = a, .source = source };
+        const prog = try program.lower(parsed.root, &ctx, null);
+
+        const envp_ptr: [*:null]const ?[*:0]const u8 = @ptrCast(@alignCast(environ));
+        var session = try session_mod.Session.init(alloc, envp_ptr, false);
+        defer session.deinit();
+        builtins.installSession(&session);
+
+        _ = eval.runForeground(prog, &session, a, null) catch {};
+    }
+
+    const after = countOpenFds();
+    if (after > baseline + 2) {
+        std.debug.print(
+            "proc-sub fd leak: baseline={d} after={d} delta={d}\n",
+            .{ baseline, after, after - baseline },
+        );
+        return error.FdLeak;
+    }
+    // Any zombies left dangling fall out here — drainZombies returns
+    // > 0 if the per-iteration `drainProcSubs` retry path failed to
+    // catch the side children before the session torn down.
+    const leftover = drainZombies();
+    if (leftover > 0) {
+        std.debug.print("proc-sub zombie leak: {d} unreaped\n", .{leftover});
+        return error.ZombieLeak;
+    }
+}
+
 test "stress: 100 detached jobs are reaped without explicit wait" {
     const alloc = std.testing.allocator;
     // Fence: reap anything outstanding before we measure.

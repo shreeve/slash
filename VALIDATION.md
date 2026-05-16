@@ -402,3 +402,31 @@ Linux validation lives in CI — any regression that breaks the
 macOS, surfaces as a red check on the PR before merge.
 
 ---
+
+## Targeted Headless Validation: 2026-05-16 06:50 UTC
+
+Process substitution audit. PLAN §7 Rule 25 requires per-command
+cleanup of side children spawned by `<(prog)` / `>(prog)`. Spent
+a focused pass reading `src/eval.zig:spawnProcSubst` and
+`src/session.zig:drainProcSubs` end-to-end. Findings:
+
+| # | finding | severity | resolution |
+|---|---|---|---|
+| 1 | `drainProcSubs` did `waitpid(WNOHANG)` then `clearRetainingCapacity` unconditionally. A side child that hadn't quite exited yet (well-behaved `>(prog)` mid-flush) became a zombie that lived until slash exited. Slow leak in long sessions with heavy `<(...)` use. | medium | Two-pass reap: WNOHANG-reaped entries drop; survivors stay on `proc_subs` with a `closed` flag so the next `drainProcSubs` cycle (per-command + at session teardown) re-attempts without double-closing the fd. |
+| 2 | Session teardown was best-effort WNOHANG (inherited from #1) — survivors became zombies that the kernel re-parented to init. | medium | New `drainProcSubsAtExit` runs at `Session.deinit`. Three-phase escalation: WNOHANG → 100ms grace-poll → SIGTERM + blocking wait. The grace window lets `>(wc -c)`-style children flush their post-EOF work before we shoot them. |
+| 3 | Side children's pgrp is correctly distinct from the terminal foreground pgrp (`setpgid(0, 0)` in child, `setpgid(pid, pid)` in parent), so Ctrl-C on the main command doesn't kill them. They exit naturally via SIGPIPE / EOF. Already correct. | none | n/a |
+| 4 | `/dev/fd/N` path materializes via `std.fmt.allocPrint(scratch, ...)`. Scratch arena outlives the command but not the session. The exec'd child opens `/dev/fd/N` immediately at exec, so the string only needs to live until after fork+exec. Already correct. | none | n/a |
+| 5 | `clearCloexec(parent_fd)` runs in the parent so the exec'd child inherits the fd. If skipped, `/dev/fd/N` would fail to open in the child. Already correct. | none | n/a |
+
+Regression test added: `stress: 200 <(cmd) iterations leak no fds
+or zombies`. Each iteration runs `diff <(echo a) <(echo a) && true`
+in a fresh session; asserts `countOpenFds()` returns within +2 of
+baseline AND `drainZombies()` returns 0 after the loop. Catches
+both the fd-leak shape AND the zombie-leak shape that the audit
+identified. Run: 200 iterations, 0 fd delta, 0 unreaped zombies.
+
+Tests: 129/129 (66 in headless + 63 in PTY). Existing
+`proc-sub: >(cmd)` test still green after the deinit refactor —
+the 100ms grace window covers wc's read+flush latency.
+
+---

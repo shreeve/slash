@@ -254,9 +254,14 @@ slot. Likely candidates outside the editor surface:
 
 - Tighten CHECKLIST.md's two unchecked rapid-stop/continue stress
   test boxes.
-- Process substitution audit — `<(cmd)` / `>(cmd)` plumbing works
-  but lifetime + ordering of the temp FIFO cleanup deserves a
-  focused validation pass before 1.2.
+
+The process substitution audit shipped — found one real zombie /
+fd leak in the WNOHANG-then-forget `drainProcSubs` path, fixed
+with a two-pass survivor-retry plus a three-phase escalation at
+session teardown (WNOHANG → 100ms grace-poll → SIGTERM + block).
+Regression covered by `stress: 200 <(cmd) iterations leak no fds
+or zombies`. Full audit in `VALIDATION.md` under "Targeted
+Headless Validation: 2026-05-16 06:50 UTC".
 
 The `time` keyword shipped as the first behavioral wrapper in the
 kernel. Lives at `sequence_item` level in the grammar; accepts
@@ -324,7 +329,7 @@ reading those files first.
 
 A short pre-commit ritual that's caught real bugs across this session:
 
-1. **`zig build test`** — must be 128/128 green (or whatever the new
+1. **`zig build test`** — must be 129/129 green (or whatever the new
    total is after your tests). A single red test means the commit
    isn't ready.
 2. **§14 self-test** — say out loud which axis the change improves
