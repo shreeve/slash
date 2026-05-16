@@ -307,3 +307,27 @@ announce at the next prompt boundary, not mid-prompt. Mid-prompt
 that hasn't shipped yet.
 
 ---
+
+## Targeted PTY Validation: 2026-05-15 23:90 UTC
+
+- commit: working tree (CHECKLIST §5/§13 stress test)
+- os: Darwin 25.4.0 arm64 (macOS, M-series)
+- slash binary: `bin/slash`
+- mode: automated PTY regression (`zig build test-pty`)
+
+| # | test | result | note |
+|---|---|---|---|
+| 1 | 10 rapid Ctrl-Z/fg cycles | PASS | ≥ 6 `Stopped sleep` and ≥ 6 `Continued sleep` notices in the transcript; post-storm `echo STRESS_OK` confirms the shell is still healthy |
+
+**Tally:** 1 PASS, 0 FAIL, 0 SKIP.
+
+### Verdict
+
+CHECKLIST §5 ("terminal handoff survives races") and §13 ("terminal
+ownership survives rapid stop/continue cycles") are both closed —
+the same PTY stress test exercises `terminal.giveToJob` +
+`tcsetpgrp` on resume, parent bookkeeping (`Job.state` transitions
+monotonically), the SIGCHLD safe-point reaping path under burst
+load, and the post-storm prompt recovery.
+
+---

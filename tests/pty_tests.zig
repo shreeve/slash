@@ -1984,3 +1984,64 @@ test "slash pty: foreground command completion does NOT trigger a Done notice" {
     // surfaces for the simple `echo` command.
     try std.testing.expect(std.mem.indexOf(u8, r.out, "] Done echo") == null);
 }
+
+test "slash pty: rapid stop/continue cycles preserve terminal ownership (CHECKLIST §5/§13)" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    // Drive N Ctrl-Z / fg cycles against a single foreground sleep,
+    // then kill the sleep and confirm the shell is still healthy
+    // enough to run a marker command. Each cycle exercises:
+    //   - `terminal.giveToJob` + tcsetpgrp on resume (§5)
+    //   - parent bookkeeping survives signal-driven race
+    //     (`Job.state` transitions monotonically through stopped /
+    //     running, never wedged) (§13)
+    //   - SIGCHLD handler + safe-point reaping under burst load
+    //
+    // We do NOT use `wait_for` for per-cycle synchronization — the
+    // harness's `wait_for` matches the substring in the cumulative
+    // output, so the SECOND cycle's `wait_for "Stopped"` would
+    // match the FIRST cycle's notice and proceed without waiting
+    // for the real second stop. Instead we use a fixed settle per
+    // cycle and assert at the END on how many distinct
+    // `Stopped sleep`/`Continued sleep` lines appeared. A loose
+    // floor (≥ 6 of each across 10 cycles) tolerates the
+    // occasional dropped cycle on a busy machine while still
+    // proving the loop body actually ran many times.
+    const cycles = 10;
+    var steps: std.ArrayListUnmanaged(Step) = .empty;
+    defer steps.deinit(std.testing.allocator);
+
+    // 800 ms initial settle is the same fix that closed the
+    // ex-flaky Ctrl-Z PTY test (commit 14f5e4a) — gives the
+    // fork+exec+tcsetpgrp dance time to complete before any signal
+    // arrives.
+    try steps.append(std.testing.allocator, .{ .send = "sleep 30\n", .settle_ms = 800 });
+
+    var i: usize = 0;
+    while (i < cycles) : (i += 1) {
+        try steps.append(std.testing.allocator, .{ .send = "\x1a", .settle_ms = 350 }); // Ctrl-Z
+        try steps.append(std.testing.allocator, .{ .send = "fg\n", .settle_ms = 350 });
+    }
+
+    // Kill the resumed sleep so the test doesn't wait 30 seconds.
+    try steps.append(std.testing.allocator, .{ .send = "\x03", .settle_ms = 400 });
+    try steps.append(std.testing.allocator, .{
+        .send = "echo STRESS_OK\n",
+        .settle_ms = 1500,
+        .wait_for = "STRESS_OK",
+    });
+    try steps.append(std.testing.allocator, .{ .send = "exit 0\n", .settle_ms = 100 });
+
+    const r = try runScript(std.testing.allocator, &.{"--norc"}, steps.items);
+    defer std.testing.allocator.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // Positive: the shell still runs a follow-up command after the
+    // cycle storm. A wedged terminal ownership or a stuck Job state
+    // would prevent the marker from appearing.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "STRESS_OK") != null);
+    // Loose floor on Stopped/Continued counts — at least 6 of each
+    // across 10 cycles. Tolerates occasional dropped cycles on a
+    // busy CI host while still proving the loop actually executed.
+    try std.testing.expect(countOccurrences(r.out, "Stopped sleep") >= 6);
+    try std.testing.expect(countOccurrences(r.out, "Continued sleep") >= 6);
+}

@@ -31,7 +31,7 @@ the full statement of intent.
 |---|---|
 | [`AGENTS.md`](./AGENTS.md) | The contributor rules. **The §14 test** ("does this improve `Command` clarity, `Pipeline` correctness, `Program` composability, or `Job` control?") is the only filter that decides whether a feature ships. Read this first; it's the shortest. |
 | [`PLAN.md`](./PLAN.md) | The design constitution. Long. §1 (vision), §7 (semantic rules), §12 (in/out of scope), §14 (the §14 test) are the load-bearing parts. Everything else is reachable from there. |
-| [`CHECKLIST.md`](./CHECKLIST.md) | The operational correctness rubric. Process groups, terminal ownership, signal discipline, etc. **75/77 boxes checked** with inline evidence pointers (file/function/test for every claim). Two unchecked items both deferred for the same reason: no rapid-stop/continue stress test. |
+| [`CHECKLIST.md`](./CHECKLIST.md) | The operational correctness rubric. Process groups, terminal ownership, signal discipline, etc. **77/77 boxes checked** with inline evidence pointers (file/function/test for every claim). The two ex-deferred items — `§5` terminal-handoff-survives-races and `§13` ownership-survives-rapid-stop/continue — are both closed by a 10-cycle Ctrl-Z/fg PTY stress test. |
 | [`VALIDATION.md`](./VALIDATION.md) | The empirical log. First run on 2026-05-14 was **14/14 PASS** against real interactive software (vim, less, top, ssh, python, node, nested shells, yes-pipe). Findings are tracked in numbered F-entries; F1, F2, F3 (both stickiness and placement), F4 are all FIXED. Second run on 2026-05-15 confirmed the F3 + notice closure interactively. |
 | [`ROADMAP.md`](./ROADMAP.md) | What's left. **Empty** — every interactive-UX item the previous release target depended on has shipped. New items must pass the §14 test before they earn a slot. |
 | [`README.md`](./README.md) | What slash looks like to a user. Public surface. |
@@ -117,8 +117,8 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: **144/144 passing** — 80 in the
-unit + headless suite (`zig build test-headless`) and 64 in the PTY
+**Test totals as of this handoff**: **145/145 passing** — 80 in the
+unit + headless suite (`zig build test-headless`) and 65 in the PTY
 suite (`zig build test-pty`). All green. The two ex-flaky PTY tests
 (`Ctrl-Z stops a foreground
 sleep`, `cat & SIGTTIN`) were diagnosed and fixed in commit
@@ -228,9 +228,6 @@ so the JSONL history index doesn't pollute the user's real
 
 **Deferred but tracked:**
 
-- **CHECKLIST §5/§13 rapid-stop/continue stress test** — single
-  cycles validated, no high-frequency torture loop. Real but not
-  blocking.
 - **Mid-prompt `set -b`-style job notifications** — between-prompts
   surfacing ships (see above), but bash `set -b` (announce
   immediately mid-prompt without waiting for Enter) needs a zigline

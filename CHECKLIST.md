@@ -164,7 +164,7 @@ Checklist:
 - [x] resumed jobs reacquire terminal (`fgFn`: `giveToJob` → SIGCONT, with prior `j.termios` re-installed first)
 - [x] background jobs never read from terminal (kernel SIGTTIN-stops bg readers; verified by `cat &` PTY test)
 - [x] SIGTTIN/SIGTTOU handled correctly (interactive shell ignores both; bootstrap forces SIGTTIN to default before the fg-acquisition loop and re-ignores after)
-- [ ] terminal handoff survives races (no dedicated stress test; deferred — would need a rapid-stop/continue stress harness)
+- [x] terminal handoff survives races (PTY stress test in `tests/pty_tests.zig`: 10 Ctrl-Z/fg cycles against a single foreground sleep; ≥ 6 `Stopped`/`Continued` notices each and a post-storm `echo` marker prove the tty handoff didn't wedge)
 - [x] interactive programs retain terminal ownership correctly (validated against vim/less/top/man/python/node — see VALIDATION.md run 2026-05-14)
 
 Validation programs:
@@ -411,7 +411,7 @@ Audit all:
 Checklist:
 
 - [x] parent bookkeeping survives immediate child exit (caught a real UAF in `disown -a` during this work — Job referenced after free; fixed via `isDisownable` filter)
-- [ ] terminal ownership survives rapid stop/continue cycles (no dedicated stress test; deferred — would need a synthetic Ctrl-Z/fg loop)
+- [x] terminal ownership survives rapid stop/continue cycles (PTY stress test in `tests/pty_tests.zig` covers `terminal.giveToJob` + tcsetpgrp on resume across 10 cycles; same harness that closed §5's box above)
 - [x] signal delivery order does not corrupt state (SIGCHLD handler is flag-only-async-signal-safe; reaping happens in shell context at safe points)
 - [x] wait loops tolerate EINTR (`exec.waitOne` and `serviceForeground` both loop on EINTR)
 - [x] pgid assignment is deterministic (parent + child both call setpgid; fork-race-closed; verified by every job-control test)
