@@ -435,7 +435,15 @@ const Modifier = enum { ctrl, alt, shift };
 fn matchModifier(name: []const u8) ?Modifier {
     if (eqIgnoreCase(name, "ctrl") or eqIgnoreCase(name, "control"))
         return .ctrl;
-    if (eqIgnoreCase(name, "alt") or eqIgnoreCase(name, "meta") or eqIgnoreCase(name, "esc"))
+    // `Alt`/`Meta`/`Esc`/`Option` are four spellings of the same
+    // modifier. `Option` is the Mac keyboard-label form; PC users
+    // think `Alt`; emacs and terminal-old-timers think `Meta`;
+    // `Esc-X` matches the wire-byte shape (terminals encode Meta
+    // as an ESC prefix). zigline collapses all four to one
+    // KeyEvent with `mods.alt = true`.
+    if (eqIgnoreCase(name, "alt") or eqIgnoreCase(name, "meta") or
+        eqIgnoreCase(name, "esc") or eqIgnoreCase(name, "option") or
+        eqIgnoreCase(name, "opt"))
         return .alt;
     if (eqIgnoreCase(name, "shift"))
         return .shift;
@@ -556,12 +564,20 @@ test "parseKeySpec: simple Ctrl-X (normalized to lowercase)" {
     try std.testing.expect(!k.mods.alt);
 }
 
-test "parseKeySpec: Alt and Meta and Esc are synonyms" {
+test "parseKeySpec: Alt, Meta, Esc, Option, Opt are five names for one modifier" {
+    // Four spellings of the same Meta-modifier modifier prefix. `Option`
+    // is the Mac keyboard-label form (added for POLS); `Opt` is the
+    // common abbreviation; `Alt` is PC convention; `Meta` is the
+    // emacs name; `Esc` matches the wire-byte shape.
     const a = try parseKeySpec("Alt-P");
     const m = try parseKeySpec("Meta-P");
     const e = try parseKeySpec("Esc-P");
+    const o = try parseKeySpec("Option-P");
+    const op = try parseKeySpec("Opt-P");
     try std.testing.expect(std.meta.eql(a, m));
     try std.testing.expect(std.meta.eql(a, e));
+    try std.testing.expect(std.meta.eql(a, o));
+    try std.testing.expect(std.meta.eql(a, op));
     try std.testing.expect(a.mods.alt);
 }
 
