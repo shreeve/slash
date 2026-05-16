@@ -254,12 +254,24 @@ slot. Likely candidates outside the editor surface:
 
 - Tighten CHECKLIST.md's two unchecked rapid-stop/continue stress
   test boxes.
-- Built-in `time` keyword (PLAN §17: pipeline-level wall+user+sys
-  timing, structured output, doesn't double-fork). Already had a
-  spike branch.
 - Process substitution audit — `<(cmd)` / `>(cmd)` plumbing works
   but lifetime + ordering of the temp FIFO cleanup deserves a
   focused validation pass before 1.2.
+
+The `time` keyword shipped as the first behavioral wrapper in the
+kernel. Lives at `sequence_item` level in the grammar; accepts
+pipelines, blocks, and all four control-flow constructs
+(`if`/`while`/`for`/`match`) directly. Wall via
+`clock_gettime(MONOTONIC)`, CPU via SELF+CHILDREN getrusage
+deltas (honest "shell + child" cost, unlike bash which reports
+child-only). Stderr output, dim-on-TTY, exit status of the body
+propagates as the wrapper's value. Caveat documented in
+`src/eval.zig`: `RUSAGE_CHILDREN` is process-global and
+wait-based, so a previously-backgrounded job reaped during the
+body adds its CPU to the delta. The proper fix is per-Job
+rusage accounting at the `Job` layer (PLAN §3.7 alludes to it);
+reach for it when adding the next behavioral wrapper
+(`Retry` / `Timeout` / `Within` / `WithEnv`).
 
 ---
 

@@ -72,9 +72,10 @@ pub const Tag = enum(u8) {
     @"for",
     cmd_def,
     str_def,
-    @"match",
+    match,
     match_arms,
     match_arm,
+    timed,
 
     // ---- Redirects ----
     redir_read,
@@ -107,6 +108,7 @@ pub const KeywordId = enum(u16) {
     IN,
     CMD,
     MATCH,
+    TIME,
 };
 
 const keyword_map = std.StaticStringMap(KeywordId).initComptime(.{
@@ -117,6 +119,7 @@ const keyword_map = std.StaticStringMap(KeywordId).initComptime(.{
     .{ "in", .IN },
     .{ "cmd", .CMD },
     .{ "match", .MATCH },
+    .{ "time", .TIME },
 });
 
 pub fn keywordAs(text: []const u8) ?KeywordId {
@@ -764,8 +767,23 @@ fn trimAscii(bytes: []const u8) []const u8 {
 /// ident rule: `[A-Za-z_./\-+~@%!*?:,^][A-Za-z0-9_./\-+~@%!*?:,^]*`).
 fn isBareWordContinue(c: u8) bool {
     return switch (c) {
-        'A'...'Z', 'a'...'z', '0'...'9',
-        '_', '.', '/', '-', '+', '~', '@', '%', '!', '*', '?', ':', ',', '^',
+        'A'...'Z',
+        'a'...'z',
+        '0'...'9',
+        '_',
+        '.',
+        '/',
+        '-',
+        '+',
+        '~',
+        '@',
+        '%',
+        '!',
+        '*',
+        '?',
+        ':',
+        ',',
+        '^',
         => true,
         else => false,
     };
@@ -777,8 +795,22 @@ fn isBareWordContinue(c: u8) bool {
 /// token an INTEGER instead).
 fn isBareWordStart(c: u8) bool {
     return switch (c) {
-        'A'...'Z', 'a'...'z',
-        '_', '.', '/', '-', '+', '~', '@', '%', '!', '*', '?', ':', ',', '^',
+        'A'...'Z',
+        'a'...'z',
+        '_',
+        '.',
+        '/',
+        '-',
+        '+',
+        '~',
+        '@',
+        '%',
+        '!',
+        '*',
+        '?',
+        ':',
+        ',',
+        '^',
         => true,
         else => c >= 0x80,
     };

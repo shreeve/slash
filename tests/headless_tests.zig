@@ -35,6 +35,11 @@ const Expect = struct {
     /// output. Useful for cases where the wider test-runner output gets
     /// in the way.
     stdout_contains: bool = false,
+    /// Same idea for stderr: if true, treat `stderr` as a needle and
+    /// assert it appears anywhere in the observed stderr stream.
+    /// Useful for forms (e.g. `time`) where the line of interest is
+    /// embedded in a multi-line emission.
+    stderr_contains: bool = false,
 };
 
 const Case = struct {
@@ -322,6 +327,83 @@ const cases: []const Case = &.{
         .name = "break exits while loop on first iteration",
         .source = "while true { break }; echo after",
         .expect = .{ .exit_code = 0, .stdout = "after\n" },
+    },
+    // ----------------------------------------------------------------
+    // `time` — behavioral wrapper; transparent to stdout + exit status
+    // ----------------------------------------------------------------
+    //
+    // The wrapper writes its `real / user / sys` lines to stderr; the
+    // body's stdout and exit status must pass through completely
+    // unaffected. These cases lock in that contract — separate
+    // PTY-level visual checks (dim ANSI, alignment) live outside
+    // headless.
+    .{
+        .name = "time wraps a simple command; stdout passes through",
+        .source = "time echo hello",
+        .expect = .{ .exit_code = 0, .stdout = "hello\n" },
+    },
+    .{
+        .name = "time propagates body exit status (true)",
+        .source = "time true",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "time propagates body exit status (false)",
+        .source = "time false",
+        .expect = .{ .exit_code = 1, .stdout = "" },
+    },
+    .{
+        .name = "time wraps a pipeline; only the body's stdout reaches the consumer",
+        .source = "time echo first | /bin/cat",
+        .expect = .{ .exit_code = 0, .stdout = "first\n" },
+    },
+    .{
+        .name = "time { ... } block sums child outputs",
+        .source = "time { echo a; echo b }",
+        .expect = .{ .exit_code = 0, .stdout = "a\nb\n" },
+    },
+    .{
+        .name = "time fires only when reached (false && skips body)",
+        // `&&` short-circuits before evaluating `time`. If `time` were
+        // somehow eager, `BUG` would land on stdout.
+        .source = "false && time echo BUG",
+        .expect = .{ .exit_code = 1, .stdout = "" },
+    },
+    .{
+        .name = "time wraps a for-loop without an explicit brace",
+        // Locks in the wider `timed_form` grammar — `time for x in
+        // ...` parses as one wrapped unit, not `(time for x ...)`
+        // with the `... { body }` orphaned.
+        .source = "time for x in a b c { echo $x }",
+        .expect = .{ .exit_code = 0, .stdout = "a\nb\nc\n" },
+    },
+    .{
+        .name = "time wraps an if/then",
+        .source = "time if true { echo yes }",
+        .expect = .{ .exit_code = 0, .stdout = "yes\n" },
+    },
+    .{
+        .name = "time emits a `real` line to stderr",
+        .source = "time true",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "",
+            .stderr = "real",
+            .stderr_contains = true,
+        },
+    },
+    .{
+        .name = "time emits user and sys lines too",
+        // Anchor on `sys` since it's the last of the three; if it
+        // appears we know `real` and `user` did too (formatter writes
+        // them in order with one `write` per group).
+        .source = "time true",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "",
+            .stderr = "sys",
+            .stderr_contains = true,
+        },
     },
     .{
         // A flag-flipping pattern keeps the loop bounded without
@@ -2005,7 +2087,11 @@ test "headless v0" {
             }
         }
         if (case.expect.stderr) |want| {
-            if (!std.mem.eql(u8, out.stderr, want)) {
+            const ok = if (case.expect.stderr_contains)
+                std.mem.indexOf(u8, out.stderr, want) != null
+            else
+                std.mem.eql(u8, out.stderr, want);
+            if (!ok) {
                 std.debug.print(
                     "FAIL {s}: stderr mismatch\n  expected: {s}\n  actual:   {s}\n",
                     .{ case.name, want, out.stderr },

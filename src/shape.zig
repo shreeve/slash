@@ -271,6 +271,18 @@ pub const MatchShape = struct {
     span: Span,
 };
 
+/// `time PIPELINE` or `time { BODY }` — behavioral wrapper. The body
+/// runs unchanged; the wrapper records wall + user + sys time around
+/// the entire subtree's execution and emits a single dim-on-tty line
+/// to stderr after the body completes. Exit status of the wrapped
+/// form is the body's exit status — `time` is transparent to
+/// `$?`, `&&`, `||`, and pipefail. PLAN §3.7 (Job carries timing) +
+/// §14 (`Pipeline` correctness / `Job` control).
+pub const TimedShape = struct {
+    body: *const Shape,
+    span: Span,
+};
+
 // =============================================================================
 // Shape union
 // =============================================================================
@@ -287,7 +299,8 @@ pub const Shape = union(enum) {
     conditional: ConditionalShape,
     @"while": WhileShape,
     @"for": ForShape,
-    @"match": MatchShape,
+    match: MatchShape,
+    timed: TimedShape,
     cmd_def: CmdDefShape,
     str_def: StrDefShape,
 
@@ -304,7 +317,8 @@ pub const Shape = union(enum) {
             .conditional => |c| c.span,
             .@"while" => |w| w.span,
             .@"for" => |f| f.span,
-            .@"match" => |m| m.span,
+            .match => |m| m.span,
+            .timed => |t| t.span,
             .cmd_def => |d| d.span,
             .str_def => |d| d.span,
         };
@@ -355,7 +369,12 @@ pub fn parse(source: Source, alloc: Allocator, sink: ?Sink) !Parsed {
         // fallback so callers can match on it. Future code split can
         // break out specific categories without breaking existing tests.
         try diag.emit(sink, diag.make(
-            .shape, .@"error", "SH0001", msg, source, span,
+            .shape,
+            .@"error",
+            "SH0001",
+            msg,
+            source,
+            span,
         ));
         return error.ParserError;
     };
@@ -390,7 +409,8 @@ fn convertShape(
         .@"if" => Shape{ .conditional = try convertConditional(alloc, source, items[1..], sink) },
         .@"while" => Shape{ .@"while" = try convertWhile(alloc, source, items[1..], sink) },
         .@"for" => Shape{ .@"for" = try convertFor(alloc, source, items[1..], sink) },
-        .@"match" => Shape{ .@"match" = try convertMatch(alloc, source, items[1..], sink) },
+        .match => Shape{ .match = try convertMatch(alloc, source, items[1..], sink) },
+        .timed => Shape{ .timed = try convertTimed(alloc, source, items[1..], spanOfList(items), sink) },
         .cmd_def => Shape{ .cmd_def = try convertCmdDef(alloc, source, items[1..], sink) },
         .str_def => Shape{ .str_def = try convertStrDef(source, items[1..], sink) },
         else => {
@@ -509,7 +529,8 @@ fn convertStage(
         .@"if" => Shape{ .conditional = try convertConditional(alloc, source, items[1..], sink) },
         .@"while" => Shape{ .@"while" = try convertWhile(alloc, source, items[1..], sink) },
         .@"for" => Shape{ .@"for" = try convertFor(alloc, source, items[1..], sink) },
-        .@"match" => Shape{ .@"match" = try convertMatch(alloc, source, items[1..], sink) },
+        .match => Shape{ .match = try convertMatch(alloc, source, items[1..], sink) },
+        .timed => Shape{ .timed = try convertTimed(alloc, source, items[1..], spanOfList(items), sink) },
         .cmd_def => Shape{ .cmd_def = try convertCmdDef(alloc, source, items[1..], sink) },
         .str_def => Shape{ .str_def = try convertStrDef(source, items[1..], sink) },
         else => {
@@ -891,6 +912,26 @@ fn convertFor(
         .body = body_ptr,
         .span = .{ .start = binding_span.start, .end = body.span().end },
     };
+}
+
+fn convertTimed(
+    alloc: Allocator,
+    source: Source,
+    children: []const parser.Sexp,
+    full_span: Span,
+    sink: ?Sink,
+) anyerror!TimedShape {
+    if (children.len != 1) {
+        try emitBadShape(source, .nil, sink, "time requires exactly one body (pipeline or block)");
+        return error.InvalidShape;
+    }
+    const body = try convertStage(alloc, source, children[0], sink);
+    const body_ptr = try alloc.create(Shape);
+    body_ptr.* = body;
+    // `full_span` covers `time` through the end of the body so
+    // diagnostics, dumps, and highlighting all paint the wrapper as
+    // one unit. The body itself keeps its own narrower span.
+    return .{ .body = body_ptr, .span = full_span };
 }
 
 fn convertMatch(
@@ -1878,10 +1919,18 @@ fn dumpShape(source: Source, s: Shape, depth: u32, w: *Writer, opts: DumpOptions
         .conditional => |c| try dumpConditional(source, c, depth, w, opts),
         .@"while" => |x| try dumpWhile(source, x, depth, w, opts),
         .@"for" => |x| try dumpFor(source, x, depth, w, opts),
-        .@"match" => |x| try dumpMatch(source, x, depth, w, opts),
+        .match => |x| try dumpMatch(source, x, depth, w, opts),
+        .timed => |t| try dumpTimed(source, t, depth, w, opts),
         .cmd_def => |d| try dumpCmdDef(source, d, depth, w, opts),
         .str_def => |d| try dumpStrDef(d, depth, w, opts),
     }
+}
+
+fn dumpTimed(source: Source, t: TimedShape, depth: u32, w: *Writer, opts: DumpOptions) WriteError!void {
+    try w.writeAll("timed");
+    try maybeSpan(t.span, w, opts);
+    try w.writeByte('\n');
+    try dumpShape(source, t.body.*, depth + 1, w, opts);
 }
 
 fn dumpWord(ws: WordShape, w: *Writer, opts: DumpOptions) WriteError!void {

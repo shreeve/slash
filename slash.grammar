@@ -198,6 +198,25 @@ sequence_item   = pipeline
                 | assigns
                 | cmd_def
                 | str_def
+                | timed_form
+
+# `time BODY` — behavioral wrapper that reports real / user / sys
+# timing to stderr after the body completes. Exit status of the
+# wrapped form propagates as the value of the construct (matches
+# bash `time`). PLAN §3.7 (Job timing) + §14 (Pipeline / Job).
+#
+# Body grammar accepts every natural shape — pipelines, blocks, and
+# the four control-flow constructs — so `time for x in ... { body }`
+# parses as one wrapped unit rather than requiring an explicit
+# `time { for x ... }` brace. Assignments and `cmd`/`str` defs are
+# intentionally excluded; timing a definition would be measuring
+# the noop bookkeeping cost and is never what the user meant.
+timed_form      = TIME pipeline                         → (timed 2)
+                | TIME block_stmt                       → (timed 2)
+                | TIME conditional                      → (timed 2)
+                | TIME while_loop                       → (timed 2)
+                | TIME for_loop                         → (timed 2)
+                | TIME match_stmt                       → (timed 2)
 
 sequence_tail   = SEMI    sequence_item                 → (seq_always 2)
                 | SEMI                                  → (seq_always _)

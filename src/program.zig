@@ -190,7 +190,17 @@ pub const Program = union(enum) {
     conditional: Conditional,
     @"while": While,
     @"for": For,
-    @"match": Match,
+    match: Match,
+    /// `time PIPELINE` / `time { BODY }` — behavioral wrapper. The
+    /// body's execution is timed end-to-end (wall + user+sys child
+    /// CPU) and a single `real / user / sys` line is emitted to
+    /// stderr after completion. The wrapper is transparent to exit
+    /// status, pipefail, `&&`/`||`, and `$?` — it returns whatever
+    /// the body returned.
+    timed: struct {
+        body: *const Program,
+        span: Span,
+    },
     define: Define,
     str_def: StrDef,
 
@@ -206,7 +216,8 @@ pub const Program = union(enum) {
             .conditional => |c| c.span,
             .@"while" => |w| w.span,
             .@"for" => |f| f.span,
-            .@"match" => |m| m.span,
+            .match => |m| m.span,
+            .timed => |t| t.span,
             .define => |d| d.span,
             .str_def => |d| d.span,
         };
@@ -248,7 +259,8 @@ fn lowerShape(shape: shape_mod.Shape, ctx: *const LowerContext, sink: ?Sink) any
         .conditional => |c| try lowerConditional(c, ctx, sink),
         .@"while" => |w| try lowerWhile(w, ctx, sink),
         .@"for" => |f| try lowerFor(f, ctx, sink),
-        .@"match" => |m| try lowerMatch(m, ctx, sink),
+        .match => |m| try lowerMatch(m, ctx, sink),
+        .timed => |t| try lowerTimed(t, ctx, sink),
         .cmd_def => |d| try lowerCmdDef(d, ctx, sink),
         .str_def => |d| try lowerStrDef(d, ctx),
         .word => {
@@ -400,6 +412,11 @@ fn lowerStrDef(d: shape_mod.StrDefShape, ctx: *const LowerContext) anyerror!*con
     } });
 }
 
+fn lowerTimed(t: shape_mod.TimedShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
+    const body = try lowerShape(t.body.*, ctx, sink);
+    return put(ctx.alloc, .{ .timed = .{ .body = body, .span = t.span } });
+}
+
 fn lowerMatch(m: shape_mod.MatchShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
     const subject = try word_mod.lowerWord(m.subject, ctx);
 
@@ -414,7 +431,7 @@ fn lowerMatch(m: shape_mod.MatchShape, ctx: *const LowerContext, sink: ?Sink) an
         arms[ai] = .{ .patterns = pats, .body = body, .span = arm_shape.span };
     }
 
-    return put(ctx.alloc, .{ .@"match" = .{
+    return put(ctx.alloc, .{ .match = .{
         .subject = subject,
         .arms = arms,
         .span = m.span,
@@ -439,9 +456,12 @@ fn literalPattern(
             .glob => |g| try buf.appendSlice(ctx.alloc, g),
             else => {
                 try diag.emit(sink, diag.make(
-                    .lower, .@"error", "LW0010",
+                    .lower,
+                    .@"error",
+                    "LW0010",
                     "match pattern must be a literal pattern (no $var, command substitution, or runtime-generated patterns)",
-                    ctx.source, span,
+                    ctx.source,
+                    span,
                 ));
                 return error.InvalidShape;
             },
@@ -601,7 +621,7 @@ pub fn clone(p: *const Program, alloc: Allocator) anyerror!*const Program {
             .redirects = try cloneRedirects(x.redirects, alloc),
             .span = x.span,
         } },
-        .@"match" => |m| blk: {
+        .match => |m| blk: {
             var arms = try alloc.alloc(MatchArm, m.arms.len);
             for (m.arms, 0..) |arm, i| {
                 var pats = try alloc.alloc([]const u8, arm.patterns.len);
@@ -612,12 +632,16 @@ pub fn clone(p: *const Program, alloc: Allocator) anyerror!*const Program {
                     .span = arm.span,
                 };
             }
-            break :blk .{ .@"match" = .{
+            break :blk .{ .match = .{
                 .subject = try cloneWord(m.subject, alloc),
                 .arms = arms,
                 .span = m.span,
             } };
         },
+        .timed => |t| .{ .timed = .{
+            .body = try clone(t.body, alloc),
+            .span = t.span,
+        } },
         .define => |d| .{ .define = .{
             .name = try alloc.dupe(u8, d.name),
             .body = try clone(d.body, alloc),
@@ -753,7 +777,13 @@ fn dumpProgram(source: Source, p: *const Program, depth: u32, w: *Writer, opts: 
         .conditional => |c| try dumpConditional(source, c, depth, w, opts),
         .@"while" => |x| try dumpWhile(source, x, depth, w, opts),
         .@"for" => |x| try dumpFor(source, x, depth, w, opts),
-        .@"match" => |x| try dumpMatch(source, x, depth, w, opts),
+        .match => |x| try dumpMatch(source, x, depth, w, opts),
+        .timed => |t| {
+            try w.writeAll("timed");
+            try maybeSpan(t.span, w, opts);
+            try w.writeByte('\n');
+            try dumpProgram(source, t.body, depth + 1, w, opts);
+        },
         .define => |d| try dumpDefine(source, d, depth, w, opts),
         .str_def => |d| try dumpStrDef(d, w, opts),
     }

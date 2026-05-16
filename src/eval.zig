@@ -144,6 +144,7 @@ fn evalProgram(
         .@"while" => |w| try evalWhile(w, session, ctx, sink),
         .@"for" => |f| try evalFor(f, session, ctx, sink),
         .match => |m| try evalMatch(m, session, ctx, sink),
+        .timed => |t| try evalTimed(t, session, ctx, sink),
         .define => |d| try evalDefine(d, session, ctx, sink),
         .str_def => |d| try evalStrDef(d, session, sink),
     };
@@ -1453,6 +1454,115 @@ fn evalMatch(
     const j = try session.jobs.create(true, false, "<match>");
     session.jobs.completeZeroChild(j, .{ .exited = 1 });
     return .{ .job = j, .expression_result = .{ .exited = 1 } };
+}
+
+// =============================================================================
+// `time` — behavioral wrapper that times the wrapped subtree
+// =============================================================================
+//
+// PLAN §3.7: `Job` carries timing. PLAN §14: `Pipeline` correctness
+// + `Job` control. `time` is the first behavioral wrapper to ship.
+//
+// Wall clock comes from `clock_gettime(CLOCK_MONOTONIC)` so the
+// figure is immune to NTP jumps / suspend skew. CPU comes from
+// `getrusage(SELF) + getrusage(CHILDREN)` deltas — the SELF piece
+// captures CPU the shell itself spent on builtins / loops /
+// expansion inside the wrapped body; the CHILDREN piece captures
+// CPU forked children burned. Summing gives the honest "what did
+// this body cost in CPU" answer. (Bash's `time` reports children
+// only, so `time echo hi` shows 0 in bash but a small positive
+// number in slash. We pick honesty over bash parity here.)
+//
+// Caveat tracked in HANDOFF: `RUSAGE_CHILDREN` is wait-based and
+// process-global. If a previously-backgrounded job is reaped
+// during the body, its CPU shows up in our delta even though it
+// wasn't part of the wrapped subtree. The proper fix is per-Job
+// rusage accounting at the `Job` layer (PLAN §3.7 alludes to it);
+// out of scope for the first wrapper.
+
+const RUSAGE_SELF: i32 = 0;
+const RUSAGE_CHILDREN: i32 = -1;
+
+/// Snapshot of the three numbers `time` needs: wall (monotonic), and
+/// SELF+CHILDREN summed user/sys. Sampling both rusage flavors at
+/// each boundary means a body that mixes builtins (shell CPU) with
+/// forked children (child CPU) gets the honest sum, rather than
+/// bash's children-only undercount.
+const TimingSnap = struct {
+    wall_ns: i128,
+    user_us: i64,
+    sys_us: i64,
+
+    fn now() TimingSnap {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(std.posix.CLOCK.MONOTONIC, &ts);
+        const self = std.posix.getrusage(RUSAGE_SELF);
+        const children = std.posix.getrusage(RUSAGE_CHILDREN);
+        return .{
+            .wall_ns = @as(i128, ts.sec) * std.time.ns_per_s + @as(i128, ts.nsec),
+            .user_us = timevalMicros(self.utime) + timevalMicros(children.utime),
+            .sys_us = timevalMicros(self.stime) + timevalMicros(children.stime),
+        };
+    }
+};
+
+fn timevalMicros(tv: std.posix.timeval) i64 {
+    return @as(i64, tv.sec) * std.time.us_per_s + @as(i64, tv.usec);
+}
+
+/// `write(2)` retry loop. Stderr is unbuffered + (usually) a TTY,
+/// so EINTR is the only realistic retry case; EAGAIN should not
+/// happen on a blocking fd. Any non-EINTR failure becomes
+/// "best-effort done" — losing a timing line is better than
+/// stalling the shell.
+fn writeAllStderr(bytes: []const u8) void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = std.c.write(2, bytes.ptr + off, bytes.len - off);
+        if (n < 0) {
+            if (std.c.errno(@as(c_int, -1)) == .INTR) continue;
+            return;
+        }
+        if (n == 0) return;
+        off += @intCast(n);
+    }
+}
+
+fn emitTiming(start: TimingSnap) void {
+    const end = TimingSnap.now();
+    const wall_s = @as(f64, @floatFromInt(end.wall_ns - start.wall_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s));
+    const user_s = @as(f64, @floatFromInt(end.user_us - start.user_us)) / @as(f64, @floatFromInt(std.time.us_per_s));
+    const sys_s = @as(f64, @floatFromInt(end.sys_us - start.sys_us)) / @as(f64, @floatFromInt(std.time.us_per_s));
+
+    const is_tty = std.c.isatty(2) != 0;
+    const dim: []const u8 = if (is_tty) "\x1b[2m" else "";
+    const reset: []const u8 = if (is_tty) "\x1b[0m" else "";
+
+    var buf: [256]u8 = undefined;
+    const text = std.fmt.bufPrint(
+        &buf,
+        "{s}real  {d: >7.3}s\nuser  {d: >7.3}s\nsys   {d: >7.3}s\n{s}",
+        .{ dim, wall_s, user_s, sys_s, reset },
+    ) catch return;
+    writeAllStderr(text);
+}
+
+fn evalTimed(
+    t: anytype,
+    session: *Session,
+    ctx: EvalContext,
+    sink: ?Sink,
+) anyerror!EvalOutcome {
+    const start = TimingSnap.now();
+    // Emit the timing line even if the body throws a Zig-level
+    // error: the wrapper is transparent to the body's outcome, and
+    // a partial timing reading is more useful than none when
+    // debugging "what took so long?"
+    errdefer emitTiming(start);
+
+    const outcome = try evalProgram(t.body, session, ctx, sink);
+    emitTiming(start);
+    return outcome;
 }
 
 fn evalFor(
