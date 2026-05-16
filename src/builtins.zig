@@ -1905,6 +1905,10 @@ fn keyFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!
         .child => return .{ .exited = 0 },
     };
 
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "--probe")) {
+        return keyProbe(io);
+    }
+
     if (args.len == 0) return keyList(session, io);
     if (std.mem.eql(u8, args[0], "--reset")) {
         session.keybindings.clearAll();
@@ -2174,4 +2178,425 @@ fn snakeToKebab(s: []const u8, buf: []u8) ![]u8 {
         buf[i] = if (c == '_') '-' else c;
     }
     return buf[0..s.len];
+}
+
+// =============================================================================
+// `key --probe` — interactive keystroke diagnostic
+// =============================================================================
+//
+// Reads one keystroke at a time from stdin in raw mode and pretty-
+// prints what slash sees: the canonical chord name (`Alt-L`,
+// `Ctrl-X`, `Up`, ...), the raw bytes the terminal emitted, and
+// — critically — a diagnostic when the bytes look like a macOS
+// "Option as compose character" sequence (`Option-L` → `¬`),
+// which is the most common reason Meta bindings fail to fire on
+// default-config macOS terminals.
+//
+// Exit on:
+//   - Two bare-Escape presses in a row (the canonical "I want out"
+//     gesture in escape-sensitive UIs)
+//   - 30 seconds of input idle
+
+const ProbeKind = enum {
+    char_plain,
+    ctrl,
+    bare_esc,
+    alt,
+    csi,
+    ss3,
+    multibyte_or_compose,
+    unknown_short,
+};
+
+const ProbeEvent = struct {
+    kind: ProbeKind,
+    /// Raw bytes the terminal sent for this event. Borrowed from
+    /// the probe's read buffer; valid only for the current frame.
+    raw: []const u8,
+    /// For `.char_plain` / `.ctrl` / `.alt`: the printable character
+    /// the key represents (e.g. 'l' for Alt-l). Zero otherwise.
+    ch: u8 = 0,
+    /// For `.csi` / `.ss3`: a stable name we can recognize (`Up`,
+    /// `F7`, ...). Empty for sequences we don't decode.
+    named: []const u8 = "",
+};
+
+fn keyProbe(io: BuiltinIo) anyerror!Result {
+    if (std.c.isatty(0) == 0) {
+        _ = writeAllToFd(io.stderr, "key --probe: stdin is not a TTY\n");
+        return .{ .exited = 1 };
+    }
+
+    const saved = std.posix.tcgetattr(0) catch {
+        _ = writeAllToFd(io.stderr, "key --probe: tcgetattr failed\n");
+        return .{ .exited = 1 };
+    };
+    defer std.posix.tcsetattr(0, .DRAIN, saved) catch {};
+
+    var raw = saved;
+    raw.lflag.ICANON = false;
+    raw.lflag.ECHO = false;
+    // Disable ISIG so Ctrl-C arrives as byte 0x03 and we can shut
+    // down the probe cleanly — restoring termios via the `defer`
+    // above — instead of having SIGINT kill the slash process with
+    // the terminal still in raw mode.
+    raw.lflag.ISIG = false;
+    raw.cc[@intFromEnum(std.c.V.MIN)] = 0;
+    raw.cc[@intFromEnum(std.c.V.TIME)] = 0;
+    std.posix.tcsetattr(0, .DRAIN, raw) catch {
+        _ = writeAllToFd(io.stderr, "key --probe: tcsetattr failed\n");
+        return .{ .exited = 1 };
+    };
+
+    _ = writeAllToFd(io.stdout,
+        \\key --probe: press any key to see how slash names it.
+        \\             press Esc twice (or Ctrl-C) to exit, 30s idle also exits.
+        \\             if your terminal acts weird after, run: stty sane
+        \\
+        \\
+    );
+
+    var read_buf: [16]u8 = undefined;
+    var prev_was_bare_esc = false;
+    var idle_polls: u32 = 0;
+    const idle_exit_polls: u32 = 60; // 60 × 500ms = 30s
+
+    while (idle_polls < idle_exit_polls) {
+        const ev_opt = probeReadEvent(&read_buf) catch break;
+        const ev = ev_opt orelse {
+            idle_polls += 1;
+            continue;
+        };
+        idle_polls = 0;
+
+        // Exit gestures:
+        //
+        //   - Two bare-Escapes in a row with no other event in
+        //     between (slow human press; first one resolves after
+        //     the 100ms Meta window).
+        //   - One `Alt-Esc` event (rapid double-Esc — both bytes
+        //     arrive within the Meta window and zigline-style
+        //     collapses them into `\e \e`).
+        //   - Ctrl-C (byte 0x03). ISIG was disabled at raw-mode
+        //     setup so SIGINT doesn't terminate slash mid-probe
+        //     and leave the terminal in raw mode; the byte
+        //     arrives as a normal control byte instead.
+        const is_alt_esc = (ev.kind == .alt and ev.ch == 0x1b);
+        const is_ctrl_c = (ev.kind == .ctrl and ev.ch == 0x03);
+        if (ev.kind == .bare_esc and prev_was_bare_esc) {
+            _ = writeAllToFd(io.stdout, "\nkey --probe: exit\n");
+            return .{ .exited = 0 };
+        }
+        if (is_alt_esc) {
+            _ = writeAllToFd(io.stdout, "\nkey --probe: exit (double-Esc)\n");
+            return .{ .exited = 0 };
+        }
+        if (is_ctrl_c) {
+            _ = writeAllToFd(io.stdout, "\nkey --probe: exit (Ctrl-C)\n");
+            return .{ .exited = 130 };
+        }
+        prev_was_bare_esc = (ev.kind == .bare_esc);
+
+        printProbeEvent(io.stdout, ev);
+    }
+    _ = writeAllToFd(io.stdout, "\nkey --probe: 30s idle, exit\n");
+    return .{ .exited = 0 };
+}
+
+/// Read one logical event from stdin. Returns `null` if 500ms passes
+/// with no input (lets the idle-exit loop tick). Returns an error
+/// only on fatal read failures.
+fn probeReadEvent(buf: *[16]u8) !?ProbeEvent {
+    // First byte with a 500ms wait so the idle-exit loop has a
+    // sensible tick rate.
+    const first = (try probeReadByte(500)) orelse return null;
+    buf[0] = first;
+
+    if (first == 0x1b) {
+        // ESC: could be bare or the start of a CSI/SS3/Alt sequence.
+        // We use a 100ms window for the next byte — longer than
+        // zigline's 50ms (so the probe is forgiving for users who
+        // type Esc+X manually) but short enough that bare Esc still
+        // resolves crisply for the double-Esc exit gesture.
+        const next = (try probeReadByte(100)) orelse {
+            return .{ .kind = .bare_esc, .raw = buf[0..1] };
+        };
+        buf[1] = next;
+
+        if (next == '[' or next == 'O') {
+            // CSI / SS3 sequence — keep reading until a final byte
+            // (0x40..0x7e). Cap at buffer size; longer sequences
+            // are anomalous.
+            var len: usize = 2;
+            while (len < buf.len) : (len += 1) {
+                const b = (try probeReadByte(50)) orelse break;
+                buf[len] = b;
+                if (b >= 0x40 and b <= 0x7e) {
+                    len += 1;
+                    break;
+                }
+            }
+            const slice = buf[0..len];
+            const named = decodeCsiSs3(slice);
+            return .{
+                .kind = if (next == 'O') .ss3 else .csi,
+                .raw = slice,
+                .named = named,
+            };
+        }
+
+        // Otherwise: Alt-modifier prefix (most common).
+        return .{
+            .kind = .alt,
+            .raw = buf[0..2],
+            .ch = next,
+        };
+    }
+
+    if (first < 0x20 or first == 0x7f) {
+        return .{
+            .kind = .ctrl,
+            .raw = buf[0..1],
+            .ch = first,
+        };
+    }
+
+    if (first >= 0x80) {
+        // Multi-byte UTF-8 or macOS compose-char output. Read up to
+        // 3 more bytes (UTF-8 max is 4 total) with a tight window
+        // since the terminal sends them back-to-back.
+        var len: usize = 1;
+        while (len < 4) : (len += 1) {
+            const b = (try probeReadByte(20)) orelse break;
+            buf[len] = b;
+        }
+        return .{
+            .kind = .multibyte_or_compose,
+            .raw = buf[0..len],
+        };
+    }
+
+    // Plain printable ASCII.
+    return .{
+        .kind = .char_plain,
+        .raw = buf[0..1],
+        .ch = first,
+    };
+}
+
+/// Wait up to `timeout_ms` for a byte on stdin. Returns `null` on
+/// timeout, the byte on success. Errors on POLL.HUP/NVAL/ERR so
+/// the caller breaks out instead of busy-looping when the PTY's
+/// master end has closed (most common cause: test teardown).
+fn probeReadByte(timeout_ms: i32) !?u8 {
+    var pfd: std.c.pollfd = .{ .fd = 0, .events = std.c.POLL.IN, .revents = 0 };
+    while (true) {
+        const rc = std.c.poll(@ptrCast(&pfd), 1, timeout_ms);
+        if (rc < 0) {
+            if (std.c.errno(rc) == .INTR) continue;
+            return error.PollFailed;
+        }
+        if (rc == 0) return null;
+        // PTY master closed / fd became invalid / kernel-side error
+        // — without this check, poll returns immediately every call
+        // with revents != POLL.IN, my code returned null, the outer
+        // loop incremented idle_polls and immediately re-polled,
+        // burning 100% CPU until the 30s idle exit. Surface as an
+        // error so the outer loop breaks cleanly.
+        if (pfd.revents & (std.c.POLL.HUP | std.c.POLL.NVAL | std.c.POLL.ERR) != 0) {
+            return error.StreamClosed;
+        }
+        if (pfd.revents & std.c.POLL.IN == 0) return null;
+        var b: [1]u8 = undefined;
+        const n = std.c.read(0, &b, 1);
+        if (n < 0) {
+            if (std.c.errno(@as(c_int, -1)) == .INTR) continue;
+            return error.ReadFailed;
+        }
+        if (n == 0) return null;
+        return b[0];
+    }
+}
+
+fn decodeCsiSs3(bytes: []const u8) []const u8 {
+    // Common CSI / SS3 sequences. Not exhaustive — we name the keys
+    // a user is likely to bind. Anything else surfaces as just the
+    // raw-byte view, which is still useful for advanced cases.
+    if (bytes.len < 3) return "";
+    const final = bytes[bytes.len - 1];
+
+    // SS3 form: `\eO<final>` — older terminals send this for
+    // arrows and F-keys.
+    if (bytes[1] == 'O' and bytes.len == 3) {
+        return switch (final) {
+            'A' => "Up",
+            'B' => "Down",
+            'C' => "Right",
+            'D' => "Left",
+            'H' => "Home",
+            'F' => "End",
+            'P' => "F1",
+            'Q' => "F2",
+            'R' => "F3",
+            'S' => "F4",
+            else => "",
+        };
+    }
+    // CSI form: `\e[<params><final>`.
+    if (bytes[1] == '[') {
+        const params = bytes[2 .. bytes.len - 1];
+        if (params.len == 0) {
+            return switch (final) {
+                'A' => "Up",
+                'B' => "Down",
+                'C' => "Right",
+                'D' => "Left",
+                'H' => "Home",
+                'F' => "End",
+                else => "",
+            };
+        }
+        // `\e[N~` form for PageUp/Down/Insert/Delete/Home/End/F-keys.
+        if (final == '~') {
+            return switch (parseParamInt(params)) {
+                1, 7 => "Home",
+                2 => "Insert",
+                3 => "Delete",
+                4, 8 => "End",
+                5 => "PageUp",
+                6 => "PageDown",
+                11 => "F1",
+                12 => "F2",
+                13 => "F3",
+                14 => "F4",
+                15 => "F5",
+                17 => "F6",
+                18 => "F7",
+                19 => "F8",
+                20 => "F9",
+                21 => "F10",
+                23 => "F11",
+                24 => "F12",
+                else => "",
+            };
+        }
+    }
+    return "";
+}
+
+fn parseParamInt(s: []const u8) u32 {
+    var n: u32 = 0;
+    for (s) |c| {
+        if (c < '0' or c > '9') break;
+        n = n * 10 + (c - '0');
+    }
+    return n;
+}
+
+/// Render one probe event directly to `fd`. Each `printOne...`
+/// arm writes through a `[256]u8` `bufPrint` then flushes — the
+/// multibyte/compose-char arm is the exception, writing a
+/// multi-line diagnostic in multiple chunks because its body is
+/// too long for any single fixed buffer (and silent truncation
+/// on the most-important diagnostic was an early bug GPT 5.5
+/// caught in review).
+fn printProbeEvent(fd: i32, ev: ProbeEvent) void {
+    switch (ev.kind) {
+        .char_plain => {
+            const c = ev.ch;
+            const safe: u8 = if (c >= 0x20 and c < 0x7f) c else '?';
+            printOneLine(fd, "  '{c}'                   ", .{safe}, ev.raw, "   plain character; binds with `key {c} some-action`\n", .{safe});
+        },
+        .ctrl => {
+            const c = ev.ch;
+            const letter: u8 = if (c == 0x7f) '?' else if (c >= 1 and c <= 26) ('A' + c - 1) else ' ';
+            printOneLine(fd, "  Ctrl-{c}               ", .{letter}, ev.raw, "   binds with `key Ctrl-{c} some-action`\n", .{letter});
+        },
+        .bare_esc => {
+            printOneLine(fd, "  Esc (bare)            ", .{}, ev.raw, "   press Esc again to exit probe\n", .{});
+        },
+        .alt => {
+            const c = ev.ch;
+            const safe: u8 = if (c >= 0x20 and c < 0x7f) c else '?';
+            printOneLine(fd, "  Alt-{c}                 ", .{safe}, ev.raw, "   binds with `key Alt-{c} some-action` (Option-{c} on Mac)\n", .{ safe, safe });
+        },
+        .csi, .ss3 => {
+            if (ev.named.len > 0) {
+                printOneLine(fd, "  {s: <20}  ", .{ev.named}, ev.raw, "   binds with `key {s} some-action`\n", .{ev.named});
+            } else {
+                printOneLine(fd, "  (unrecognized CSI)    ", .{}, ev.raw, "\n", .{});
+            }
+        },
+        .multibyte_or_compose => {
+            // Three-part write: a header line, then a multi-line
+            // diagnostic block. Each piece fits its own small
+            // buffer; together they exceed the 256-byte ceiling
+            // a single `bufPrint` would have.
+            var buf: [128]u8 = undefined;
+            // Header: render the actual character (capped) + hex bytes.
+            const len = @min(ev.raw.len, 10);
+            const header = std.fmt.bufPrint(&buf, "  {s}", .{ev.raw[0..len]}) catch return;
+            _ = writeAllToFd(fd, header);
+            // Pad to column 22 so the hex column lines up with the
+            // rest of the output.
+            const pad_count: usize = if (len < 22) @as(usize, 22) - len - 2 else 1;
+            var i: usize = 0;
+            while (i < pad_count) : (i += 1) _ = writeAllToFd(fd, " ");
+            writeHexBytesToFd(fd, ev.raw);
+            _ = writeAllToFd(fd, "\n");
+            // Multi-line diagnostic body — emit as a single static
+            // string so the buffer-size question doesn't recur.
+            _ = writeAllToFd(fd,
+                \\    ↑ multi-byte UTF-8 or macOS compose char (Option-X with terminal in compose mode).
+                \\      Enable Meta in your terminal preferences to bind Option-X:
+                \\        Terminal.app: Profile → Keyboard → "Use Option as Meta key"
+                \\        iTerm2:       Profile → Keys → "Left Option Key" → Esc+
+                \\
+            );
+        },
+        .unknown_short => {
+            printOneLine(fd, "  (unknown short seq)   ", .{}, ev.raw, "\n", .{});
+        },
+    }
+}
+
+/// Shared per-event formatter: "<prefix><hex bytes><suffix>" in one
+/// fixed buffer. Truncation-tolerant — if the formatted result
+/// would exceed the buffer, the line is silently dropped (matches
+/// the existing `bufPrint catch return` pattern elsewhere in the
+/// builtin). All current callers fit comfortably.
+fn printOneLine(
+    fd: i32,
+    comptime prefix_fmt: []const u8,
+    prefix_args: anytype,
+    raw: []const u8,
+    comptime suffix_fmt: []const u8,
+    suffix_args: anytype,
+) void {
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    w.print(prefix_fmt, prefix_args) catch return;
+    writeHexBytes(&w, raw);
+    w.print(suffix_fmt, suffix_args) catch return;
+    _ = writeAllToFd(fd, w.buffered());
+}
+
+fn writeHexBytes(w: *std.Io.Writer, bytes: []const u8) void {
+    w.writeByte('(') catch return;
+    for (bytes, 0..) |b, i| {
+        if (i != 0) w.writeByte(' ') catch return;
+        w.print("0x{x:0>2}", .{b}) catch return;
+    }
+    w.writeByte(')') catch return;
+}
+
+fn writeHexBytesToFd(fd: i32, bytes: []const u8) void {
+    _ = writeAllToFd(fd, "(");
+    for (bytes, 0..) |b, i| {
+        if (i != 0) _ = writeAllToFd(fd, " ");
+        var buf: [8]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "0x{x:0>2}", .{b}) catch continue;
+        _ = writeAllToFd(fd, s);
+    }
+    _ = writeAllToFd(fd, ")");
 }

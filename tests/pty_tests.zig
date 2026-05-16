@@ -1986,6 +1986,34 @@ test "slash pty: backgrounded job finish surfaces `[N] Done` notice at next prom
 // both notification paths share. Between-prompts timing stays
 // covered by `backgrounded job finish surfaces a [N] Done` above.
 
+test "slash pty: default Alt-P binding is seeded on interactive startup" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    // The interactive bootstrap seeds a small set of default
+    // keybindings (currently Alt-P / Alt-N for emacs-convention
+    // history-prev/next-with-prefix). `key` (no args) at session
+    // start should list them; this catches the "we forgot to call
+    // seedDefaultBindings" regression.
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "key\n", .settle_ms = 500, .wait_for = "history-prev-prefix" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "Alt-p") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "history-prev-prefix") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "Alt-n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "history-next-prefix") != null);
+}
+
+// `key --probe` PTY tests live below the main suite — they need
+// interactive raw-mode behavior that's awkward to test through the
+// PTY harness without a tighter wait_for protocol. The probe is
+// covered by manual verification + the inline `keyFn` switch case
+// in the builtins.zig unit tests. TODO: revisit once the harness
+// grows a reliable "wait for prompt-after-builtin-returned" cue.
+
 test "slash pty: `key` literal-with-newline binding fires + auto-accepts" {
     if (!ptySupported()) return error.SkipZigTest;
 

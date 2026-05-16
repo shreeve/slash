@@ -2332,6 +2332,37 @@ fn bootstrapInteractive(session: *session_mod.Session) void {
     // order matters: this must come AFTER `builtins.installSession`
     // (handled by the caller before invoking bootstrapInteractive).
     installChildEventHandler();
+
+    // Step 9: seed a small set of default key bindings. Conservative
+    // set — emacs-convention Meta-prefix aliases for things slash
+    // already does well, so users with the right terminal config
+    // (Option-as-Meta on macOS, native Alt on Linux) get useful
+    // shortcuts out of the box without having to author them. A
+    // user `key Option-X foo` line in `.slashrc` overrides any
+    // default with the same chord (last bind wins).
+    //
+    // Bindings the user might want but we deliberately don't seed
+    // (because they imply user-specific commands that may not exist):
+    // `Option-L → "ls -la\n"`, `Option-G → "git status\n"`, etc.
+    // The `.slashrc.example` template at the project root shows
+    // these as commented-out lines for users to copy.
+    seedDefaultBindings(session);
+}
+
+fn seedDefaultBindings(session: *session_mod.Session) void {
+    const defaults = [_]struct { spec: []const u8, action: keybinding.SlashCustomAction }{
+        // Emacs convention: Meta-P / Meta-N are history-prev/next-
+        // with-prefix-search. Slash's smart Up/Down arrows already
+        // do this; these are muscle-memory aliases for users
+        // coming from emacs / bash readline / zsh.
+        .{ .spec = "Alt-P", .action = .smart_history_prev },
+        .{ .spec = "Alt-N", .action = .smart_history_next },
+    };
+    for (defaults) |d| {
+        const parsed = keybinding.parseKeySpec(d.spec) catch continue;
+        const action = zigline.Action{ .custom = @intFromEnum(d.action) };
+        session.keybindings.putChord(parsed, .{ .action = action }) catch continue;
+    }
 }
 
 fn installInteractiveSignalHandlers() void {

@@ -1,0 +1,116 @@
+# =============================================================================
+# slash — example rc file
+# =============================================================================
+#
+# Copy or symlink this to `~/.slashrc` (or whichever path your slash
+# is configured to source) and uncomment the lines you want active.
+# Slash sources this file on every interactive session start.
+#
+# NOTHING in this file is required for slash to work. Out of the
+# box you get:
+#
+#   - prefix-aware Up/Down history navigation
+#   - autosuggestions (dim ghost text from history)
+#   - Tab completion (commands, paths, git subcommands, etc.)
+#   - reverse-i-search via Ctrl-R
+#   - Alt-P / Alt-N as emacs-style history-prev/next aliases
+#   - all the standard emacs editing keys (Ctrl-A, Ctrl-E, Alt-B, ...)
+#
+# This file shows the patterns most users want on top of that.
+
+
+# -----------------------------------------------------------------------------
+# Prompt
+# -----------------------------------------------------------------------------
+#
+# `$SLASH_PROMPT` picks a preset (default / rich / minimal). `$PROMPT`
+# (zsh-style format string) overrides the preset entirely — drop in
+# any zsh PROMPT and it just works.
+
+# export SLASH_PROMPT=rich
+
+# Steel-blue powerline-ish prompt with HH:MM:SS, user@host, cwd:
+# export PROMPT='%F{#ecede8}%K{#43669d}%D{%H:%M:%S} %F{#43669d}%K{#81a1c7}%F{#ecede8} %n@%m %F{#81a1c7}%K{}%F{#ecede8}%k %~> %f'
+
+
+# -----------------------------------------------------------------------------
+# Notifications
+# -----------------------------------------------------------------------------
+#
+# `$SLASH_NOTIFY=immediate` mirrors bash `set -b`: backgrounded
+# jobs print their `[N] Done <cmd>` line ABOVE the in-progress
+# prompt buffer the moment they finish, instead of waiting for
+# the next Enter. Leave unset for default (between-prompts).
+
+# export SLASH_NOTIFY=immediate
+
+
+# -----------------------------------------------------------------------------
+# Abbreviations — typed-name shortcuts (see `str -h` and PLAN §12)
+# -----------------------------------------------------------------------------
+#
+# `str NAME { body }` defines an editor-time literal-text rewrite.
+# Type `NAME` followed by Space or Enter; the visible buffer is
+# rewritten in place. Pure text → text; no expansion, no code.
+
+# str ..   { cd .. }
+# str ...  { cd ../.. }
+# str .... { cd ../../.. }
+# str -    { cd - }
+# str ll   { ls -la }
+# str gst  { git status }
+# str gl   { git log --oneline -20 }
+
+
+# -----------------------------------------------------------------------------
+# Key bindings — modifier-key shortcuts (see `key --actions`, `key --probe`)
+# -----------------------------------------------------------------------------
+#
+# Two forms:
+#
+#   key KEYSPEC bare-ident       # bind to a named editor action
+#   key KEYSPEC "literal text"   # type bytes; trailing \n = also accept
+#
+# KEYSPEC: Ctrl-X / Alt-X / Option-X (Mac alias) / Meta-X / Esc-X
+# (all four of the latter mean the same modifier), Ctrl-Alt-Right,
+# Shift-F7, etc.  `key --actions` lists every registered action.
+# `key --probe` opens an interactive diagnostic — press any key
+# and slash names it + shows the raw bytes, with a hint when the
+# bytes look like macOS Option-as-compose-char.
+#
+# IMPORTANT for macOS users: Option-X bindings only fire if your
+# terminal sends `\e X` when you press Option. By default both
+# Terminal.app and iTerm2 send the macOS compose character (`Option-L`
+# = `¬`) instead. To fix:
+#
+#   - Terminal.app: Profile → Keyboard → check "Use Option as Meta key"
+#   - iTerm2:       Profile → Keys → "Left Option Key" → set to "Esc+"
+#
+# Once that's flipped, every Option-X binding below will fire.
+
+# History navigation (these are seeded as defaults — listed here
+# so you know they exist):
+# key Alt-P history-prev-prefix       # match history backward by prefix
+# key Alt-N history-next-prefix       # match history forward by prefix
+
+# Universal shortcuts (uncomment any you'd actually use):
+# key Option-L "ls -la\n"             # list current dir
+# key Option-G "git status\n"         # git status
+# key Option-D "cd ~/Code\n"          # jump to your code dir
+# key Option-H "cd ~\n"               # go home
+
+# Pipe whatever's on the prompt into less:
+# key Option-\\ " | less\n"
+
+# A "comment this line, save for later" pattern (push current line
+# into history with a # in front, so it's recallable with Up + edit):
+# key Alt-# "#\n"
+
+
+# -----------------------------------------------------------------------------
+# Traps
+# -----------------------------------------------------------------------------
+#
+# `trap 'cmd' EXIT` runs the command when the shell exits.
+
+# trap 'echo "see ya"' EXIT
