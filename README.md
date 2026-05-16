@@ -93,7 +93,7 @@ programming language. The line editor is
 
 What ships today:
 
-- syntax highlighting as you type (BaseLexer-driven; one grammar)
+- syntax highlighting as you type (BaseLexer-driven; one grammar; distinct colors for keywords, commands, arguments, strings, variables, command substitutions, redirects, glob characters, assignments, comments)
 - `str` abbreviations (literal-bytes-to-literal-bytes editor rewrites)
 - persistent metadata-rich command history (per-cwd, frecency, dedup)
 - smart prefix-aware Up/Down navigation

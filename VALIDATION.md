@@ -224,3 +224,31 @@ see no change; `rich` is the explicit opt-in upgrade. The existing
 `$PROMPT` template path keeps full control for users who want it.
 
 ---
+
+## Targeted Headless Validation: 2026-05-15 23:58 UTC
+
+- commit: working tree (syntax highlighting polish)
+- os: Darwin 25.4.0 arm64 (macOS, M-series)
+- mode: in-process highlighter assertions (`zig build test-headless`)
+
+| # | test | result | note |
+|---|---|---|---|
+| 1 | `$(date)` distinct color | PASS | command substitution uses `cmd_subst` (lavender), not `variable` (amber) |
+| 2 | `$name` + `$(date)` coexist | PASS | each token gets its own class; no confusion in mixed expansions |
+| 3 | `>` vs `\|` color split | PASS | redirects route to `redirect`; pipe stays in `operator` |
+| 4 | `<<EOF` heredoc open | PASS | heredoc open sigil colored as a redirect |
+| 5 | `*.zig` glob char | PASS | `*` byte gets `glob` color; `.zig` stays argument |
+| 6 | `FOO=bar` assignment | PASS | LHS ident colored as `variable`; spurious `==` does not promote |
+
+**Tally:** 6 PASS, 0 FAIL, 0 SKIP.
+
+### Verdict
+
+The highlighter now distinguishes the categories the roadmap called
+out (variables, command substitutions, redirects, glob parts, heredoc
+bodies) without introducing a second tokenizer — every span is still
+driven by `parser.BaseLexer` plus a small post-tokenization scan
+inside bare-word idents. Spans stay sorted and non-overlapping, so
+zigline's renderer keeps every emitted color.
+
+---

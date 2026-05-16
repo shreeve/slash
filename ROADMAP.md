@@ -5,9 +5,9 @@ today and the next release. As items ship, **delete them from this
 file** in the same commit. The ROADMAP shrinks until empty; that's how
 the next release ships.
 
-Items are grouped by readiness: **ready now** vs **blocked on missing
-zigline primitives**. The remaining blocker is zigline transient input
-mode. Within each group, ship in whichever order makes sense.
+All slash-side ready-now items have shipped. The single remaining blocker
+is the zigline transient input mode primitive that the Ctrl-R reverse
+search UI depends on.
 
 > **The test that decides whether anything joins this list:**
 > Does this improve `Command` clarity, `Pipeline` correctness, `Program`
@@ -22,16 +22,6 @@ logic directly into the REPL loop. None of these items touch the
 execution kernel. Each one must stay constrained as defined in
 PLAN §12 "In scope as interactive UX" — no language semantics, no
 user shell code at editor events.
-
-## Interactive UX — ready now
-
-One item is unblocked.
-
-- **Syntax highlighting polish.** Already shipped as a feature. Expand
-  the token classes (variables, command substitutions, redirects,
-  glob parts, heredoc bodies). Always driven by the BaseLexer / one
-  grammar — never a second tokenizer. Uses zigline's existing
-  highlight hook.
 
 ## Interactive UX — blocked on zigline
 

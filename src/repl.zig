@@ -920,12 +920,32 @@ fn highlightBuffer(
                 at_command_pos = true;
                 continue;
             }
+            // NAME=value assignment: the BaseLexer the highlighter uses
+            // splits `FOO=bar` into `.ident FOO` + `.assign =` + `.ident
+            // bar`, but the slash parser (via the wrapper lexer) sees a
+            // fused `.name_eq` covering `FOO=`. Mirror that semantic at
+            // the highlight layer by coloring the ident as a variable
+            // when an unquoted `=` (and not `==`) follows immediately.
+            const followed_by_assign = end < buffer.len and
+                buffer[end] == '=' and
+                !(end + 1 < buffer.len and buffer[end + 1] == '=');
+            if (followed_by_assign) {
+                try spans.append(allocator, .{
+                    .start = start,
+                    .end = end,
+                    .style = .{ .fg = palette.variable },
+                });
+                // The LHS does not consume the command-position slot —
+                // a leading `FOO=value cmd` keeps `cmd` at command pos.
+                continue;
+            }
             const fg = if (at_command_pos) palette.command else palette.argument;
-            try spans.append(allocator, .{
-                .start = start,
-                .end = end,
-                .style = .{ .fg = fg },
-            });
+            const base_style = zigline.Style{ .fg = fg };
+            if (containsGlobChar(span_bytes)) {
+                try emitIdentWithGlobs(allocator, &spans, buffer, start, end, base_style, palette);
+            } else {
+                try spans.append(allocator, .{ .start = start, .end = end, .style = base_style });
+            }
             at_command_pos = false;
             continue;
         }
@@ -1184,8 +1204,24 @@ const Palette = struct {
     argument: zigline.Color,
     integer: zigline.Color,
     string_literal: zigline.Color,
+    /// Color for `$name` and `${...}` variable references. NAME=value
+    /// assignments use the same color so the LHS of `FOO=bar` reads
+    /// as "the variable being defined".
     variable: zigline.Color,
+    /// Color for command and process substitution: `$(...)`, `@(...)`,
+    /// `<(...)`, `>(...)`. Distinct from `variable` so a glance at a
+    /// quoted string with both `$var` and `$(cmd)` distinguishes them.
+    cmd_subst: zigline.Color,
     heredoc_body: zigline.Color,
+    /// Color for redirect operators: `<`, `>`, `>>`, `&>`, `&>>`,
+    /// `<<TAG`, and the `N<` / `N>` / `<&N` / `>&N` fd forms. Distinct
+    /// from `operator` so I/O routing visually separates from control
+    /// flow (`|`, `;`, `&&`, `||`, `&`, brackets).
+    redirect: zigline.Color,
+    /// Color for unquoted glob meta-characters inside bare-word idents:
+    /// `*`, `?`, and `[...]` character classes. The literal portions
+    /// of the same ident keep the command/argument color.
+    glob: zigline.Color,
     operator: zigline.Color,
     comment: zigline.Color,
     err: zigline.Color,
@@ -1206,7 +1242,10 @@ const palette_dark: Palette = .{
     .integer = rgb(0xff, 0x9e, 0x64), //  warm orange
     .string_literal = rgb(0x9e, 0xce, 0x6a), //  green
     .variable = rgb(0xe0, 0xaf, 0x68), //  amber
+    .cmd_subst = rgb(0xc7, 0x92, 0xea), //  lavender — calls out `$(...)` against `$var`
     .heredoc_body = rgb(0x9e, 0xce, 0x6a), //  same as string
+    .redirect = rgb(0x82, 0xaa, 0xff), //  saturated blue, distinct from operator cyan
+    .glob = rgb(0xff, 0xc7, 0x77), //  saffron — warmer than integer orange
     .operator = rgb(0x89, 0xdd, 0xff), //  cyan-blue (legible against dark)
     .comment = rgb(0x56, 0x5f, 0x89), //  muted slate
     .err = rgb(0xf7, 0x76, 0x8e), //  rose
@@ -1224,7 +1263,10 @@ const palette_light: Palette = .{
     .integer = rgb(0xcb, 0x4b, 0x16), //  orange
     .string_literal = rgb(0x85, 0x99, 0x00), //  green
     .variable = rgb(0xb5, 0x89, 0x00), //  yellow / dark gold
+    .cmd_subst = rgb(0x6c, 0x71, 0xc4), //  Solarized violet — distinct from blue/cyan
     .heredoc_body = rgb(0x85, 0x99, 0x00), //  green
+    .redirect = rgb(0xd3, 0x36, 0x82), //  Solarized magenta — distinct from operator slate
+    .glob = rgb(0xcb, 0x4b, 0x16), //  same orange as integer; rare overlap is fine
     .operator = rgb(0x58, 0x6e, 0x75), //  base01 — slate
     .comment = rgb(0x93, 0xa1, 0xa1), //  base1 — pale gray
     .err = rgb(0xdc, 0x32, 0x2f), //  red
@@ -1251,9 +1293,10 @@ fn styleFor(tok: parser.Token, span_bytes: []const u8, p: Palette) ?zigline.Styl
             null,
         .integer => zigline.Style{ .fg = p.integer },
         .string_sq => zigline.Style{ .fg = p.string_literal },
-        .variable, .var_braced, .dollar_paren, .at_paren => zigline.Style{ .fg = p.variable },
+        .variable, .var_braced => zigline.Style{ .fg = p.variable },
+        .name_eq, .assign => zigline.Style{ .fg = p.variable },
+        .dollar_paren, .at_paren, .proc_sub_in, .proc_sub_out => zigline.Style{ .fg = p.cmd_subst },
         .heredoc_body => zigline.Style{ .fg = p.heredoc_body },
-        .pipe,
         .lt,
         .gt,
         .gt_gt,
@@ -1265,8 +1308,8 @@ fn styleFor(tok: parser.Token, span_bytes: []const u8, p: Palette) ?zigline.Styl
         .fd_dup_in,
         .heredoc_open,
         .heredoc_open_lit,
-        .proc_sub_in,
-        .proc_sub_out,
+        => zigline.Style{ .fg = p.redirect },
+        .pipe,
         .lparen,
         .rparen,
         .lbrace,
@@ -1395,6 +1438,78 @@ fn isSpecialVarChar(c: u8) bool {
         '0'...'9', '?', '#', '@', '!', '*', '$' => true,
         else => false,
     };
+}
+
+/// True iff `s` contains an unquoted glob meta-character. Bare-word
+/// `.ident` tokens never include backslash escapes (escaped chars
+/// land in a different lexer state), so a literal scan is sufficient.
+fn containsGlobChar(s: []const u8) bool {
+    for (s) |c| if (c == '*' or c == '?' or c == '[') return true;
+    return false;
+}
+
+/// Emit chunked sub-spans for an `.ident` that contains glob meta-
+/// characters. Literal portions get `base_style`; `*`, `?`, and a
+/// balanced `[...]` class get the palette's glob color. Spans stay
+/// sorted and non-overlapping, which is what the zigline renderer
+/// requires.
+fn emitIdentWithGlobs(
+    allocator: Allocator,
+    spans: *std.ArrayListUnmanaged(zigline.HighlightSpan),
+    buffer: []const u8,
+    start: usize,
+    end: usize,
+    base_style: zigline.Style,
+    p: Palette,
+) !void {
+    const glob_style = zigline.Style{ .fg = p.glob };
+    var seg_start = start;
+    var i = start;
+    while (i < end) {
+        const c = buffer[i];
+        if (c == '*' or c == '?') {
+            if (i > seg_start) try spans.append(allocator, .{
+                .start = seg_start,
+                .end = i,
+                .style = base_style,
+            });
+            try spans.append(allocator, .{
+                .start = i,
+                .end = i + 1,
+                .style = glob_style,
+            });
+            seg_start = i + 1;
+            i += 1;
+            continue;
+        }
+        if (c == '[') {
+            // Find matching `]` within the same ident span. If absent,
+            // treat the `[` as literal text — the lexer kept it inside
+            // the ident, so the user gets a no-glob baseline render.
+            const close = std.mem.indexOfScalarPos(u8, buffer[0..end], i + 1, ']');
+            if (close) |x| {
+                if (i > seg_start) try spans.append(allocator, .{
+                    .start = seg_start,
+                    .end = i,
+                    .style = base_style,
+                });
+                try spans.append(allocator, .{
+                    .start = i,
+                    .end = x + 1,
+                    .style = glob_style,
+                });
+                seg_start = x + 1;
+                i = x + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if (seg_start < end) try spans.append(allocator, .{
+        .start = seg_start,
+        .end = end,
+        .style = base_style,
+    });
 }
 
 // -----------------------------------------------------------------------------
@@ -2334,6 +2449,122 @@ test "highlight: comment is italicized with comment-color" {
         }
     };
     try std.testing.expect(saw_comment);
+}
+
+fn paletteColorsEqual(a: zigline.Color, b: zigline.Color) bool {
+    if (a != .rgb or b != .rgb) return false;
+    return a.rgb.r == b.rgb.r and a.rgb.g == b.rgb.g and a.rgb.b == b.rgb.b;
+}
+
+fn spanWithColor(spans: []const zigline.HighlightSpan, color: zigline.Color) ?zigline.HighlightSpan {
+    for (spans) |s| {
+        if (s.style.fg) |fg| if (paletteColorsEqual(fg, color)) return s;
+    }
+    return null;
+}
+
+test "highlight: command substitution uses cmd_subst color, not variable" {
+    const alloc = std.testing.allocator;
+    const spans = try highlightHookEnd(alloc, "echo $(date)");
+    defer alloc.free(spans);
+
+    const cmd = spanWithColor(spans, palette_dark.cmd_subst);
+    try std.testing.expect(cmd != null);
+    try std.testing.expect(spanWithColor(spans, palette_dark.variable) == null);
+}
+
+test "highlight: $var keeps variable color when sibling $(...) uses cmd_subst" {
+    const alloc = std.testing.allocator;
+    const spans = try highlightHookEnd(alloc, "echo $name $(date)");
+    defer alloc.free(spans);
+
+    try std.testing.expect(spanWithColor(spans, palette_dark.variable) != null);
+    try std.testing.expect(spanWithColor(spans, palette_dark.cmd_subst) != null);
+}
+
+test "highlight: redirect operators use redirect color, not operator" {
+    const alloc = std.testing.allocator;
+    const spans = try highlightHookEnd(alloc, "cmd > out 2>&1 | tee log");
+    defer alloc.free(spans);
+
+    try std.testing.expect(spanWithColor(spans, palette_dark.redirect) != null);
+    // The pipe MUST stay in the operator class; it is control flow,
+    // not I/O routing. Its span is exactly one byte at the `|` offset.
+    var saw_pipe_as_operator = false;
+    for (spans) |s| {
+        if (s.start == "cmd > out 2>&1 ".len and s.end == s.start + 1) {
+            if (s.style.fg) |fg| {
+                if (paletteColorsEqual(fg, palette_dark.operator)) saw_pipe_as_operator = true;
+            }
+        }
+    }
+    try std.testing.expect(saw_pipe_as_operator);
+}
+
+test "highlight: heredoc open uses redirect color" {
+    const alloc = std.testing.allocator;
+    const spans = try highlightHookEnd(alloc, "cat <<EOF\nhello\nEOF");
+    defer alloc.free(spans);
+    try std.testing.expect(spanWithColor(spans, palette_dark.redirect) != null);
+}
+
+test "highlight: glob `*` inside an ident gets a sub-span with glob color" {
+    const alloc = std.testing.allocator;
+    const buf = "ls *.zig";
+    const spans = try highlightHookEnd(alloc, buf);
+    defer alloc.free(spans);
+
+    // Expect: command `ls` (command color) + glob `*` (glob) + literal `.zig` (argument).
+    var saw_glob = false;
+    var saw_arg_after = false;
+    for (spans) |s| {
+        if (s.start == 3 and s.end == 4) {
+            if (s.style.fg) |fg| {
+                if (paletteColorsEqual(fg, palette_dark.glob)) saw_glob = true;
+            }
+        }
+        if (s.start == 4 and s.end == 8) {
+            if (s.style.fg) |fg| {
+                if (paletteColorsEqual(fg, palette_dark.argument)) saw_arg_after = true;
+            }
+        }
+    }
+    try std.testing.expect(saw_glob);
+    try std.testing.expect(saw_arg_after);
+}
+
+test "highlight: NAME= assignment uses variable color on the ident" {
+    const alloc = std.testing.allocator;
+    const buf = "FOO=bar cmd";
+    const spans = try highlightHookEnd(alloc, buf);
+    defer alloc.free(spans);
+
+    var saw_assign = false;
+    for (spans) |s| {
+        if (s.start == 0 and s.end == 3) {
+            if (s.style.fg) |fg| {
+                if (paletteColorsEqual(fg, palette_dark.variable)) saw_assign = true;
+            }
+        }
+    }
+    try std.testing.expect(saw_assign);
+}
+
+test "highlight: bare `==` does NOT promote a leading ident to variable color" {
+    const alloc = std.testing.allocator;
+    const buf = "test FOO == bar";
+    const spans = try highlightHookEnd(alloc, buf);
+    defer alloc.free(spans);
+
+    // `FOO` is an argument here; it must NOT be variable-colored just
+    // because `=` follows somewhere on the line.
+    for (spans) |s| {
+        if (s.start == 5 and s.end == 8) {
+            if (s.style.fg) |fg| {
+                try std.testing.expect(!paletteColorsEqual(fg, palette_dark.variable));
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
