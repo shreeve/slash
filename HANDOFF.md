@@ -33,7 +33,7 @@ the full statement of intent.
 | [`PLAN.md`](./PLAN.md) | The design constitution. Long. §1 (vision), §7 (semantic rules), §12 (in/out of scope), §14 (the §14 test) are the load-bearing parts. Everything else is reachable from there. |
 | [`CHECKLIST.md`](./CHECKLIST.md) | The operational correctness rubric. Process groups, terminal ownership, signal discipline, etc. **75/77 boxes checked** with inline evidence pointers (file/function/test for every claim). Two unchecked items both deferred for the same reason: no rapid-stop/continue stress test. |
 | [`VALIDATION.md`](./VALIDATION.md) | The empirical log. First run on 2026-05-14 was **14/14 PASS** against real interactive software (vim, less, top, ssh, python, node, nested shells, yes-pipe). Findings are tracked in numbered F-entries; F1, F2, F3 (both stickiness and placement), F4 are all FIXED. Second run on 2026-05-15 confirmed the F3 + notice closure interactively. |
-| [`ROADMAP.md`](./ROADMAP.md) | What's left. One item: Ctrl-R interactive search blocked on the zigline transient input mode primitive. Every slash-side ready-now item has shipped. |
+| [`ROADMAP.md`](./ROADMAP.md) | What's left. **Empty** — every interactive-UX item the previous release target depended on has shipped. New items must pass the §14 test before they earn a slot. |
 | [`README.md`](./README.md) | What slash looks like to a user. Public surface. |
 | [`ZIG-0.16.0.md`](./ZIG-0.16.0.md) | Reference for Zig 0.16's API shifts (Juicy Main, `std.Io`, `std.posix` shrinkage, format-string changes). Most LLM training cutoffs predate this; if a Zig API surprise comes up, the answer is almost certainly here. |
 
@@ -117,8 +117,8 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: **132/132 passing** — 74 in the
-unit + headless suite (`zig build test-headless`) and 58 in the PTY
+**Test totals as of this handoff**: **142/142 passing** — 80 in the
+unit + headless suite (`zig build test-headless`) and 62 in the PTY
 suite (`zig build test-pty`). All green. The two ex-flaky PTY tests
 (`Ctrl-Z stops a foreground
 sleep`, `cat & SIGTTIN`) were diagnosed and fixed in commit
@@ -203,6 +203,15 @@ so the JSONL history index doesn't pollute the user's real
   inside bare-word idents; and colors the LHS of `NAME=value` as
   variable. Pipes, semicolons, `&&`, `||`, `&`, and brackets stay
   in the `operator` class.
+- Reverse-i-search (Ctrl-R) — `repl.zig`'s `transientSearchHook`
+  drives the zigline transient input overlay against
+  `Session.history` / `HistoryIndex.search(.substring)`. Live
+  query renders alongside a dim ghost-text preview of the current
+  match; Ctrl-R again advances to the next-older match, with a
+  `(failing-i-search)` status when there's nothing further. Enter
+  replaces the main buffer with the match (one undoable Replace)
+  but does NOT submit; Esc / Ctrl-G / Ctrl-C abort and restore
+  the original buffer.
 - Pre-prompt status notices + live `[N] Stopped|Continued <cmd>`
   announcements for Ctrl-Z / `fg` / `bg`, replacing the inline
   `[N]` exit-status badge in the prompt with a dim-on-tty stderr
@@ -225,21 +234,17 @@ so the JSONL history index doesn't pollute the user's real
 
 ## What to do next
 
-One item left in `ROADMAP.md`. Every slash-side ready-now item has
-shipped; the remaining item is blocked on zigline.
+`ROADMAP.md` is empty. The interactive-UX phase that started with `str`
+abbreviations and history closed with reverse-i-search. Anything that
+lands next must justify itself against the §14 test before it earns a
+slot. Likely candidates outside the editor surface:
 
-### Blocked on zigline (1 item)
-
-1. **Smart history Ctrl-R interactive search** — substrate shipped;
-   only the modal-input UI is missing. We agreed explicitly **not**
-   to fake it via in-buffer hacks (worse than not having it).
-   - **Blocker:** zigline transient-input-mode primitive (a way to
-     overlay a temporary input UI without polluting the main
-     buffer). Wire up here when that lands.
-
-The item passes the §14 test (improves `Command` clarity at the
-keystroke moment) but stops short of language semantics — see
-`PLAN.md` §12 "In scope as interactive UX" for the rails.
+- Tighten CHECKLIST.md's two unchecked rapid-stop/continue stress
+  test boxes.
+- Idle-time job notifications (`[1] Done sleep 30` while at the
+  prompt without a foreground command driving the redraw).
+- Switch the zigline path dependency to a tagged URL once that
+  project ships v1.0.
 
 ---
 

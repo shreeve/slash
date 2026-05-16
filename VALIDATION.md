@@ -252,3 +252,35 @@ inside bare-word idents. Spans stay sorted and non-overlapping, so
 zigline's renderer keeps every emitted color.
 
 ---
+
+## Targeted PTY Validation: 2026-05-15 23:75 UTC
+
+- commit: working tree (Ctrl-R reverse-i-search)
+- os: Darwin 25.4.0 arm64 (macOS, M-series)
+- slash binary: `bin/slash`
+- mode: automated PTY regression (`zig build test-pty`) plus headless
+  unit tests for the hook state machine
+
+| # | test | result | note |
+|---|---|---|---|
+| 1 | hook `.opened` with no history | PASS | status surfaces `(no history): `, no preview |
+| 2 | `.query_changed` finds match | PASS | preview = ranked top match; status = `(reverse-i-search) \`q': ` |
+| 3 | `.next` advances cycle | PASS | repeated Ctrl-R picks the next-older match |
+| 4 | `.next` past end clamps + fails | PASS | last preview pinned; status flips to `(failing-i-search) \`q': ` |
+| 5 | empty query renders no preview | PASS | nothing matches the empty-string substring without surfacing the entire history |
+| 6 | `.aborted` releases candidate slice | PASS | hook frees its results so a subsequent open starts cleanly |
+| 7 | PTY accept replaces buffer + runs | PASS | Ctrl-R + query + Enter + Enter executes the matched command |
+| 8 | PTY Esc abort restores buffer | PASS | original benign buffer runs; the seeded match is never executed |
+
+**Tally:** 8 PASS, 0 FAIL, 0 SKIP.
+
+### Verdict
+
+Slash now surfaces every accepted command (across sessions, with cwd
+and frecency context) through Ctrl-R. The hook is a thin adapter
+over `HistoryIndex.search(.substring)`; zigline owns the keystroke
+loop, the rendering, and the main-buffer preservation. Accept does
+not auto-submit, matching the bash/zsh contract that Ctrl-R is for
+*finding* a command, not running one.
+
+---

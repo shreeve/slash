@@ -166,7 +166,7 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
         .alloc = alloc,
         .history = &history,
     };
-    defer hooks.resetNav();
+    defer hooks.cleanup();
 
     var editor = try zigline.Editor.init(alloc, .{
         .keymap = slash_keymap,
@@ -186,6 +186,10 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
         .custom_action = .{
             .ctx = @ptrCast(&hooks),
             .invokeFn = customActionHook,
+        },
+        .transient_input = .{
+            .ctx = @ptrCast(&hooks),
+            .updateFn = transientSearchHook,
         },
     });
     defer editor.deinit();
@@ -374,6 +378,122 @@ fn customActionHook(
     };
 }
 
+// =============================================================================
+// Reverse-i-search — Ctrl-R transient input hook
+// =============================================================================
+//
+// zigline's default emacs keymap binds Ctrl-R to
+// `Action.transient_input_open`; while transient mode is active the
+// editor handles the keystrokes, manages a separate query buffer, and
+// renders the overlay. Slash's role is to take the live query and
+// surface a ranked match against the persistent `HistoryIndex`.
+//
+// On accept, zigline replaces the main buffer with the preview text
+// (one undoable Replace). The line is NOT submitted; the user must
+// press Enter again to run it. That matches bash/zsh Ctrl-R UX and
+// keeps slash from running a command the user only asked to find.
+//
+// The hook is consulted on every transient event:
+//   - `.opened`      — fresh transient mode, query is empty
+//   - `.query_changed` — user typed/deleted in the query
+//   - `.next`        — Ctrl-R again, advance to the next older match
+//   - `.aborted`     — Esc / Ctrl-G / Ctrl-C / EOF; clean up state
+
+fn transientSearchHook(
+    ctx_ptr: *anyopaque,
+    request: zigline.TransientInputRequest,
+) anyerror!zigline.TransientInputResult {
+    const hooks: *SlashHooks = @ptrCast(@alignCast(ctx_ptr));
+    return runTransientSearch(hooks, request);
+}
+
+fn runTransientSearch(
+    hooks: *SlashHooks,
+    request: zigline.TransientInputRequest,
+) !zigline.TransientInputResult {
+    if (request.event == .aborted) {
+        hooks.search_state.deinit(hooks.alloc);
+        return .{};
+    }
+
+    const idx = if (hooks.session.history) |*h| h else {
+        const status = std.fmt.bufPrint(
+            &hooks.search_state.status_buf,
+            "(no history): ",
+            .{},
+        ) catch "(no history): ";
+        return .{ .preview = null, .status = status };
+    };
+
+    switch (request.event) {
+        .opened => {
+            hooks.search_state.deinit(hooks.alloc);
+            const status = std.fmt.bufPrint(
+                &hooks.search_state.status_buf,
+                "(reverse-i-search): ",
+                .{},
+            ) catch "(reverse-i-search): ";
+            return .{ .preview = null, .status = status };
+        },
+        .query_changed => {
+            var cwd_buf: [4096]u8 = undefined;
+            const cwd: []const u8 = if (getcwd(&cwd_buf, cwd_buf.len)) |p|
+                std.mem.sliceTo(p, 0)
+            else
+                "?";
+            try hooks.search_state.refresh(hooks.alloc, idx, request.query, cwd);
+        },
+        .next => {
+            if (hooks.search_state.results.len > 0) {
+                if (hooks.search_state.cycle + 1 < hooks.search_state.results.len) {
+                    hooks.search_state.cycle += 1;
+                } else {
+                    // Past the oldest match: surface the failing
+                    // status while keeping the last preview pinned.
+                    // Bash/zsh behave the same way — Ctrl-R past the
+                    // bottom does not wrap.
+                    const status = std.fmt.bufPrint(
+                        &hooks.search_state.status_buf,
+                        "(failing-i-search) `{s}': ",
+                        .{request.query},
+                    ) catch "(failing-i-search): ";
+                    return .{
+                        .preview = hooks.search_state.results[hooks.search_state.cycle].line,
+                        .status = status,
+                    };
+                }
+            }
+        },
+        .aborted => unreachable,
+    }
+
+    if (hooks.search_state.results.len > 0) {
+        const status = std.fmt.bufPrint(
+            &hooks.search_state.status_buf,
+            "(reverse-i-search) `{s}': ",
+            .{request.query},
+        ) catch "(reverse-i-search): ";
+        return .{
+            .preview = hooks.search_state.results[hooks.search_state.cycle].line,
+            .status = status,
+        };
+    }
+
+    const status = if (request.query.len == 0)
+        std.fmt.bufPrint(
+            &hooks.search_state.status_buf,
+            "(reverse-i-search): ",
+            .{},
+        ) catch "(reverse-i-search): "
+    else
+        std.fmt.bufPrint(
+            &hooks.search_state.status_buf,
+            "(failing-i-search) `{s}': ",
+            .{request.query},
+        ) catch "(failing-i-search): ";
+    return .{ .preview = null, .status = status };
+}
+
 fn hintHook(
     ctx_ptr: *anyopaque,
     request: zigline.HintRequest,
@@ -447,6 +567,151 @@ test "hint: exact match does not mask longer prefix candidate" {
 
     const suffix = try historyHintSuffix(std.testing.allocator, &s, "git status", "/repo");
     try std.testing.expectEqualStrings(" --short", suffix.?);
+}
+
+// -----------------------------------------------------------------------------
+// Reverse-i-search hook (Ctrl-R) — unit tests
+// -----------------------------------------------------------------------------
+//
+// Drives `transientSearchHook` directly with synthetic events so the
+// state machine is exercised without spinning up a real editor.
+
+fn makeSearchHooks(s: *session_mod.Session, history: *zigline.History) SlashHooks {
+    return SlashHooks{ .session = s, .alloc = std.testing.allocator, .history = history };
+}
+
+test "search: opened with no history → '(no history): '" {
+    var s = try session_mod.Session.init(std.testing.allocator, @ptrCast(@alignCast(std.c.environ)), false);
+    defer s.deinit();
+    var h = try zigline.History.init(std.testing.allocator, .{});
+    defer h.deinit();
+
+    var hooks = makeSearchHooks(&s, &h);
+    defer hooks.cleanup();
+
+    const result = try transientSearchHook(@ptrCast(&hooks), .{
+        .original_buffer = "",
+        .original_cursor_byte = 0,
+        .query = "",
+        .query_cursor_byte = 0,
+        .event = .opened,
+    });
+    try std.testing.expect(result.preview == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.status orelse "", "no history") != null);
+}
+
+test "search: query_changed surfaces the most-recent matching command" {
+    var s = try session_mod.Session.init(std.testing.allocator, @ptrCast(@alignCast(std.c.environ)), false);
+    defer s.deinit();
+    s.history = try history_mod.HistoryIndex.init(std.testing.allocator, null);
+    try s.history.?.append("ls -la", "/repo", 0, 0);
+    try s.history.?.append("git status", "/repo", 0, 0);
+    try s.history.?.append("git log --oneline", "/repo", 0, 0);
+    var h = try zigline.History.init(std.testing.allocator, .{});
+    defer h.deinit();
+
+    var hooks = makeSearchHooks(&s, &h);
+    defer hooks.cleanup();
+
+    _ = try transientSearchHook(@ptrCast(&hooks), .{
+        .original_buffer = "",
+        .original_cursor_byte = 0,
+        .query = "",
+        .query_cursor_byte = 0,
+        .event = .opened,
+    });
+    const result = try transientSearchHook(@ptrCast(&hooks), .{
+        .original_buffer = "",
+        .original_cursor_byte = 0,
+        .query = "git",
+        .query_cursor_byte = 3,
+        .event = .query_changed,
+    });
+    try std.testing.expect(result.preview != null);
+    try std.testing.expect(std.mem.startsWith(u8, result.preview.?, "git "));
+    try std.testing.expect(std.mem.indexOf(u8, result.status orelse "", "reverse-i-search") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.status orelse "", "git") != null);
+}
+
+test "search: .next advances to the next-older match" {
+    var s = try session_mod.Session.init(std.testing.allocator, @ptrCast(@alignCast(std.c.environ)), false);
+    defer s.deinit();
+    s.history = try history_mod.HistoryIndex.init(std.testing.allocator, null);
+    try s.history.?.append("git status", "/repo", 0, 0);
+    try s.history.?.append("git log --oneline", "/repo", 0, 0);
+    var h = try zigline.History.init(std.testing.allocator, .{});
+    defer h.deinit();
+
+    var hooks = makeSearchHooks(&s, &h);
+    defer hooks.cleanup();
+
+    _ = try transientSearchHook(@ptrCast(&hooks), .{ .original_buffer = "", .original_cursor_byte = 0, .query = "", .query_cursor_byte = 0, .event = .opened });
+    const first = try transientSearchHook(@ptrCast(&hooks), .{ .original_buffer = "", .original_cursor_byte = 0, .query = "git", .query_cursor_byte = 3, .event = .query_changed });
+    const second = try transientSearchHook(@ptrCast(&hooks), .{ .original_buffer = "", .original_cursor_byte = 0, .query = "git", .query_cursor_byte = 3, .event = .next });
+
+    try std.testing.expect(first.preview != null);
+    try std.testing.expect(second.preview != null);
+    try std.testing.expect(!std.mem.eql(u8, first.preview.?, second.preview.?));
+}
+
+test "search: .next past the last match keeps preview, surfaces failing status" {
+    var s = try session_mod.Session.init(std.testing.allocator, @ptrCast(@alignCast(std.c.environ)), false);
+    defer s.deinit();
+    s.history = try history_mod.HistoryIndex.init(std.testing.allocator, null);
+    try s.history.?.append("only one match", "/repo", 0, 0);
+    var h = try zigline.History.init(std.testing.allocator, .{});
+    defer h.deinit();
+
+    var hooks = makeSearchHooks(&s, &h);
+    defer hooks.cleanup();
+
+    _ = try transientSearchHook(@ptrCast(&hooks), .{ .original_buffer = "", .original_cursor_byte = 0, .query = "", .query_cursor_byte = 0, .event = .opened });
+    _ = try transientSearchHook(@ptrCast(&hooks), .{ .original_buffer = "", .original_cursor_byte = 0, .query = "match", .query_cursor_byte = 5, .event = .query_changed });
+    const next = try transientSearchHook(@ptrCast(&hooks), .{ .original_buffer = "", .original_cursor_byte = 0, .query = "match", .query_cursor_byte = 5, .event = .next });
+
+    try std.testing.expectEqualStrings("only one match", next.preview.?);
+    try std.testing.expect(std.mem.indexOf(u8, next.status orelse "", "failing-i-search") != null);
+}
+
+test "search: empty query renders no preview" {
+    var s = try session_mod.Session.init(std.testing.allocator, @ptrCast(@alignCast(std.c.environ)), false);
+    defer s.deinit();
+    s.history = try history_mod.HistoryIndex.init(std.testing.allocator, null);
+    try s.history.?.append("anything", "/repo", 0, 0);
+    var h = try zigline.History.init(std.testing.allocator, .{});
+    defer h.deinit();
+
+    var hooks = makeSearchHooks(&s, &h);
+    defer hooks.cleanup();
+
+    _ = try transientSearchHook(@ptrCast(&hooks), .{ .original_buffer = "", .original_cursor_byte = 0, .query = "", .query_cursor_byte = 0, .event = .opened });
+    const result = try transientSearchHook(@ptrCast(&hooks), .{
+        .original_buffer = "",
+        .original_cursor_byte = 0,
+        .query = "",
+        .query_cursor_byte = 0,
+        .event = .query_changed,
+    });
+    try std.testing.expect(result.preview == null);
+}
+
+test "search: aborted releases the candidate slice" {
+    var s = try session_mod.Session.init(std.testing.allocator, @ptrCast(@alignCast(std.c.environ)), false);
+    defer s.deinit();
+    s.history = try history_mod.HistoryIndex.init(std.testing.allocator, null);
+    try s.history.?.append("git status", "/repo", 0, 0);
+    var h = try zigline.History.init(std.testing.allocator, .{});
+    defer h.deinit();
+
+    var hooks = makeSearchHooks(&s, &h);
+    defer hooks.cleanup();
+
+    _ = try transientSearchHook(@ptrCast(&hooks), .{ .original_buffer = "", .original_cursor_byte = 0, .query = "", .query_cursor_byte = 0, .event = .opened });
+    _ = try transientSearchHook(@ptrCast(&hooks), .{ .original_buffer = "", .original_cursor_byte = 0, .query = "git", .query_cursor_byte = 3, .event = .query_changed });
+    try std.testing.expect(hooks.search_state.results.len > 0);
+
+    _ = try transientSearchHook(@ptrCast(&hooks), .{ .original_buffer = "", .original_cursor_byte = 0, .query = "git", .query_cursor_byte = 3, .event = .aborted });
+    try std.testing.expectEqual(@as(usize, 0), hooks.search_state.results.len);
 }
 
 // =============================================================================
@@ -799,9 +1064,59 @@ const SlashHooks = struct {
     /// when Down walks back past the first match.
     nav: ?NavState = null,
 
+    /// Live state for the Ctrl-R reverse-i-search overlay. Owns the
+    /// candidate slice returned by `HistoryIndex.search` plus a small
+    /// scratch buffer used to format the dim status line that zigline
+    /// renders in transient mode.
+    search_state: TransientSearchState = .{},
+
     fn resetNav(self: *SlashHooks) void {
         if (self.nav) |*n| n.deinit(self.alloc);
         self.nav = null;
+    }
+
+    fn cleanup(self: *SlashHooks) void {
+        self.resetNav();
+        self.search_state.deinit(self.alloc);
+    }
+};
+
+/// Reverse-i-search bookkeeping for the zigline `transient_input`
+/// hook. Owns the ranked-results slice and the formatted status text;
+/// the line bytes inside the candidates are borrowed from the
+/// `HistoryIndex` arena and live for the session's lifetime.
+const TransientSearchState = struct {
+    results: []history_mod.HistoryCandidate = &.{},
+    /// Index into `results` advanced by Ctrl-R repeats.
+    cycle: usize = 0,
+    /// Backing buffer for the formatted status string; kept as a
+    /// hook-scoped scratch area so the borrowed slice the hook hands
+    /// back to zigline stays valid until the next call.
+    status_buf: [256]u8 = undefined,
+
+    fn deinit(self: *TransientSearchState, alloc: Allocator) void {
+        if (self.results.len > 0) alloc.free(self.results);
+        self.results = &.{};
+        self.cycle = 0;
+    }
+
+    /// Rerun a substring search against `idx` for the live query and
+    /// reset the cycle to the top match. Old results are freed first.
+    fn refresh(
+        self: *TransientSearchState,
+        alloc: Allocator,
+        idx: *const history_mod.HistoryIndex,
+        query: []const u8,
+        cwd: []const u8,
+    ) !void {
+        if (self.results.len > 0) alloc.free(self.results);
+        self.results = &.{};
+        self.cycle = 0;
+        // Empty query → no preview. Avoid emitting the entire history
+        // as a 5000-entry candidate set — wasteful, and bash/zsh
+        // don't render anything for an empty Ctrl-R query either.
+        if (query.len == 0) return;
+        self.results = try idx.search(alloc, query, cwd, .substring, 100);
     }
 };
 

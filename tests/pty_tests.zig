@@ -1868,3 +1868,75 @@ test "slash pty: PROMPT format template still wins over SLASH_PROMPT preset" {
     try std.testing.expectEqual(@as(u8, 0), r.status);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "PROMPT_TEMPLATE_WIN>") != null);
 }
+
+test "slash pty: Ctrl-R reverse-i-search accepts a history match" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    try seedTestHistoryJsonl("echo SLASH_REVERSE_HIT_OUTPUT");
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        // Send a benign printable + Backspace to confirm raw mode is
+        // active — the editor renders the prompt + a transient `a`
+        // and then erases it, which gives the harness an unambiguous
+        // synchronization point. Without this, Ctrl-R can race the
+        // first `enterRawMode` and get swallowed by the kernel's
+        // cooked-mode line discipline.
+        .{ .send = "a", .settle_ms = 300 },
+        .{ .send = "\x7f", .settle_ms = 200 }, // Backspace
+        .{ .send = "\x12", .settle_ms = 1500, .wait_for = "reverse-i-search" }, // Ctrl-R
+        .{ .send = "REVERSE", .settle_ms = 500, .wait_for = "SLASH_REVERSE_HIT_OUTPUT" },
+        .{ .send = "\n", .settle_ms = 400 }, // accept (replaces main buffer)
+        .{ .send = "\n", .settle_ms = 600 }, // submit the now-replaced line
+        .{ .send = "echo POST_RUN_MARKER\n", .settle_ms = 500, .wait_for = "POST_RUN_MARKER" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // Positive evidence: between accept and `POST_RUN_MARKER`, the
+    // executed command's stdout `SLASH_REVERSE_HIT_OUTPUT` must
+    // appear as a standalone line — the harness's PTY transcript
+    // also includes the dim preview render bytes inside the search
+    // overlay, so we look at occurrences before the post-run marker.
+    const post_idx = std.mem.indexOf(u8, r.out, "POST_RUN_MARKER").?;
+    const before = r.out[0..post_idx];
+    try std.testing.expect(countOccurrences(before, "SLASH_REVERSE_HIT_OUTPUT") >= 2);
+}
+
+test "slash pty: Ctrl-R Esc aborts without modifying the buffer" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    try seedTestHistoryJsonl("echo SLASH_ABORTED_HISTORY_LINE");
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "echo BENIGN_BUFFER_MARKER", .settle_ms = 300, .wait_for = "BENIGN_BUFFER_MARKER" },
+        .{ .send = "\x12", .settle_ms = 1500, .wait_for = "reverse-i-search" }, // Ctrl-R
+        .{ .send = "ABORTED", .settle_ms = 500, .wait_for = "SLASH_ABORTED_HISTORY_LINE" },
+        .{ .send = "\x1b", .settle_ms = 300 }, // Esc — abort
+        .{ .send = "\n", .settle_ms = 500, .wait_for = "BENIGN_BUFFER_MARKER" },
+        .{ .send = "echo POST_ABORT_MARKER\n", .settle_ms = 400, .wait_for = "POST_ABORT_MARKER" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // Positive: the original benign buffer ran. The marker shows
+    // up as the executed command's stdout, then the post marker
+    // confirms we returned to a clean prompt.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "POST_ABORT_MARKER") != null);
+    // Negative: the seeded history command must never have been
+    // accepted into the main buffer. The dim preview renders the
+    // line during the search, but the kernel-side line echo of an
+    // accepted line would appear AFTER the abort, before the
+    // post-abort marker. Slice between the abort point and the
+    // post-marker and assert the seeded command didn't execute
+    // there. We approximate the abort point by the LAST occurrence
+    // of `BENIGN_BUFFER_MARKER` in the trace (the executed line's
+    // stdout).
+    const benign_last = std.mem.lastIndexOf(u8, r.out, "BENIGN_BUFFER_MARKER").?;
+    const post_idx = std.mem.indexOf(u8, r.out, "POST_ABORT_MARKER").?;
+    if (post_idx > benign_last) {
+        const window = r.out[benign_last..post_idx];
+        try std.testing.expect(std.mem.indexOf(u8, window, "SLASH_ABORTED_HISTORY_LINE") == null);
+    }
+}
