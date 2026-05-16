@@ -1,0 +1,377 @@
+.TH SLASH 1 "2026-05-16" "slash 1.2.0" "User Commands"
+.SH NAME
+slash \- a Unix shell with structured commands, composable pipelines, and first-class jobs
+.SH SYNOPSIS
+.B slash
+.RI [ options ]
+.RB [ \-c
+.IR command ]
+.RI [ script
+.RI [ argument
+.RI ...]]
+.SH DESCRIPTION
+.B slash
+is a Unix shell built around a three-stage execution model:
+.B Shape
+(parsed structure),
+.B Program
+(lowered executable semantics, immutable), and
+.B Job
+(runtime instance with process group, pids, state, result).
+The same grammar drives parsing, syntax highlighting, completion, and editor behavior \(em there is no second tokenizer or regex layer.
+
+.B slash
+chooses correctness over POSIX compatibility in the places shells have historically lied:
+.IP \(bu 2
+.B pipefail
+is on by default with no surface syntax to disable it.
+.IP \(bu 2
+Variables are scalars or lists; there is no implicit word-splitting after expansion.
+.IP \(bu 2
+.B argv
+is never flattened to a shell string; expansion happens exactly once per word.
+.IP \(bu 2
+.B Job
+state transitions monotonically:
+.B pending \(-> running \(-> {stopped \(<-> running}* \(-> done.
+
+.SH OPTIONS
+.TP
+.B \-c \fIcommand\fP
+Execute
+.I command
+as a one-shot, then exit. Positional arguments after
+.I command
+are bound to
+.B $0..$N.
+.TP
+.B \-\-norc
+Skip sourcing
+.B ~/.slashrc
+on interactive startup. Useful for tests and reproducible debug sessions.
+.TP
+.B \-v\fP, \fB\-\-version
+Print the version and exit.
+.TP
+.B \-\-dump\-sexp \fIfile\fP
+Parse the file and dump the raw parser S-expression. Layer-1 introspection (see
+.B PLAN
+\(sc17).
+.TP
+.B \-\-dump\-shape \fIfile\fP
+Parse and dump the typed
+.B Shape
+tree. Layer-2 introspection.
+.TP
+.B \-\-dump\-program \fIfile\fP
+Parse, lower, and dump the
+.B Program
+tree. Layer-3 introspection.
+
+.SH INTERACTIVE FEATURES
+On an interactive TTY,
+.B slash
+provides:
+.IP \(bu 2
+Syntax highlighting as you type (driven by the same grammar that parses the line).
+.IP \(bu 2
+History autosuggestions (dim ghost text suffix; Right Arrow / Ctrl-F accepts).
+.IP \(bu 2
+Intelligent Tab completion with per-command specs (PATH commands,
+.B cmd
+defs,
+.B str
+names, git subcommands, ssh hosts, signal names, job specs, file paths).
+.IP \(bu 2
+Smart prefix-aware Up/Down history navigation.
+.IP \(bu 2
+Reverse-incremental history search via Ctrl-R.
+.IP \(bu 2
+Rich prompt presets via
+.B $SLASH_PROMPT
+(\fBdefault\fP, \fBrich\fP, \fBminimal\fP) or full zsh-style format via
+.B $PROMPT
+\(em supports
+.BR %F{#hex} ,
+.BR %K{#hex} ,
+.BR %D{strftime} ,
+.BR %n@%m ,
+.BR %~ ,
+and friends.
+.IP \(bu 2
+Pre-prompt status notices (\fBslash: exit N (SIGNAME)\fP) and live job-state announcements (\fB[N] Stopped\fP, \fB[N] Continued\fP, \fB[N] Done\fP).
+.IP \(bu 2
+User-configurable key bindings via the
+.B key
+builtin (see below).
+
+.SH BUILTINS
+.B slash
+ships with the standard POSIX builtins plus structured additions. See each builtin's help (e.g.
+.B key --help
+) for full options.
+.PP
+.B Process control:
+.B jobs ,
+.B wait ,
+.B fg ,
+.B bg ,
+.B kill ,
+.B disown ,
+.B trap ,
+.B exec .
+.PP
+.B Variables and environment:
+.B export ,
+.B unset ,
+.B read ,
+.B shift .
+.PP
+.B Navigation and I/O:
+.B cd ,
+.B pwd ,
+.B echo ,
+.B printf ,
+.B true ,
+.B false ,
+.B test
+(also
+.BR [ ).
+.PP
+.B Flow control:
+.B break ,
+.B continue ,
+.B return ,
+.B exit ,
+.B source
+(also
+.BR . ).
+.PP
+.B Introspection:
+.B type ,
+.B history ,
+.B command .
+.PP
+.B Editor-time:
+.B str
+(literal-text abbreviations),
+.B key
+(user-configurable key bindings).
+.PP
+.B Behavioral wrappers:
+.B time
+(reports wall + user + sys CPU for a wrapped pipeline or block).
+
+.SH KEY BINDINGS
+The
+.B key
+builtin configures user keystroke shortcuts. Two forms:
+
+.B key KEYSPEC \fIaction-name\fP
+\(em bind to a named editor action.
+Examples:
+.RS
+.PP
+.B key Alt-P history-prev-prefix
+.PP
+.B key Ctrl-X edit-in-editor
+.RE
+.PP
+
+.B key KEYSPEC "\fIliteral text\fP"
+\(em type bytes into the buffer; trailing
+.B \\n
+accepts.
+Examples:
+.RS
+.PP
+.B key Alt-L "ls -la\\n"
+.PP
+.B key Alt-G "git status\\n"
+.RE
+.PP
+KEYSPEC grammar:
+.IP \(bu 2
+Modifiers joined with hyphens:
+.BR Ctrl-X ,
+.BR Alt-Left ,
+.BR Ctrl-Alt-Right ,
+.BR Shift-F7 .
+.IP \(bu 2
+.BR Alt- ,
+.BR Meta- ,
+.BR Esc- ,
+.BR Option- ,
+and
+.BR Opt-
+are five synonyms for the Meta modifier.
+.IP \(bu 2
+Function keys
+.BR F1 .. F12 .
+.IP \(bu 2
+Named keys:
+.BR Up ,
+.BR Down ,
+.BR Left ,
+.BR Right ,
+.BR Home ,
+.BR End ,
+.BR PageUp ,
+.BR PageDown ,
+.BR Tab ,
+.BR Enter ,
+.BR Backspace ,
+.BR Delete ,
+.BR Escape ,
+.BR Space ,
+.BR Insert .
+.IP \(bu 2
+UTF-8 keyspecs: bind directly to a Unicode codepoint your terminal emits, e.g.
+.B key "¬" "ls -la\\n"
+(on macOS US-QWERTY with Option-as-compose-char mode,
+.B ¬
+is the byte sequence pressed Option+L emits).
+.PP
+On macOS US-QWERTY,
+.B key Option-L "ls -la\\n"
+fires on Option+L regardless of whether
+.B "Use Option as Meta key"
+is enabled in Terminal.app or iTerm2 \(em
+.B slash
+reverse-resolves compose-char codepoints via its keyboard-layout table.
+.PP
+Management:
+.IP \(bu 2
+.B key
+\(em list all installed bindings in canonical form.
+.IP \(bu 2
+.B key --actions
+\(em list every registered editor action.
+.IP \(bu 2
+.B key -d KEYSPEC
+\(em remove a binding.
+.IP \(bu 2
+.B key --reset
+\(em clear all user bindings.
+.IP \(bu 2
+.B key --probe
+\(em interactive diagnostic: press any key, slash names it and shows the raw bytes.
+
+.SH ENVIRONMENT
+.TP
+.B $SLASH_PROMPT
+Selects a built-in prompt preset:
+.B default
+(cwd $),
+.B rich
+(venv, user@host, cwd, git branch, jobs, sigil), or
+.B minimal
+(just the sigil). When unset, defaults to
+.B default.
+Overridden by
+.B $PROMPT
+if both are set.
+.TP
+.B $PROMPT
+Full zsh-style prompt format string. Takes precedence over
+.B $SLASH_PROMPT.
+Supports
+.B %F{#hex} ,
+.B %K{#hex} ,
+.B %D{strftime} ,
+.B %n
+(username),
+.B %m
+(short hostname),
+.B %~
+(cwd, home-tilde),
+.B %?
+(last exit status), and other zsh codes.
+.TP
+.B $SLASH_NOTIFY
+.B immediate
+enables bash
+.B set -b
+semantics: backgrounded jobs print
+.B [N] Done <cmd>
+above the in-progress prompt buffer the moment they finish. Default (unset or any other value): notices print at the next prompt boundary (bash
+.B set +b
+).
+.TP
+.B $EDITOR \fP/\fB $VISUAL
+Editor invoked by Ctrl-X in the line editor for multi-line composition.
+.TP
+.B $HOME \fP/\fB $XDG_DATA_HOME
+Used to locate
+.B ~/.slashrc
+and the persistent history index. The history file lives at
+.B $XDG_DATA_HOME/slash/history.jsonl
+(falling back to
+.BR $HOME/.local/share/slash/history.jsonl ).
+
+.SH FILES
+.TP
+.B ~/.slashrc
+Sourced on interactive startup. See
+.B .slashrc.example
+in the project root for a documented template.
+.TP
+.B $XDG_DATA_HOME/slash/history.jsonl
+Persistent metadata-rich command history (cwd, timestamp, exit status, duration). JSONL format; each line a JSON object.
+
+.SH EXIT STATUS
+The exit status of a command is the exit status of its last (or wrapped) component. For pipelines,
+.B pipefail
+is always on: a non-zero status from any stage propagates as the pipeline's status.
+.B 0
+means success;
+.B 1..125
+are command-defined;
+.B 126
+means "command found but not executable";
+.B 127
+means "command not found";
+.B 128+N
+indicates termination by signal
+.IR N .
+
+.SH EXAMPLES
+.SS Interactive — bind Option-L to list current directory
+.PP
+On any macOS, regardless of terminal preferences:
+.PP
+.RS
+.B echo 'key Option-L "ls -la\\n"' >> ~/.slashrc
+.RE
+.PP
+Then press Option+L in any interactive
+.B slash
+session.
+
+.SS One-liner — time a pipeline
+.PP
+.RS
+.B slash -c 'time grep -c slash *.md | sort -n'
+.RE
+.PP
+Wall + user + sys time appears on stderr after the pipeline completes.
+
+.SS Script — process substitution
+.PP
+.RS
+.B slash -c 'diff <(sort a.txt) <(sort b.txt)'
+.RE
+
+.SH AUTHORS
+slash is developed at https://github.com/shreeve/slash.
+
+.SH SEE ALSO
+.BR bash (1),
+.BR zsh (1),
+.BR fish (1).
+.PP
+Project documentation:
+.B https://shreeve.github.io/slash/
+.br
+Source:
+.B https://github.com/shreeve/slash

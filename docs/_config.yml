@@ -1,0 +1,4 @@
+title: Slash
+description: A Unix shell with structured commands, composable pipelines, and first-class jobs.
+theme: jekyll-theme-cayman
+show_downloads: false
