@@ -119,7 +119,7 @@ zig build test
 `zig build -Doptimize=ReleaseFast && ./bin/slash --norc` is the standard
 way to dogfood without sourcing `~/.slashrc`.
 
-**Test totals as of this handoff**: **156/156 passing** — 92 in the
+**Test totals as of this handoff**: **160/160 passing** — 96 in the
 unit + headless suite (`zig build test-headless`) and 64 in the PTY
 suite (`zig build test-pty`). All green.
 
@@ -268,23 +268,49 @@ forms: `key KEYSPEC bare-ident` (named editor action from the
 `keybinding.zig` registry) or `key KEYSPEC "literal text"` (insert
 literal bytes; trailing `\n` = also accept, exactly like zsh
 `bindkey -s`). KEYSPEC uses hyphens to join modifiers
-(`Ctrl-X`, `Alt-Left`, `Ctrl-Alt-Right`, `Shift-F7`) with
-`Esc-X`/`Meta-X`/`Alt-X` as three synonyms (terminals collapse to
-the same wire bytes, zigline emits one `KeyEvent`). Multi-chord
+(`Ctrl-X`, `Alt-Left`, `Ctrl-Alt-Right`, `Shift-F7`) with five
+synonyms for the Meta modifier: `Alt-X` (canonical), `Meta-X`
+(emacs), `Esc-X` (wire-byte shape), `Option-X` / `Opt-X` (Mac
+keyboard label). Ctrl- AND Alt-modified ASCII letters case-fold
+to lowercase at store and lookup time so `Ctrl-X` matches
+zigline's `{char='x',ctrl=true}` event and `Alt-L` matches the
+`\e l` bytes that Option+L emits without Shift. Multi-chord
 sequences (`Ctrl-X,Ctrl-E`, comma between chords) are reserved
-syntax with a clear v1 diagnostic; need zigline prefix-state to
-ship. Lookup goes through `builtins.currentSession()` from inside
+syntax with a clear v1 diagnostic; need zigline prefix-state.
+Single-codepoint UTF-8 keyspecs work too — `key "¬" "ls -la\n"`
+binds directly to whatever character your terminal emits, the
+escape hatch for macOS users who don't want to enable
+"Use Option as Meta key" in their terminal preferences (Option+L
+emits `¬` in compose mode; zigline decodes to `KeyEvent{char=0xAC}`
+which hits the same hashmap slot as the parsed `¬` keyspec).
+Lookup goes through `builtins.currentSession()` from inside
 `slashKeymapLookup` (no zigline context-bearing keymap API yet).
 For literal bindings, the lookup stashes bytes on
 `session.user_literal_pending` and routes to a dispatch custom
-action that preserves the user's typed buffer (insert at cursor,
-not replace). `Ctrl`-modified ASCII letters normalize to lowercase
-at both store time and event time so bindings actually fire (the
-first draft missed this and GPT 5.5 caught it). 156/156 tests
-green. Listing: `key`, `key --actions`, `key -d KEYSPEC`,
-`key --reset`. Use `cmd NAME { body }` + `key K "NAME\n"` for
-multi-line bound actions — keeps `key` itself from growing
-language semantics (PLAN §14).
+action that PRESERVES the user's typed buffer (insert at cursor,
+not replace; first draft used `replace_buffer_and_accept = body`
+and silently discarded what the user had already typed before
+the binding fired). Two defaults seeded at interactive bootstrap:
+`Alt-p` → `history-prev-prefix` and `Alt-n` → `history-next-prefix`
+(emacs-convention aliases for slash's smart Up/Down). User
+bindings in `.slashrc` always win on conflict.
+
+Diagnostic surface: `key --probe` opens an interactive raw-mode
+loop that names each keystroke and shows the raw bytes — the
+canonical way to answer "why doesn't my Option-key binding
+fire?" Exits on double-Esc (two bare or one Alt-Esc) or Ctrl-C
+(ISIG is disabled in the probe's raw mode so SIGINT doesn't
+leave the terminal wedged). When it sees a multi-byte UTF-8
+sequence — the macOS-compose-char shape — it surfaces both the
+bind-direct path and the terminal-config path so the user can
+pick whichever is less invasive.
+
+160/160 tests. Listing surface: `key` / `key --actions` /
+`key -d KEYSPEC` / `key --reset` / `key --probe`. Use
+`cmd NAME { body }` + `key K "NAME\n"` for multi-line bound
+actions — keeps `key` itself from growing language semantics
+(PLAN §14). The `.slashrc.example` at the project root is the
+user-facing template; not auto-installed.
 
 The `time` keyword shipped as the first behavioral wrapper in the
 kernel. Lives at `sequence_item` level in the grammar; accepts
@@ -352,7 +378,7 @@ reading those files first.
 
 A short pre-commit ritual that's caught real bugs across this session:
 
-1. **`zig build test`** — must be 156/156 green (or whatever the new
+1. **`zig build test`** — must be 160/160 green (or whatever the new
    total is after your tests). A single red test means the commit
    isn't ready.
 2. **§14 self-test** — say out loud which axis the change improves
