@@ -336,7 +336,8 @@ load, and the post-storm prompt recovery.
 
 - workflow: `.github/workflows/ci.yml`
 - matrix: `ubuntu-latest`, `macos-latest`
-- zigline: pinned to `v0.5.0` via sibling-repo checkout
+- zigline: pinned by URL + hash in `build.zig.zon` (v0.5.0); the
+  package manager fetches and caches on first build
 - Zig: 0.16.0 (downloaded from `ziglang.org` per platform)
 
 The CI build process exposed real Linux-portability bugs that
@@ -378,7 +379,7 @@ before merge.
 
 - workflow: `.github/workflows/ci.yml`
 - matrix: `ubuntu-latest`, `macos-latest`
-- zigline: pinned to `v0.5.0` via sibling-repo checkout
+- zigline: pinned by URL + hash in `build.zig.zon` (v0.5.0)
 - Zig: 0.16.0 via `mlugg/setup-zig@v1`
 
 Every push and PR to `main` runs:

@@ -9,11 +9,16 @@
     .minimum_zig_version = "0.16.0",
 
     .dependencies = .{
-        // zigline — the line editor lives in a sibling repo. Path
-        // dependency so iteration on zigline reflects in slash without
-        // a fetch cycle. Switch to a tagged URL dependency at v1.0.
+        // zigline — the line editor library. Pinned to a tagged
+        // release tarball so a fresh clone of slash can build with
+        // a single `zig build` (no sibling-repo checkout needed).
+        // Bump both `url` and `hash` together when upgrading; `zig
+        // fetch` prints the new hash. zigline's own internal
+        // `version` field hasn't been bumped from 0.3.1 in recent
+        // releases — slash pins the actual tag through the URL.
         .zigline = .{
-            .path = "../zigline",
+            .url = "https://github.com/shreeve/zigline/archive/refs/tags/v0.5.0.tar.gz",
+            .hash = "zigline-0.3.1-GM63RNeBCABg95pQXMns-hqtnlPJ4YV6g-5_EZqROyAV",
         },
     },
 

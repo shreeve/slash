@@ -25,19 +25,6 @@ jobs:
     steps:
       - name: Check out slash
         uses: actions/checkout@v4
-        with:
-          path: slash
-
-      # zigline is a sibling path dependency from `slash/build.zig.zon`
-      # (`../zigline`). Check it out at the same workspace level so the
-      # relative path resolves at build time. Pin to the tagged release
-      # matching slash's current zigline target.
-      - name: Check out zigline
-        uses: actions/checkout@v4
-        with:
-          repository: shreeve/zigline
-          ref: v0.5.0
-          path: zigline
 
       # Install Zig 0.16.0 directly from ziglang.org. The
       # mlugg/setup-zig@v1 action's release index hadn't picked up
@@ -74,16 +61,16 @@ jobs:
           echo "$dest" >> "$GITHUB_PATH"
           "$dest/zig" version
 
+      # zigline is pinned by URL + hash in `build.zig.zon`; the Zig
+      # package manager fetches and caches it on first build.
+
       - name: Build
-        working-directory: slash
         run: zig build
 
       - name: Headless tests
-        working-directory: slash
         run: zig build test-headless
 
       - name: PTY tests
-        working-directory: slash
         # The PTY suite spawns `bin/slash` against a real pseudo-terminal.
         # Linux runners under GitHub Actions support `/dev/ptmx` plus the
         # `TIOCSCTTY` / `TIOCSWINSZ` ioctls the harness uses. macOS runners
@@ -92,5 +79,4 @@ jobs:
         run: zig build test-pty
 
       - name: Smoke test the binary
-        working-directory: slash
         run: ./bin/slash --version

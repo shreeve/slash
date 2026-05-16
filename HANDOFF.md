@@ -92,9 +92,11 @@ slash/
 
 The grammar engine [`nexus`](https://github.com/shreeve/nexus) lives in a
 sibling repo at `/Users/shreeve/Data/Code/nexus`. The line editor
-[`zigline`](https://github.com/shreeve/zigline) lives at
-`/Users/shreeve/Data/Code/zigline`; slash uses it as a path dependency
-(switch to URL dep at zigline 1.0; currently 0.4.1).
+[`zigline`](https://github.com/shreeve/zigline) is pinned by URL +
+hash in `build.zig.zon` to the matching tagged release (currently
+v0.5.0). The Zig package manager fetches and caches it on first
+build — a fresh `git clone` of slash compiles with a single
+`zig build`, no sibling checkout required.
 
 ---
 
@@ -256,8 +258,6 @@ slot. Likely candidates outside the editor surface:
   test boxes.
 - Idle-time job notifications (`[1] Done sleep 30` while at the
   prompt without a foreground command driving the redraw).
-- Switch the zigline path dependency to a tagged URL once that
-  project ships v1.0.
 
 ---
 
