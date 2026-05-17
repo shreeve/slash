@@ -227,14 +227,12 @@ fn gatherArgumentCandidates(
     ctx: WordContext,
     out: *CandidateList,
 ) !void {
+    // Shell-specific specs come FIRST: carapace doesn't and shouldn't
+    // know about slash's job specs, str names, or cmd definitions —
+    // those are facts about the running shell session, not the external
+    // command's CLI. These specs short-circuit carapace entirely.
     if (std.mem.eql(u8, command_name, "cd")) {
         return gatherPathCandidates(allocator, ctx, out, .directories);
-    }
-    if (std.mem.eql(u8, command_name, "git")) {
-        return gatherStatic(allocator, ctx, out, &git_subcommands, .plain, ' ');
-    }
-    if (std.mem.eql(u8, command_name, "ssh")) {
-        return gatherStatic(allocator, ctx, out, &ssh_starters, .plain, ' ');
     }
     if (std.mem.eql(u8, command_name, "fg") or std.mem.eql(u8, command_name, "bg")) {
         return gatherJobSpecs(allocator, session, ctx, out);
@@ -262,13 +260,29 @@ fn gatherArgumentCandidates(
         return;
     }
 
-    // Carapace fallback: delegate to carapace-bin for the long tail of
-    // CLIs (git checkout branches, docker images, kubectl resources, ...).
-    // `null` = carapace unavailable / unknown command — fall through to
-    // path completion. `[]` = carapace authoritatively reports no matches
-    // — DO NOT fall through, since "git zzzzzz<Tab>" returning filenames
-    // would be a worse menu than no menu.
+    // Tool-specific completion: carapace is the primary path because it
+    // has dramatically richer coverage (flag completion, branch names,
+    // image names, ...) than our hardcoded specs. Earlier this routed
+    // `git`/`ssh` to static lists first; that intercepted `git log -`
+    // before carapace could offer flag completions.
+    //
+    // `null` = carapace unavailable or doesn't know this command — fall
+    // through to the hardcoded fallback (if any), then path completion.
+    // `[]` = carapace knows the command and reports no matches — that's
+    // authoritative; do NOT fall through (a `git zzzzz<Tab>` showing
+    // filenames would be a worse menu than no menu).
     if (try maybeCarapace(allocator, command_name, buffer, ctx, out)) return;
+
+    // Hardcoded fallbacks for systems without carapace installed. Kept
+    // narrow on purpose — these are "starter" specs, not a parallel
+    // completion ecosystem. For coverage beyond this, `brew install
+    // carapace` (or `apt install carapace-bin`).
+    if (std.mem.eql(u8, command_name, "git")) {
+        return gatherStatic(allocator, ctx, out, &git_subcommands, .plain, ' ');
+    }
+    if (std.mem.eql(u8, command_name, "ssh")) {
+        return gatherStatic(allocator, ctx, out, &ssh_starters, .plain, ' ');
+    }
 
     try gatherPathCandidates(allocator, ctx, out, .any);
 }
