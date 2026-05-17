@@ -128,9 +128,9 @@ is wrong.
   `PLAN.md` / `AGENTS.md` / `README.md` / `CHECKLIST.md`. Code
   describes what *is*. Features that haven't shipped yet simply
   aren't referenced. Future work belongs in `ROADMAP.md`; empirical
-  history belongs in `VALIDATION.md`; pickup state belongs in
-  `HANDOFF.md`. Those three are the legitimate homes for "what's
-  next" / "what was" / "what's now".
+ history belongs in `VALIDATION.md`; per-release highlights
+ belong in `CHANGELOG.md`. Those three are the legitimate homes
+ for "what's next" / "what was" / "what shipped".
 - **Comments explain non-obvious intent, trade-offs, or constraints.**
   Don't narrate what the code does line-by-line.
 - **Public-API names are real English words a Unix engineer

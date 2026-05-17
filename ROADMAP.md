@@ -6,8 +6,9 @@ file** in the same commit. The ROADMAP shrinks until empty; that's how
 the next release ships.
 
 The roadmap is empty. Every interactive-UX item the previous release
-target depended on has shipped. See `HANDOFF.md` for the running list
-of what landed and `VALIDATION.md` for the empirical record.
+target depended on has shipped. See `CHANGELOG.md` for per-release
+highlights and `VALIDATION.md` for the empirical record of
+interactive-correctness runs.
 
 > **The test that decides whether anything joins this list:**
 > Does this improve `Command` clarity, `Pipeline` correctness, `Program`

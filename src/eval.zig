@@ -1473,7 +1473,7 @@ fn evalMatch(
 // only, so `time echo hi` shows 0 in bash but a small positive
 // number in slash. We pick honesty over bash parity here.)
 //
-// Caveat tracked in HANDOFF: `RUSAGE_CHILDREN` is wait-based and
+// Caveat: `RUSAGE_CHILDREN` is wait-based and
 // process-global. If a previously-backgrounded job is reaped
 // during the body, its CPU shows up in our delta even though it
 // wasn't part of the wrapped subtree. The proper fix is per-Job

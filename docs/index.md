@@ -111,9 +111,6 @@ The full design lives in markdown in the repo:
   Harvard CS61). 77/77 boxes checked.
 - [CHANGELOG](https://github.com/shreeve/slash/blob/main/CHANGELOG.md)
   — per-release highlights.
-- [HANDOFF](https://github.com/shreeve/slash/blob/main/HANDOFF.md)
-  — single-file pickup doc for someone starting fresh on the
-  codebase.
 - [VALIDATION](https://github.com/shreeve/slash/blob/main/VALIDATION.md)
   — empirical log of interactive correctness runs against real
   software (vim, less, top, ssh, nested shells, Python/node
