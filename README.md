@@ -91,6 +91,13 @@ Slash detects it on `$PATH` and delegates the long tail of completion
 specs transparently, without ever becoming a runtime for completion
 scripts.
 
+The completion menu auto-picks a layout: when candidates carry
+descriptions (git flags, kubectl resources, etc.) and the terminal
+has room, it renders one candidate per row with the description in a
+dim column. Otherwise it packs names into a compact multi-column
+grid. `Tab` / `Down` cycle the selection (live preview as you go),
+`Enter` accepts, `Esc` restores the pre-menu buffer.
+
 See [`.slashrc.example`](./.slashrc.example) for prompts, `str`
 abbreviations, and key-binding recipes.
 

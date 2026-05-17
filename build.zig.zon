@@ -17,8 +17,8 @@
         // `version` field hasn't been bumped from 0.3.1 in recent
         // releases — slash pins the actual tag through the URL.
         .zigline = .{
-            .url = "https://github.com/shreeve/zigline/archive/refs/tags/v0.6.1.tar.gz",
-            .hash = "zigline-0.3.1-GM63RBIKCQBkUlguSwi3m93oPmbyL2OvDt8UfxraHhe7",
+            .url = "https://github.com/shreeve/zigline/archive/refs/tags/v0.7.0.tar.gz",
+            .hash = "zigline-0.7.0-GM63RF-tCQDsju-ppAYQLyuq6EL1G9Hl4HPBCxb4F02a",
         },
     },
 
