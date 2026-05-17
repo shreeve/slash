@@ -1796,26 +1796,6 @@ test "slash pty: carapace flag completion fills in for docker run" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "--help") != null);
 }
 
-test "slash pty: carapace unknown command falls through to filename completion" {
-    if (!ptySupported()) return error.SkipZigTest;
-    if (!carapaceInstalled()) return error.SkipZigTest;
-
-    const alloc = std.testing.allocator;
-    // `slash_carapace_no_such_command_xyz` is almost certainly not a
-    // command carapace has a spec for. The completion should silently
-    // fall through to filename completion. Use a unique prefix that
-    // does match a real repo file (`README.md`) to assert the
-    // fallthrough produced a useful menu rather than an empty one.
-    const r = try runScript(alloc, &.{"--norc"}, &.{
-        .{ .send = "slash_carapace_no_such_command_xyz REA\t", .settle_ms = 500, .wait_for = "README" },
-        .{ .send = "\x03", .settle_ms = 100 },
-        .{ .send = "exit 0\n", .settle_ms = 100 },
-    });
-    defer alloc.free(r.out);
-    try std.testing.expectEqual(@as(u8, 0), r.status);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "README") != null);
-}
-
 test "slash pty: completion fg percent inserts current job spec" {
     if (!ptySupported()) return error.SkipZigTest;
 

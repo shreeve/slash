@@ -57,9 +57,9 @@ pub fn complete(allocator: Allocator, req: Request) !zigline.CompletionResult {
         try gatherCommandCandidates(allocator, req.session, ctx, &out);
     } else if (ctx.command_name) |name| {
         try gatherArgumentCandidates(allocator, req.session, name, req.buffer, ctx, &out);
-    } else {
-        try gatherPathCandidates(allocator, ctx, &out, .any);
     }
+    // No command identified → no completion. Consistent with the
+    // "builtins or carapace, nothing else" contract.
 
     sortCandidates(out.items);
     dedupeCandidates(allocator, &out);
@@ -260,22 +260,20 @@ fn gatherArgumentCandidates(
         return;
     }
 
-    // Tool-specific completion: carapace is the only path for
-    // non-builtin commands. Slash does not maintain hardcoded specs
-    // for external tools — that's carapace's job. When carapace is
-    // installed it owns git, docker, kubectl, cargo, gh, terraform,
-    // etc.; when it's not, external commands fall through to generic
-    // path completion. `brew install carapace` (or `apt install
-    // carapace-bin`) for the long-tail coverage.
+    // Tool-specific completion: carapace owns it. Slash maintains
+    // NO completion specs for external tools — that's carapace's
+    // entire job and it does it across ~1100 modern CLIs.
     //
-    // `null` = carapace unavailable or doesn't know this command —
-    // fall through to path completion.
-    // `[]` = carapace knows the command and reports no matches —
-    // authoritative; do NOT fall through (a `git zzzzz<Tab>` showing
-    // filenames would be a worse menu than no menu).
-    if (try maybeCarapace(allocator, command_name, buffer, ctx, out)) return;
-
-    try gatherPathCandidates(allocator, ctx, out, .any);
+    // The contract is intentionally strict: when carapace doesn't
+    // know a command (or isn't installed), the user gets no
+    // argument completion. No falling through to filename
+    // completion in cwd — that's the kind of "helpful guess" that
+    // pollutes menus and hides the real answer ("install carapace
+    // for argument completion across the modern CLI ecosystem").
+    //
+    // `brew install carapace` (or `apt install carapace-bin`) is
+    // the supported answer for non-builtin argument completion.
+    _ = try maybeCarapace(allocator, command_name, buffer, ctx, out);
 }
 
 /// Delegate to carapace if available. Returns:
