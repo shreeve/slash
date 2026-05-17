@@ -88,8 +88,6 @@ source  →  Shape  →  Program  →  Job
 - **`PLAN.md`** — design constitution.
 - **`CHECKLIST.md`** — POSIX/APUE/CS61 operational audit; the rubric
   for "does this behave like a correct Unix shell?"
-- **`CHANGELOG.md`** — per-release highlight reel (curated; not a
-  commit log).
 - **`VALIDATION.md`** — append-only log of `scripts/validate-interactive.sh`
   runs against real interactive programs (vim, less, ssh, REPLs).
 
@@ -131,10 +129,11 @@ is wrong.
   `PLAN.md` / `AGENTS.md` / `README.md` / `CHECKLIST.md`. Code
   describes what *is*. Features that haven't shipped yet simply
   aren't referenced. Empirical history belongs in `VALIDATION.md`;
-  per-release highlights belong in `CHANGELOG.md`. If a future
-  release accumulates enough planned work to need an explicit
-  staging file, recreate `ROADMAP.md` and shrink it to empty before
-  tagging — that's how every Slash release has shipped so far.
+  the per-commit historical record is `git log` (and the git tags
+  for releases). If a future release accumulates enough planned
+  work to need an explicit staging file, recreate `ROADMAP.md` and
+  shrink it to empty before tagging — that's how every Slash
+  release has shipped so far.
 - **Comments explain non-obvious intent, trade-offs, or constraints.**
   Don't narrate what the code does line-by-line.
 - **Public-API names are real English words a Unix engineer
@@ -168,9 +167,9 @@ zig build test
 
 ## Working on a new feature
 
-There is no standing list of planned work — `CHANGELOG.md` shows
-what shipped, and the absence of `ROADMAP.md` means nothing is
-queued. Before starting anything new:
+There is no standing list of planned work — `git log` and the
+release tags show what shipped, and the absence of `ROADMAP.md`
+means nothing is queued. Before starting anything new:
 
 1. Write down what the feature is in one sentence.
 2. Verify it passes the §14 test (must improve `Command` clarity,
@@ -178,8 +177,8 @@ queued. Before starting anything new:
    If it doesn't, stop — it's not a Slash feature.
 3. Look at related `PLAN.md` sections so the feature fits the
    existing model rather than adding a parallel one.
-4. Implement, test, document in `CHANGELOG.md` under the next
-   version's unreleased section.
+4. Implement, test, write a clear commit message that explains
+   *why* (not just *what*).
 
 If multiple items pile up before the next release, recreate
 `ROADMAP.md`, list them, and delete entries as they ship — empty

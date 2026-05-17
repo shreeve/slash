@@ -109,8 +109,6 @@ The full design lives in markdown in the repo:
 - [CHECKLIST](https://github.com/shreeve/slash/blob/main/CHECKLIST.md)
   — line-by-line operational-correctness audit (POSIX + APUE +
   Harvard CS61). 77/77 boxes checked.
-- [CHANGELOG](https://github.com/shreeve/slash/blob/main/CHANGELOG.md)
-  — per-release highlights.
 - [VALIDATION](https://github.com/shreeve/slash/blob/main/VALIDATION.md)
   — empirical log of interactive correctness runs against real
   software (vim, less, top, ssh, nested shells, Python/node
