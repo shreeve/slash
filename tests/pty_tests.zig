@@ -252,24 +252,86 @@ const Spawned = struct {
         return false;
     }
 
+    /// Wait for the child to exit with a bounded deadline. Polls
+    /// non-blocking `waitpid` while draining any trailing output the
+    /// child produces during shutdown, so the captured stream isn't
+    /// truncated. On deadline overrun (the child wedged), sends
+    /// SIGKILL to both the pid and (best-effort) the process group,
+    /// then reaps. Returns 137 (`128 + SIGKILL`) to make hangs
+    /// distinguishable from clean exits in test diagnostics.
+    ///
+    /// Why this matters: blocking `waitpid` with no timeout was the
+    /// classic CI poison — any test that left the child alive (a
+    /// completion menu still open after a malformed cancel, a child
+    /// stuck mid-render after a resize) would wedge the entire test
+    /// job forever instead of failing one test with status 137.
     fn reap(self: Spawned) u8 {
+        const deadline_ms: i64 = 5_000;
+        const start = monotonicMs();
         var status: c_int = 0;
-        while (true) {
-            const r = std.c.waitpid(self.pid, &status, 0);
-            if (r >= 0) break;
-            const e = std.c.errno(r);
-            if (e == .INTR) continue;
-            return 0;
+
+        while (monotonicMs() - start < deadline_ms) {
+            const r = std.c.waitpid(self.pid, &status, std.c.W.NOHANG);
+            if (r > 0) {
+                const ux: u32 = @bitCast(status);
+                if (std.c.W.IFEXITED(ux)) return std.c.W.EXITSTATUS(ux);
+                if (std.c.W.IFSIGNALED(ux)) return @as(u8, 128) +% @as(u8, @intCast(@intFromEnum(std.c.W.TERMSIG(ux)) & 0x7F));
+                return 0;
+            }
+            if (r < 0) {
+                const e = std.c.errno(r);
+                if (e == .INTR) continue;
+                return 0;
+            }
+            // Child still alive — drain any output it's producing during
+            // shutdown so the captured stream stays complete, then sleep.
+            self.drainAvailable() catch {};
+            sleepMs(25);
         }
-        const ux: u32 = @bitCast(status);
-        if (std.c.W.IFEXITED(ux)) return std.c.W.EXITSTATUS(ux);
-        return 128;
+
+        // Deadline overrun. Kill the process group first (best-effort —
+        // requires the spawn to have made the child a session leader)
+        // then the direct pid, then reap. Returning 137 makes hangs
+        // visible in test status rather than silently passing.
+        _ = std.c.kill(-self.pid, std.c.SIG.KILL);
+        _ = std.c.kill(self.pid, std.c.SIG.KILL);
+        _ = std.c.waitpid(self.pid, &status, 0);
+        return 137;
+    }
+
+    /// Read any bytes immediately readable from the PTY master and
+    /// discard them. Used by `reap`'s wait loop to keep the kernel's
+    /// pipe buffer drained while we wait for the child to exit.
+    /// (The collected output isn't needed there — the runScript
+    /// loop already captured what tests care about.)
+    fn drainAvailable(self: Spawned) !void {
+        var chunk: [4096]u8 = undefined;
+        while (true) {
+            const readable = waitReadable(self.master, 0) catch return;
+            if (!readable) return;
+            const n = std.c.read(self.master, &chunk, chunk.len);
+            if (n <= 0) return;
+        }
     }
 
     fn close(self: Spawned) void {
         _ = std.c.close(self.master);
     }
 };
+
+fn monotonicMs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.posix.CLOCK.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
+fn sleepMs(ms: u32) void {
+    var req: std.c.timespec = .{
+        .sec = @intCast(ms / 1000),
+        .nsec = @intCast((ms % 1000) * 1_000_000),
+    };
+    _ = std.c.nanosleep(&req, &req);
+}
 
 fn waitReadable(fd: c_int, deadline_ms: i64) !bool {
     var pfd: std.c.pollfd = .{ .fd = fd, .events = std.c.POLL.IN, .revents = 0 };
@@ -1716,13 +1778,21 @@ test "slash pty: completion git tab opens menu via carapace" {
     if (!ptySupported()) return error.SkipZigTest;
     if (!carapaceInstalled()) return error.SkipZigTest;
 
-    // TODO: this test currently hangs on the in-test PTY harness's
-    // reap loop when the menu is open. The menu itself works (manual
-    // interactive verification in `git log -<Tab>` shows the
-    // descriptive layout with selection highlight, descriptions, and
-    // pager indicator rendering correctly). Re-enable once the
-    // harness interaction is debugged.
-    return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    // Carapace returns ~150 git subcommands. With the v0.7.0 menu,
+    // only the first page renders; `add` (alphabetically first) and
+    // the reverse-video SGR around the selected candidate must both
+    // appear. After capturing those, Ctrl-C cancels the line and
+    // `exit 0` exits cleanly.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "git \t", .settle_ms = 1000, .wait_for = "add" },
+        .{ .send = "\x03", .settle_ms = 200 },
+        .{ .send = "exit 0\n", .settle_ms = 200 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "add") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[7m") != null);
 }
 
 test "slash pty: completion kill dash inserts signal name" {
@@ -1778,11 +1848,22 @@ fn carapaceInstalled() bool {
 }
 
 test "slash pty: carapace flag completion fills in for docker run" {
-    // TODO: same hang as the git-menu test above. The menu renders
-    // correctly under real interactive use; the harness reap hangs
-    // when Ctrl-C dispatches inside menu mode. Re-enable after
-    // debugging the harness interaction.
-    return error.SkipZigTest;
+    if (!ptySupported()) return error.SkipZigTest;
+    if (!carapaceInstalled()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // `--add-host` is alphabetically first in docker run's flag set.
+    // Descriptive-mode menu emits the dim SGR around each description;
+    // assert both appear.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "docker run -\t", .settle_ms = 1000, .wait_for = "--add-host" },
+        .{ .send = "\x03", .settle_ms = 200 },
+        .{ .send = "exit 0\n", .settle_ms = 200 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "--add-host") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[2m") != null);
 }
 
 test "slash pty: completion fg percent inserts current job spec" {

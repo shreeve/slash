@@ -1913,6 +1913,17 @@ fn keyFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!
     if (args.len == 0) return keyList(session, io);
     if (std.mem.eql(u8, args[0], "--reset")) {
         session.keybindings.clearAll();
+        // Drop the multi-chord table too — every literal payload
+        // it owned, then the table itself. `ensureBindingTable`
+        // will lazily re-allocate on the next multi-chord bind.
+        var lit_it = session.multi_chord_literals.valueIterator();
+        while (lit_it.next()) |v| session.alloc.free(v.*);
+        session.multi_chord_literals.clearRetainingCapacity();
+        if (session.binding_table) |bt| {
+            bt.deinit();
+            session.alloc.destroy(bt);
+            session.binding_table = null;
+        }
         return .{ .exited = 0 };
     }
     if (std.mem.eql(u8, args[0], "-d") or std.mem.eql(u8, args[0], "--delete")) {
@@ -1937,29 +1948,29 @@ fn keyBind(
     spec: []const u8,
     target_text: []const u8,
 ) anyerror!Result {
-    const parsed = keybinding.parseKeySpec(spec) catch |err| {
+    const seq = keybinding.parseKeySpecSequence(session.alloc, spec) catch |err| {
         var buf: [256]u8 = undefined;
         const msg = switch (err) {
             error.EmptyKeySpec => "key: empty key specification",
             error.UnknownModifier => "key: unknown modifier in key specification",
             error.UnknownKey => "key: unknown key name in key specification",
-            error.MultiChordNotSupported => "key: multi-chord bindings (Ctrl-X,Ctrl-E) need zigline v0.7+",
+            error.MultiChordNotSupported => "key: too many chords in sequence (max 8)",
             error.InvalidEscape => "key: invalid escape in key specification",
+            error.OutOfMemory => "key: out of memory",
         };
         const out = std.fmt.bufPrint(&buf, "{s}: '{s}'\n", .{ msg, spec }) catch "key: bad spec\n";
         _ = writeAllToFd(io.stderr, out);
         return .{ .exited = 2 };
     };
+    defer session.alloc.free(seq);
 
-    // Three-way disambiguation:
-    //   1. Pure kebab-case ident → action registry lookup.
-    //   2. Snake_case-looking ident (contains `_`, only word chars)
-    //      → typo of an action; error with a "did you mean kebab?"
-    //      hint. Never silently binds as literal, because
-    //      `key Alt-F forward_word` is overwhelmingly more likely
-    //      to be a typo than a deliberate "type this snake_case
-    //      string literally" request.
-    //   3. Anything else (whitespace, punctuation, escapes) → literal.
+    // Three-way disambiguation of `target_text` is the same for
+    // single-chord and multi-chord; resolve it once into either an
+    // action (named) or an owned literal byte slice.
+    var resolved_action: ?zigline_mod.Action = null;
+    var resolved_literal: ?[]u8 = null;
+    errdefer if (resolved_literal) |lit| session.alloc.free(lit);
+
     if (isKebabIdent(target_text)) {
         const reg = keybinding.lookupAction(target_text) orelse {
             var buf: [256]u8 = undefined;
@@ -1971,19 +1982,11 @@ fn keyBind(
             _ = writeAllToFd(io.stderr, out);
             return .{ .exited = 1 };
         };
-        const action = switch (reg) {
+        resolved_action = switch (reg) {
             .builtin => |a| a,
             .custom => |c| zigline_mod.Action{ .custom = @intFromEnum(c) },
         };
-        try session.keybindings.putChord(parsed, .{ .action = action });
-        return .{ .exited = 0 };
-    }
-
-    if (isSnakeIdent(target_text)) {
-        // Convert to kebab and check the registry. If a match
-        // exists, surface a precise "you wrote snake_case; slash
-        // uses kebab-case" hint. If not, still error — snake_case-
-        // looking bare words are never literal text.
+    } else if (isSnakeIdent(target_text)) {
         var kebab_buf: [128]u8 = undefined;
         const kebab = snakeToKebab(target_text, &kebab_buf) catch {
             _ = writeAllToFd(io.stderr, "key: action name too long\n");
@@ -2004,23 +2007,119 @@ fn keyBind(
             ) catch "key: unknown action\n";
         _ = writeAllToFd(io.stderr, out);
         return .{ .exited = 1 };
+    } else {
+        resolved_literal = try session.alloc.dupe(u8, target_text);
     }
 
-    // Literal-text binding. Dupe into session-arena so the slice
-    // outlives this builtin call's argv buffer.
-    const owned = try session.alloc.dupe(u8, target_text);
-    errdefer session.alloc.free(owned);
-    try session.keybindings.putChord(parsed, .{ .literal = owned });
+    // Single-chord path: identical to v1.2.0. Single-chord literals
+    // continue to live in the legacy `keybindings` HashMap; the
+    // keymap-lookup hook stashes the literal pointer on
+    // `session.user_literal_pending` at trigger time.
+    if (seq.len == 1) {
+        // Cross-check: the single chord must not be the prefix of
+        // any existing multi-chord binding, otherwise the user's
+        // multi-chord becomes unreachable (the editor would buffer
+        // forever waiting for the second event with no chord-
+        // resolve timeout in zigline v0.7).
+        if (session.binding_table) |bt| {
+            const first_kev = seq[0].toKeyEvent();
+            const probe = [_]zigline_mod.KeyEvent{first_kev};
+            switch (bt.lookup(probe[0..])) {
+                .partial => {
+                    var buf: [256]u8 = undefined;
+                    const out = std.fmt.bufPrint(
+                        &buf,
+                        "key: '{s}' is the prefix of an existing multi-chord binding; remove the multi-chord first (key --reset to clear all)\n",
+                        .{spec},
+                    ) catch "key: prefix conflict\n";
+                    _ = writeAllToFd(io.stderr, out);
+                    return .{ .exited = 1 };
+                },
+                else => {},
+            }
+        }
+        const target: keybinding.BindingTarget = if (resolved_action) |a|
+            .{ .action = a }
+        else
+            .{ .literal = resolved_literal.? };
+        try session.keybindings.putChord(seq[0], target);
+        // resolved_literal ownership transferred into the table.
+        resolved_literal = null;
+        maybeWarnDeadKey(session, io, seq[0], spec);
+        return .{ .exited = 0 };
+    }
 
-    // Soft warning: if the binding is for an Option-letter dead
-    // key on the active layout (Option+E/I/N/U on US-QWERTY),
-    // pressing Option+letter in compose-char mode emits no
-    // standalone codepoint, so the macOS-compose-char fallback
-    // path can't reverse-fire this binding. The terminal-Meta
-    // path (`\e <letter>` bytes) still works if the user has
-    // "Use Option as Meta key" enabled, so this is a hint not
-    // an error.
-    maybeWarnDeadKey(session, io, parsed, spec);
+    // Multi-chord path: zigline's BindingTable owns the storage.
+    // For literal bindings, allocate a stable `Action.custom(id)`
+    // value that the custom-action hook can look up in
+    // `session.multi_chord_literals` at dispatch time.
+    //
+    // Cross-check: the first chord of the sequence must not be a
+    // single-chord binding (it would shadow the multi-chord).
+    if (session.keybindings.lookupChord(seq[0])) |_| {
+        var buf: [256]u8 = undefined;
+        const out = std.fmt.bufPrint(
+            &buf,
+            "key: first chord of '{s}' is already a single-chord binding; remove it first (key -d <chord>)\n",
+            .{spec},
+        ) catch "key: prefix conflict\n";
+        _ = writeAllToFd(io.stderr, out);
+        return .{ .exited = 1 };
+    }
+
+    const bt = session.ensureBindingTable() catch {
+        _ = writeAllToFd(io.stderr, "key: out of memory allocating binding table\n");
+        return .{ .exited = 1 };
+    };
+
+    // Convert []BindingKey → []KeyEvent on a stack buffer (capacity
+    // is bounded by `MAX_CHORD_SEQUENCE`).
+    var kev_buf: [keybinding.MAX_CHORD_SEQUENCE]zigline_mod.KeyEvent = undefined;
+    for (seq, 0..) |bk, i| kev_buf[i] = bk.toKeyEvent();
+    const kev_seq = kev_buf[0..seq.len];
+
+    var literal_id: u32 = 0;
+    const action: zigline_mod.Action = if (resolved_action) |a|
+        a
+    else blk: {
+        // Literal: allocate id, stash the bytes (Session takes
+        // ownership), then bind to `Action.custom(id)`.
+        literal_id = session.registerMultiChordLiteral(resolved_literal.?) catch {
+            _ = writeAllToFd(io.stderr, "key: out of memory storing literal\n");
+            return .{ .exited = 1 };
+        };
+        // Ownership transferred to session.multi_chord_literals.
+        resolved_literal = null;
+        break :blk zigline_mod.Action{ .custom = literal_id };
+    };
+    errdefer if (resolved_action == null) {
+        _ = session.removeMultiChordLiteral(literal_id);
+    };
+
+    const prev = bt.bind(kev_seq, action) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = switch (err) {
+            error.PrefixConflict => "key: sequence conflicts with an existing binding (prefix or extension); remove the conflicting one first",
+            error.SequenceTooLong => "key: sequence too long",
+            error.EmptySequence => "key: empty sequence",
+            error.UnbindableKey => "key: sequence contains an unbindable key",
+            error.OutOfMemory => "key: out of memory",
+        };
+        const out = std.fmt.bufPrint(&buf, "{s}: '{s}'\n", .{ msg, spec }) catch "key: bind failed\n";
+        _ = writeAllToFd(io.stderr, out);
+        return .{ .exited = 1 };
+    };
+
+    // Replaced an existing binding of the same sequence. If the old
+    // one was a literal (custom id >= MULTI_CHORD_LITERAL_ID_BASE),
+    // free its payload now.
+    if (prev) |old_action| switch (old_action) {
+        .custom => |id| if (id >= session_mod.MULTI_CHORD_LITERAL_ID_BASE) {
+            _ = session.removeMultiChordLiteral(id);
+        },
+        else => {},
+    };
+
     return .{ .exited = 0 };
 }
 
@@ -2048,53 +2147,128 @@ fn keyDelete(
     io: BuiltinIo,
     spec: []const u8,
 ) anyerror!Result {
-    const parsed = keybinding.parseKeySpec(spec) catch {
+    const seq = keybinding.parseKeySpecSequence(session.alloc, spec) catch {
         var buf: [256]u8 = undefined;
         const out = std.fmt.bufPrint(&buf, "key: bad spec: '{s}'\n", .{spec}) catch "key: bad spec\n";
         _ = writeAllToFd(io.stderr, out);
         return .{ .exited = 2 };
     };
-    if (session.keybindings.removeChord(parsed)) {
+    defer session.alloc.free(seq);
+
+    if (seq.len == 1) {
+        _ = session.keybindings.removeChord(seq[0]);
         return .{ .exited = 0 };
     }
-    // No binding present — `key -d` is idempotent; exit 0 to keep
-    // scripts smooth, matching zsh `bindkey -r`.
+
+    // Multi-chord: remove from BindingTable, and if the bound
+    // action was a literal id we own, free its bytes too.
+    if (session.binding_table) |bt| {
+        var kev_buf: [keybinding.MAX_CHORD_SEQUENCE]zigline_mod.KeyEvent = undefined;
+        for (seq, 0..) |bk, i| kev_buf[i] = bk.toKeyEvent();
+        const kev_seq = kev_buf[0..seq.len];
+
+        const found = bt.lookup(kev_seq);
+        if (found == .bound) {
+            switch (found.bound) {
+                .custom => |id| if (id >= session_mod.MULTI_CHORD_LITERAL_ID_BASE) {
+                    _ = session.removeMultiChordLiteral(id);
+                },
+                else => {},
+            }
+            _ = bt.unbind(kev_seq);
+        }
+    }
+    // Idempotent regardless.
     return .{ .exited = 0 };
 }
 
 fn keyList(session: *session_mod.Session, io: BuiltinIo) anyerror!Result {
-    const Entry = struct { key: keybinding.BindingKey, target: keybinding.BindingTarget };
-    var entries = std.ArrayListUnmanaged(Entry).empty;
-    defer entries.deinit(session.alloc);
-    var it = session.keybindings.chord.iterator();
-    while (it.next()) |kv| {
-        try entries.append(session.alloc, .{ .key = kv.key_ptr.*, .target = kv.value_ptr.* });
+    // Each printable row is `<spec>\t<target>` where `<spec>` is the
+    // canonical form (single chord or comma-separated multi-chord).
+    // Built into a flat list of `(spec_owned, target_text_owned)`
+    // pairs, sorted alphabetically by spec, then emitted at once.
+    const Row = struct { spec: []u8, target: []u8 };
+    var rows = std.ArrayListUnmanaged(Row).empty;
+    defer {
+        for (rows.items) |r| {
+            session.alloc.free(r.spec);
+            session.alloc.free(r.target);
+        }
+        rows.deinit(session.alloc);
     }
-    // Stable order: lexicographic by canonical key text.
-    std.sort.heap(Entry, entries.items, {}, struct {
-        fn lt(_: void, a: Entry, b: Entry) bool {
-            var buf_a: [64]u8 = undefined;
-            var buf_b: [64]u8 = undefined;
-            var wa = std.Io.Writer.fixed(&buf_a);
-            var wb = std.Io.Writer.fixed(&buf_b);
-            keybinding.formatKey(a.key, &wa) catch return false;
-            keybinding.formatKey(b.key, &wb) catch return false;
-            return std.mem.lessThan(u8, wa.buffered(), wb.buffered());
+
+    // Single-chord rows from the legacy HashMap.
+    var single_it = session.keybindings.chord.iterator();
+    while (single_it.next()) |kv| {
+        var spec_buf = std.ArrayListUnmanaged(u8).empty;
+        defer spec_buf.deinit(session.alloc);
+        var sw = std.Io.Writer.Allocating.fromArrayList(session.alloc, &spec_buf);
+        defer spec_buf = sw.toArrayList();
+        keybinding.formatKey(kv.key_ptr.*, &sw.writer) catch continue;
+        const spec_owned = try session.alloc.dupe(u8, sw.written());
+        errdefer session.alloc.free(spec_owned);
+
+        var target_buf = std.ArrayListUnmanaged(u8).empty;
+        defer target_buf.deinit(session.alloc);
+        switch (kv.value_ptr.*) {
+            .action => |a| try formatActionForList(session.alloc, &target_buf, a),
+            .literal => |bytes| try formatLiteralForList(session.alloc, &target_buf, bytes),
+        }
+        const target_owned = try session.alloc.dupe(u8, target_buf.items);
+        try rows.append(session.alloc, .{ .spec = spec_owned, .target = target_owned });
+    }
+
+    // Multi-chord rows from the BindingTable. Format each event in
+    // the sequence, comma-joined.
+    if (session.binding_table) |bt| {
+        for (bt.entries.items) |entry| {
+            var spec_buf = std.ArrayListUnmanaged(u8).empty;
+            defer spec_buf.deinit(session.alloc);
+            var sw = std.Io.Writer.Allocating.fromArrayList(session.alloc, &spec_buf);
+            defer spec_buf = sw.toArrayList();
+            var first = true;
+            for (entry.seq) |encoded| {
+                const kev = zigline_mod.decodeKeyEvent(encoded) orelse continue;
+                const bk = keybinding.BindingKey.fromKeyEvent(kev) orelse continue;
+                if (!first) sw.writer.writeAll(",") catch break;
+                keybinding.formatKey(bk, &sw.writer) catch break;
+                first = false;
+            }
+            const spec_owned = try session.alloc.dupe(u8, sw.written());
+            errdefer session.alloc.free(spec_owned);
+
+            var target_buf = std.ArrayListUnmanaged(u8).empty;
+            defer target_buf.deinit(session.alloc);
+            switch (entry.action) {
+                .custom => |id| {
+                    if (id >= session_mod.MULTI_CHORD_LITERAL_ID_BASE) {
+                        if (session.lookupMultiChordLiteral(id)) |bytes| {
+                            try formatLiteralForList(session.alloc, &target_buf, bytes);
+                        } else {
+                            try target_buf.appendSlice(session.alloc, "<missing literal>");
+                        }
+                    } else {
+                        try formatActionForList(session.alloc, &target_buf, entry.action);
+                    }
+                },
+                else => try formatActionForList(session.alloc, &target_buf, entry.action),
+            }
+            const target_owned = try session.alloc.dupe(u8, target_buf.items);
+            try rows.append(session.alloc, .{ .spec = spec_owned, .target = target_owned });
+        }
+    }
+
+    // Stable order: lexicographic by spec text.
+    std.sort.heap(Row, rows.items, {}, struct {
+        fn lt(_: void, a: Row, b: Row) bool {
+            return std.mem.lessThan(u8, a.spec, b.spec);
         }
     }.lt);
 
     var out_buf = std.ArrayListUnmanaged(u8).empty;
     defer out_buf.deinit(session.alloc);
-    for (entries.items) |e| {
-        var key_text: [64]u8 = undefined;
-        var ws = std.Io.Writer.fixed(&key_text);
-        keybinding.formatKey(e.key, &ws) catch continue;
-        try out_buf.print(session.alloc, "{s} \t", .{ws.buffered()});
-        switch (e.target) {
-            .action => |a| try formatActionForList(session.alloc, &out_buf, a),
-            .literal => |bytes| try formatLiteralForList(session.alloc, &out_buf, bytes),
-        }
-        try out_buf.append(session.alloc, '\n');
+    for (rows.items) |row| {
+        try out_buf.print(session.alloc, "{s} \t{s}\n", .{ row.spec, row.target });
     }
     _ = writeAllToFd(io.stdout, out_buf.items);
     return .{ .exited = 0 };

@@ -304,13 +304,15 @@ fn maybeCarapace(
     for (reply) |c| {
         // Carapace's `value` already includes any trailing space that
         // semantically "completes" the argument; honor it as-is instead
-        // of stacking an `append` byte on top.
+        // of stacking an `append` byte on top. `style` carries over
+        // verbatim — zigline suppresses it on the selected row.
         try out.append(allocator, .{
             .insert = try allocator.dupe(u8, c.value),
             .display = if (c.display.len > 0) try allocator.dupe(u8, c.display) else null,
             .description = if (c.description) |d| try allocator.dupe(u8, d) else null,
             .kind = .plain,
             .append = null,
+            .style = c.style,
         });
     }
 

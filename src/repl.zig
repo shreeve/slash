@@ -169,8 +169,15 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
     };
     defer hooks.cleanup();
 
+    // Attach session.binding_table to the keymap so multi-chord
+    // bindings registered via `key Ctrl-X,Ctrl-E …` are visible
+    // to the editor. The pointer is captured here; subsequent
+    // mutations to the table propagate.
+    var slash_kmap = slash_keymap;
+    if (session.binding_table) |bt| slash_kmap.bindings = bt;
+
     var editor = try zigline.Editor.init(alloc, .{
-        .keymap = slash_keymap,
+        .keymap = slash_kmap,
         .history = &history,
         .completion = .{
             .ctx = @ptrCast(&hooks),
@@ -429,6 +436,22 @@ fn customActionHook(
     action_ctx: zigline.CustomActionContext,
 ) anyerror!zigline.CustomActionResult {
     const hooks: *SlashHooks = @ptrCast(@alignCast(ctx_ptr));
+
+    // Multi-chord literal bindings live in id space ≥ 1000 (above
+    // the named `SlashCustomAction` enum range). The literal bytes
+    // were stashed on `Session.multi_chord_literals` at bind time;
+    // resolve and dispatch via the same "as-if-typed" semantics as
+    // `dispatchUserLiteral` for single-chord literals.
+    if (id >= session_mod.MULTI_CHORD_LITERAL_ID_BASE) {
+        const session = hooks.session;
+        const literal = session.lookupMultiChordLiteral(id) orelse return .no_op;
+        // Stash on the existing single-chord literal slot so
+        // `dispatchUserLiteral` (which already preserves the user's
+        // typed buffer + handles trailing-newline accept) does the work.
+        session.user_literal_pending = literal;
+        return dispatchUserLiteral(allocator, request, hooks);
+    }
+
     return switch (@as(ActionId, @enumFromInt(id))) {
         .edit_in_editor => editInEditor(allocator, request, action_ctx, hooks),
         .expand_str_space => expandStrSpace(allocator, request, hooks),
@@ -2478,6 +2501,14 @@ fn bootstrapInteractive(session: *session_mod.Session) void {
     // The `.slashrc.example` template at the project root shows
     // these as commented-out lines for users to copy.
     seedDefaultBindings(session);
+
+    // Eagerly allocate the multi-chord binding table so its pointer
+    // can be attached to the editor's `keymap.bindings` at editor-
+    // init time. Subsequent `key Ctrl-X,Ctrl-E …` binds mutate the
+    // same table in place — without this eager init, a multi-chord
+    // bind issued during the session wouldn't be visible to the
+    // editor (which captures the keymap by value at init).
+    _ = session.ensureBindingTable() catch {};
 }
 
 fn seedDefaultBindings(session: *session_mod.Session) void {

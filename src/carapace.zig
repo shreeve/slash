@@ -30,6 +30,7 @@
 
 const std = @import("std");
 const exec = @import("exec.zig");
+const zigline = @import("zigline");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -43,6 +44,13 @@ pub const Candidate = struct {
     /// Optional tooltip-style description; carapace fills this for many
     /// candidates (e.g., git branch commit subject, command summary).
     description: ?[]const u8 = null,
+    /// Optional per-candidate terminal style, parsed from carapace's
+    /// `$style` field. Currently surfaces `attr` (bold/dim/italic/
+    /// underline); future expansion can wire `fg`/`bg` once a real
+    /// carapace candidate is observed using them. Slash passes this
+    /// straight to `zigline.Candidate.style` — zigline applies it on
+    /// non-selected menu rows.
+    style: ?zigline.Style = null,
 };
 
 const max_output_bytes: usize = 1 * 1024 * 1024;
@@ -256,7 +264,69 @@ const NushellCandidate = struct {
     value: ?[]const u8 = null,
     display: ?[]const u8 = null,
     description: ?[]const u8 = null,
+    style: ?NushellStyle = null,
 };
+
+/// Carapace's nushell-format `$style` sub-object. Observed in the
+/// wild on kubectl error rows: `{"attr":"u"}`. The full carapace
+/// style grammar (per upstream docs) is a comma-separated string
+/// of attributes / fg colors / bg colors; in nushell-JSON output
+/// it's serialized as a struct. Slash currently handles `attr`
+/// (which covers the empirically-observed case); `fg`/`bg`
+/// shapes are accepted as optional strings for forward compat
+/// but not yet translated (carapace candidates almost never set
+/// them today).
+const NushellStyle = struct {
+    attr: ?[]const u8 = null,
+    fg: ?[]const u8 = null,
+    bg: ?[]const u8 = null,
+};
+
+/// Translate a carapace nushell-style `$style` sub-object into a
+/// `zigline.Style`. Returns null when the input has no actionable
+/// fields (everything null, unrecognized attrs only, etc.) so the
+/// candidate renders with default style. Permissive: unknown
+/// attribute letters and unsupported color forms are silently
+/// dropped rather than producing diagnostics — per design, style
+/// is decorative; missing decoration must never break completion.
+fn translateStyle(raw: NushellStyle) ?zigline.Style {
+    var out: zigline.Style = .{};
+    var any = false;
+
+    if (raw.attr) |attr_s| {
+        // Carapace accepts a comma-separated list of attribute names
+        // OR single-letter shorthands. Walk both forms.
+        var it = std.mem.tokenizeScalar(u8, attr_s, ',');
+        while (it.next()) |tok_raw| {
+            const tok = std.mem.trim(u8, tok_raw, " \t");
+            if (tok.len == 0) continue;
+            if (eqAttr(tok, "b", "bold")) {
+                out.bold = true;
+                any = true;
+            } else if (eqAttr(tok, "d", "dim")) {
+                out.dim = true;
+                any = true;
+            } else if (eqAttr(tok, "i", "italic")) {
+                out.italic = true;
+                any = true;
+            } else if (eqAttr(tok, "u", "underlined")) {
+                out.underline = true;
+                any = true;
+            }
+            // Unknown attrs (incl. carapace `no-*` / `toggle-*` and
+            // attrs we don't model like blink/inverse) silently drop.
+        }
+    }
+    // `fg` / `bg` color parsing intentionally deferred — no real
+    // carapace candidates observed using them today, and a half-
+    // baked color parser is worse than no color at all.
+
+    return if (any) out else null;
+}
+
+fn eqAttr(tok: []const u8, short: []const u8, long: []const u8) bool {
+    return std.mem.eql(u8, tok, short) or std.mem.eql(u8, tok, long);
+}
 
 fn parseNushellJson(allocator: Allocator, raw: []const u8) ![]Candidate {
     var trimmed_start: usize = 0;
@@ -294,6 +364,7 @@ fn parseNushellJson(allocator: Allocator, raw: []const u8) ![]Candidate {
         const value = raw_c.value orelse continue;
         const display_text = raw_c.display orelse stripTrailingSpace(value);
         const desc_text = raw_c.description;
+        const style = if (raw_c.style) |s| translateStyle(s) else null;
 
         const v_owned = try allocator.dupe(u8, value);
         errdefer allocator.free(v_owned);
@@ -305,6 +376,7 @@ fn parseNushellJson(allocator: Allocator, raw: []const u8) ![]Candidate {
             .value = v_owned,
             .display = d_owned,
             .description = x_owned,
+            .style = style,
         };
         n_written += 1;
     }
@@ -389,8 +461,11 @@ test "parseNushellJson: skips entries without a value field" {
 }
 
 test "parseNushellJson: tolerates unknown fields" {
+    // `extra` / `xyz` aren't part of NushellCandidate; the
+    // `ignore_unknown_fields = true` option must skip them rather
+    // than rejecting the candidate.
     const raw =
-        \\[{"value":"x ","display":"x","style":"bold","extra":42}]
+        \\[{"value":"x ","display":"x","extra":42,"xyz":"anything"}]
     ;
     const out = try parseNushellJson(std.testing.allocator, raw);
     defer freeResult(std.testing.allocator, out);
@@ -408,4 +483,45 @@ test "parseNushellJson: garbage collapses to empty" {
     const out = try parseNushellJson(std.testing.allocator, "not json");
     defer freeResult(std.testing.allocator, out);
     try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "parseNushellJson: candidate with style attr u sets underline" {
+    const raw =
+        \\[{"value":"ERR","display":"ERR","style":{"attr":"u"}}]
+    ;
+    const out = try parseNushellJson(std.testing.allocator, raw);
+    defer freeResult(std.testing.allocator, out);
+    try std.testing.expectEqual(@as(usize, 1), out.len);
+    try std.testing.expect(out[0].style != null);
+    try std.testing.expect(out[0].style.?.underline);
+    try std.testing.expect(!out[0].style.?.bold);
+}
+
+test "parseNushellJson: style with multiple comma-separated attrs" {
+    const raw =
+        \\[{"value":"x","style":{"attr":"bold,underlined"}}]
+    ;
+    const out = try parseNushellJson(std.testing.allocator, raw);
+    defer freeResult(std.testing.allocator, out);
+    try std.testing.expect(out[0].style.?.bold);
+    try std.testing.expect(out[0].style.?.underline);
+}
+
+test "parseNushellJson: unknown style attrs silently drop" {
+    const raw =
+        \\[{"value":"x","style":{"attr":"blink,no-bold,toggle-italic"}}]
+    ;
+    const out = try parseNushellJson(std.testing.allocator, raw);
+    defer freeResult(std.testing.allocator, out);
+    // None of those map to anything we model — style ends up null.
+    try std.testing.expect(out[0].style == null);
+}
+
+test "parseNushellJson: candidate without style field has null style" {
+    const raw =
+        \\[{"value":"x ","display":"x"}]
+    ;
+    const out = try parseNushellJson(std.testing.allocator, raw);
+    defer freeResult(std.testing.allocator, out);
+    try std.testing.expect(out[0].style == null);
 }

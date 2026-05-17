@@ -8,6 +8,14 @@ const vars = @import("vars.zig");
 const program_mod = @import("program.zig");
 const history_mod = @import("history.zig");
 const keybinding = @import("keybinding.zig");
+const zigline = @import("zigline");
+
+/// First `Action.custom(id)` value handed out to a multi-chord
+/// literal binding. Sits above the `SlashCustomAction` enum range
+/// (0..6) so the custom-action dispatcher can route ids by region:
+/// below `MULTI_CHORD_LITERAL_ID_BASE` → named action, at-or-above
+/// → look up literal bytes in `Session.multi_chord_literals`.
+pub const MULTI_CHORD_LITERAL_ID_BASE: u32 = 1000;
 const keyboards = @import("keyboards.zig");
 
 pub const Allocator = std.mem.Allocator;
@@ -378,6 +386,25 @@ pub const Session = struct {
     /// the user actually meant. Default: US-QWERTY; future
     /// non-US layouts plug in via `$SLASH_KEYBOARD`.
     keyboard_layout: *const keyboards.Layout = &keyboards.us_qwerty,
+    /// Multi-chord key bindings (e.g. `key Ctrl-X,Ctrl-E …`). Lives
+    /// on Session (not Editor) because slash creates a fresh editor
+    /// per `readLine` while bindings are shell-config state that
+    /// must persist across prompts. Lazily allocated on first
+    /// multi-chord bind. Attached to each `zigline.Editor` via
+    /// `keymap.bindings` in `bootstrapInteractive`.
+    binding_table: ?*zigline.BindingTable = null,
+    /// Literal-text payloads for multi-chord literal bindings,
+    /// keyed by the `Action.custom(id)` value zigline dispatches.
+    /// Ids start at `MULTI_CHORD_LITERAL_ID_BASE` (1000) so they
+    /// don't collide with the named `SlashCustomAction` enum range
+    /// (0..6). The bytes are owned by this map; freed on `key -d`
+    /// of the sequence, on `key --reset`, and on `Session.deinit`.
+    multi_chord_literals: std.AutoHashMapUnmanaged(u32, []u8) = .empty,
+    /// Next free literal-id to hand out for a new multi-chord
+    /// literal binding. Monotonically increases for the session;
+    /// freed ids are not recycled (the cost would be O(map.count)
+    /// per bind for a vanishingly rare collision).
+    next_literal_id: u32 = MULTI_CHORD_LITERAL_ID_BASE,
     /// PATH lookup memoization. Keys and values are owned by `alloc`.
     /// `path_cache_signature` is a dup'd snapshot of `$PATH` at the time
     /// the cache was last validated; on mismatch the cache is dropped
@@ -416,6 +443,48 @@ pub const Session = struct {
         };
     }
 
+    /// Lazily allocate the multi-chord `BindingTable`. Returns the
+    /// existing one on subsequent calls. The table is owned by
+    /// `Session` and freed in `deinit`.
+    pub fn ensureBindingTable(self: *Session) !*zigline.BindingTable {
+        if (self.binding_table) |bt| return bt;
+        const bt = try self.alloc.create(zigline.BindingTable);
+        bt.* = zigline.BindingTable.init(self.alloc);
+        self.binding_table = bt;
+        return bt;
+    }
+
+    /// Allocate a fresh literal id and store `owned_bytes` (Session
+    /// takes ownership) keyed by it. The id can later be looked up
+    /// via `lookupMultiChordLiteral`. Returns the id on success.
+    pub fn registerMultiChordLiteral(
+        self: *Session,
+        owned_bytes: []u8,
+    ) !u32 {
+        const id = self.next_literal_id;
+        try self.multi_chord_literals.put(self.alloc, id, owned_bytes);
+        self.next_literal_id += 1;
+        return id;
+    }
+
+    /// Look up the literal payload for an `Action.custom(id)` value
+    /// previously assigned by `registerMultiChordLiteral`. Returns
+    /// `null` if `id` isn't a multi-chord literal binding.
+    pub fn lookupMultiChordLiteral(self: *const Session, id: u32) ?[]const u8 {
+        return self.multi_chord_literals.get(id);
+    }
+
+    /// Free + drop the literal payload for `id`. Returns true iff a
+    /// payload was removed. Called by `key -d` on a multi-chord
+    /// literal binding.
+    pub fn removeMultiChordLiteral(self: *Session, id: u32) bool {
+        if (self.multi_chord_literals.fetchRemove(id)) |entry| {
+            self.alloc.free(entry.value);
+            return true;
+        }
+        return false;
+    }
+
     pub fn deinit(self: *Session) void {
         // Use the escalating-reap path here. A typical shell exit
         // path has already flushed proc_subs via per-command
@@ -426,6 +495,15 @@ pub const Session = struct {
         self.drainProcSubsAtExit();
         self.proc_subs.deinit(self.alloc);
         self.keybindings.deinit();
+        // Multi-chord binding state — free every literal payload, then
+        // the map, then the binding table itself.
+        var lit_it = self.multi_chord_literals.valueIterator();
+        while (lit_it.next()) |v| self.alloc.free(v.*);
+        self.multi_chord_literals.deinit(self.alloc);
+        if (self.binding_table) |bt| {
+            bt.deinit();
+            self.alloc.destroy(bt);
+        }
         self.jobs.deinit();
         self.builtins.deinit(self.alloc);
         self.vars.deinit();

@@ -436,14 +436,21 @@ const cases: []const Case = &.{
         },
     },
     .{
-        .name = "key: multi-chord syntax rejected with a precise diagnostic",
-        // The comma-separated form is RESERVED for v2; v1 must surface
-        // a clear "needs zigline" message instead of silently parsing
-        // wrong or treating as raw bytes.
+        .name = "key: multi-chord binding accepted (Ctrl-X,Ctrl-E)",
+        // As of zigline v0.7.1 (and slash's multi-chord support),
+        // comma-separated chord sequences are bound via the
+        // BindingTable primitive. This test asserts the bind path
+        // exits cleanly; live navigation is covered by PTY tests.
         .source = "key Ctrl-X,Ctrl-E edit-in-editor",
+        .expect = .{ .exit_code = 0 },
+    },
+    .{
+        .name = "key: multi-chord sequence over 8 chords rejected",
+        // MAX_CHORD_SEQUENCE = 8; nine chords must error precisely.
+        .source = "key a,b,c,d,e,f,g,h,i forward-char",
         .expect = .{
             .exit_code = 2,
-            .stderr = "multi-chord",
+            .stderr = "too many chords",
             .stderr_contains = true,
         },
     },

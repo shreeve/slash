@@ -82,6 +82,33 @@ pub const BindingKey = struct {
         insert,
     };
 
+    /// Inverse of `fromKeyEvent`. Returns a `KeyEvent` suitable for
+    /// passing to `zigline.BindingTable.bind` / `lookup`. The
+    /// reconstruction is exact for every variant `fromKeyEvent`
+    /// produces (which is all bindable variants — `text` and
+    /// `unknown` are never reachable here).
+    pub fn toKeyEvent(self: BindingKey) KeyEvent {
+        const code: KeyCode = switch (self.code) {
+            .char => .{ .char = self.char },
+            .function => .{ .function = self.function },
+            .enter => .enter,
+            .tab => .tab,
+            .backspace => .backspace,
+            .delete => .delete,
+            .escape => .escape,
+            .home => .home,
+            .end => .end,
+            .page_up => .page_up,
+            .page_down => .page_down,
+            .arrow_up => .arrow_up,
+            .arrow_down => .arrow_down,
+            .arrow_left => .arrow_left,
+            .arrow_right => .arrow_right,
+            .insert => .insert,
+        };
+        return .{ .code = code, .mods = self.mods };
+    }
+
     pub fn fromKeyEvent(ke: KeyEvent) ?BindingKey {
         const raw: BindingKey = switch (ke.code) {
             .char => |c| .{ .code = .char, .char = c, .mods = ke.mods },
@@ -376,17 +403,55 @@ pub const ParseError = error{
     UnknownKey,
     MultiChordNotSupported,
     InvalidEscape,
+    OutOfMemory,
 };
 
-/// Parse a symbolic keyspec like `Ctrl-X`, `Alt-Left`, `Ctrl-Alt-F7`
-/// into a `BindingKey`. Case-insensitive modifier names; case-
-/// preserving final key (`A` vs `a` differ — terminals send the
-/// shifted ASCII for `A`).
+/// Maximum number of chords in a single multi-chord keyspec. Matches
+/// zigline's `MAX_SEQUENCE` so anything we accept fits in the
+/// `BindingTable`.
+pub const MAX_CHORD_SEQUENCE: usize = 8;
+
+/// Parse a symbolic keyspec — accepts a single chord (`Ctrl-X`,
+/// `Alt-Left`, `Ctrl-Alt-F7`) or a comma-separated chord sequence
+/// (`Ctrl-X,Ctrl-E`). Returns the allocator-owned slice of
+/// `BindingKey` values in order. Caller frees with `allocator.free`.
+///
+/// Case-insensitive modifier names; case-preserving final key
+/// (`A` vs `a` differ — terminals send the shifted ASCII for `A`).
+pub fn parseKeySpecSequence(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+) ParseError![]BindingKey {
+    if (text.len == 0) return error.EmptyKeySpec;
+
+    // Count chords first so we can allocate exactly once.
+    var chord_count: usize = 1;
+    for (text) |c| if (c == ',') {
+        chord_count += 1;
+    };
+    if (chord_count > MAX_CHORD_SEQUENCE) return error.MultiChordNotSupported;
+
+    var out = try allocator.alloc(BindingKey, chord_count);
+    errdefer allocator.free(out);
+
+    var rest = text;
+    var idx: usize = 0;
+    while (idx < chord_count) : (idx += 1) {
+        const next_comma = std.mem.indexOfScalar(u8, rest, ',');
+        const chord_slice = if (next_comma) |p| rest[0..p] else rest;
+        if (chord_slice.len == 0) return error.EmptyKeySpec;
+        out[idx] = try parseKeySpec(chord_slice);
+        if (next_comma) |p| rest = rest[p + 1 ..] else break;
+    }
+    return out;
+}
+
+/// Parse a single-chord keyspec. Rejects comma-separated sequences
+/// — use `parseKeySpecSequence` for those.
 pub fn parseKeySpec(text: []const u8) ParseError!BindingKey {
     if (text.len == 0) return error.EmptyKeySpec;
-    // Reject multi-chord sequences with a precise message — the
-    // syntax is reserved for v2 when zigline ships prefix-pending
-    // state.
+    // Reject embedded commas — multi-chord requires the caller to
+    // go through `parseKeySpecSequence` so the result is a slice.
     if (std.mem.indexOfScalar(u8, text, ',') != null) {
         return error.MultiChordNotSupported;
     }
