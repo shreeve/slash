@@ -3,156 +3,135 @@
 </p>
 
 <div align="center">
-  <strong>A Unix shell with structured commands, composable pipelines, and first-class jobs &mdash; one grammar, end to end.</strong>
+  <strong>Slash runs programs. It is not a programming language.</strong><br>
+  <em>Fish-class editing, POSIX-shaped syntax, real Unix job control.</em>
 </div>
+
+<p align="center">
+  <a href="https://github.com/shreeve/slash/actions/workflows/ci.yml">
+    <img src="https://github.com/shreeve/slash/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+</p>
 
 ---
 
-## What is Slash?
+Slash is a Unix shell written in Zig for people who want modern
+interactive ergonomics without a new programming language to learn. It
+runs programs, builds pipelines, and manages jobs with real Unix
+semantics — stable `argv`, no implicit word-splitting, correct process
+groups and terminal ownership. The editor is modern. The shell stays a
+shell.
 
-Slash is a Unix shell written in Zig. It parses each line into a `Shape`,
-lowers it into an immutable `Program`, and runs it as an inspectable
-`Job`. One grammar drives parsing and editor-facing syntax work;
-completion and formatting must use the same grammar rather than
-separate tokenizers. `argv` is never flattened to a string. Pipelines
-are structured. Job control is first-class. There is no `set -e`
-magic, no implicit word-splitting, no hidden coercion.
-
-Slash runs programs. It does not try to be a language.
-
-## The rule that decides what gets built
-
-> Does this improve `Command` clarity, `Pipeline` correctness, `Program`
-> composability, or `Job` control? If not, do not build it.
-
-Every feature is judged against this. It's why Slash isn't a data shell,
-isn't an AI shell, isn't a programming language playground. It's why the
-kernel stays small and the surface stays principled. (PLAN §14.)
-
-## What it can do
+## Taste
 
 ```sh
-# variables (scalar and list)
-x = hello
-xs = [a b c]
+# values and lists
+name=world
+files=[README.md PLAN.md CHECKLIST.md]
 
-# command substitution
-year = $(date +%Y)
+# pipelines with pipefail on by default
+grep -l zig $files | sort -u > hits.txt || echo no matches
 
-# control flow with brace OR indent blocks (same semantics)
-if test -d /tmp { echo found } else { echo missing }
-
-if test -d /tmp
+# control flow
+if test -d /tmp {
   echo found
-else
+} else {
   echo missing
+}
 
-# loops
-for x in alpha beta gamma { echo $x }
+# user-defined commands
+cmd greet {
+  echo "hello, $1"
+}
 
-while test -f /tmp/lock { sleep 1 }
-
-# pattern dispatch — first arm wins, glob arms, no captures, no regex
-match $1
-  init                { repo-init       }
-  status diff         { repo-$1         }
-  push pull           { repo-sync $1    }
-  *.md *.txt          { open-doc $1     }
-  *                   { echo unknown; return 1 }
-
-# user-defined commands — positional only, body sees $1..$N / $@ / $#
-cmd ll { ls -lAh $@ }
-cmd deploy
-  git pull
-  npm ci
-  npm run build
-
-# env-prefix on commands
-NODE_ENV=production npm start
-
-# pipelines, redirects, subshells, detached jobs
-grep zig **/*.md | head -20 > hits.txt || echo no matches
-(cd /tmp && /bin/ls) > listing
+# jobs
 sleep 60 &
-jobs; fg %1
+jobs
+fg %1
 ```
 
-## Builtins
+Brace blocks and indent blocks have the same semantics. Pick the one
+that fits the line.
 
-`echo`, `true`, `false`, `pwd`, `cd`, `export`, `unset`, `test` (`[`),
-`printf`, `exit`, `read`, `shift`, `type`, `command`, `source` (`.`),
-`exec`, `return`, `break`, `continue`, `trap`, `jobs`, `fg`, `bg`,
-`wait`, `kill`, `disown`, `str`, `history`.
+## What makes Slash different
 
-## Interactive UX
+- **Words are words, not strings to re-parse.** Expansion happens once,
+  per word. `argv` is never flattened into a shell string and
+  re-tokenized. No implicit word-splitting, no hidden coercion.
+- **Pipelines are correct by default.** `pipefail` is always on, so
+  `a | b | c` fails when any stage fails. Redirections, expansions, and
+  pipeline wiring are resolved once, at lowering time.
+- **Jobs are runtime objects, not prompt decorations.** Process groups,
+  terminal ownership, signals, and explicit state transitions:
+  `pending → running → {stopped ↔ running}* → done`.
+- **One grammar drives everything the user sees.** Parsing, syntax
+  highlighting, Tab completion, and formatting share one syntax model.
+  What the parser accepts is what the highlighter colors and the
+  completer understands.
 
-Slash commits to fish-class interactive UX without becoming a
-programming language. The line editor is
-[zigline](https://github.com/shreeve/zigline). See [`PLAN.md`](./PLAN.md)
-§12 for the in-scope/out-of-scope split.
+## Interactive use
 
-What ships today:
+Slash ships fish-class interactive UX: syntax highlighting, history
+autosuggestions, Ctrl-R search, prefix-aware Up/Down, and Tab
+completion for `git`, `cd`, `ssh`, `kill`, and `$PATH`. Key bindings
+are configurable via the `key` builtin, `$PROMPT` accepts zsh-style
+prompt strings, and job-state changes can be surfaced inline.
 
-- syntax highlighting as you type (BaseLexer-driven; one grammar; distinct colors for keywords, commands, arguments, strings, variables, command substitutions, redirects, glob characters, assignments, comments)
-- reverse-incremental history search via Ctrl-R (live preview of the matching line; Enter accepts it into the editable buffer without submitting)
-- `str` abbreviations (literal-bytes-to-literal-bytes editor rewrites)
-- persistent metadata-rich command history (per-cwd, frecency, dedup)
-- smart prefix-aware Up/Down navigation
-- history autosuggestions (dim ghost-text suffix; Right Arrow / Ctrl-F accepts)
-- intelligent Tab completions (`git`, `cd`, `ssh`, `kill`, `fg`/`bg`, `cmd`, `str`, PATH)
-- rich prompt presets (`SLASH_PROMPT=rich|minimal`; venv, remote-user, cwd, git branch, jobs)
-- pre-prompt status notices (`slash: exit N (SIGNAME)`)
-- live job-state announcements (`[N] Stopped`, `[N] Continued`, `[N] Done`; mid-prompt opt-in via `$SLASH_NOTIFY=immediate`)
-- user-configurable key bindings via the `key` builtin (`key Alt-L "ls -la\n"` for a literal; `key Esc-P history-prev-prefix` for a named action; `key "¬" "..."` to bind directly to UTF-8 chars when your terminal swallows Option keys; `key --probe` to see what your terminal actually sends; `key --actions` to list every registered action). See `.slashrc.example` for the full set of patterns.
+See [`.slashrc.example`](./.slashrc.example) for prompts, `str`
+abbreviations, and key-binding recipes.
 
-See [`CHANGELOG.md`](./CHANGELOG.md) for per-release highlights.
+## Status
 
-```sh
-# `str` — editor-only literal-text rewrites. Strict literal bytes →
-# literal bytes; no variables, no command substitution, no templates.
-# Triggers on Space or Enter at command position; the rewritten line
-# is what slash parses and runs.
+Slash is tested as a Unix shell, not just as a parser.
 
-# Bare-args form (cooked argv joined by spaces):
-str ll  ls -lAh
-str gst git status
-str ..  cd ..
-
-# Brace form (raw bytes between matched braces — no escaping needed
-# for pipes, ampersands, dollar signs, quotes, etc.):
-str logs { tail -f /var/log/system.log | grep error }
-str awk1 { awk '{print $1}' | sort | uniq -c }
-
-ll<space>          # → `ls -lAh ` in the editor; Enter runs it
-ll<enter>          # → accepts and runs `ls -lAh` in one step
-git ll<space>      # `ll` is at argument position; Space inserts a
-                   # literal space, no expansion
-
-# Erase: idempotent, silent on missing names.
-str -e ll
-```
-
-## Design
-
-The full design lives in [`PLAN.md`](./PLAN.md): types, semantic rules,
-testing strategy, signal model, job model, and more.
-
-The grammar engine is [nexus](https://github.com/shreeve/nexus).
-`slash.grammar` and `src/slash.zig` are the language-specific inputs;
-`src/parser.zig` is generated from them.
+- **v1.2.0.** Linux + macOS CI is green.
+- **166 / 166 tests** passing: 102 unit + headless, 64 PTY-driven.
+- **77 / 77 items** checked in [`CHECKLIST.md`](./CHECKLIST.md), the
+  operational-correctness audit drawn from POSIX, APUE, and Harvard CS61.
+- **Interactive validation** in [`VALIDATION.md`](./VALIDATION.md)
+  covers vim, less, ssh, nested shells, and Python/node REPLs.
 
 ## Build
 
-Requires **Zig 0.16.0**.
+Requires [Zig 0.16.0](https://ziglang.org/download/).
 
 ```sh
-zig build                                # build ./bin/slash
-zig build run -- --version               # show version
-zig build test                           # run all tests
-zig build run -- -c 'echo hello'         # run a one-liner
-zig build run -- script.sh arg1 arg2     # run a script
+git clone https://github.com/shreeve/slash
+cd slash
+
+zig build                            # produces ./bin/slash
+zig build run -- --version
+zig build run -- -c 'echo hello'
+zig build test
 ```
+
+Apart from libc, the binary has no runtime package dependencies. Copy
+`bin/slash` anywhere on your `$PATH`.
+
+## Design
+
+> Does this improve `Command` clarity, `Pipeline` correctness,
+> `Program` composability, or `Job` control? If not, do not build it.
+
+Slash has one execution path: source is parsed into `Shape`, lowered
+into an immutable `Program`, then launched as a `Job`. That boundary
+keeps parsing, expansion, redirection, pipeline wiring, and job control
+separate instead of letting shell strings leak across phases.
+
+The grammar engine is [nexus](https://github.com/shreeve/nexus).
+`slash.grammar` and `src/slash.zig` are the Slash-specific inputs;
+`src/parser.zig` is generated from them. The line editor is
+[zigline](https://github.com/shreeve/zigline).
+
+The full design lives in [`PLAN.md`](./PLAN.md): types, semantic rules,
+signal model, job model, and testing strategy.
+
+## Documentation
+
+- [Documentation site](https://shreeve.github.io/slash/)
+- [`man slash`](./docs/slash.1)
+- [Example config](./.slashrc.example)
 
 ## License
 
-MIT
+MIT.
