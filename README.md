@@ -72,9 +72,17 @@ indent-style; `{ … }` form is handy for one-liners, e.g.
 
 Slash ships fish-class interactive UX: syntax highlighting, history
 autosuggestions, Ctrl-R search, prefix-aware Up/Down, and Tab
-completion for `git`, `cd`, `ssh`, `kill`, and `$PATH`. Key bindings
-are configurable via the `key` builtin, `$PROMPT` accepts zsh-style
-prompt strings, and job-state changes can be surfaced inline.
+completion (paths, `$PATH` commands, builtin specs for `cd` / `git` /
+`ssh` / `kill` / `fg` / `bg`). Key bindings are configurable via the
+`key` builtin, `$PROMPT` accepts zsh-style prompt strings, and
+job-state changes can be surfaced inline.
+
+For rich completions across ~1100 modern CLIs (`git checkout` branches,
+`docker run --flags`, `kubectl get` resources, `cargo`, `gh`,
+`terraform`, ...), `brew install carapace` (or `apt install carapace-bin`).
+Slash detects it on `$PATH` and delegates the long tail of completion
+specs transparently, without ever becoming a runtime for completion
+scripts.
 
 See [`.slashrc.example`](./.slashrc.example) for prompts, `str`
 abbreviations, and key-binding recipes.

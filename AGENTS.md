@@ -56,13 +56,23 @@ source  →  Shape  →  Program  →  Job
   lowering.
 - **`src/eval.zig`** — the only module that knows shell semantics.
  Expansion, control flow, builtin dispatch.
-- **`src/exec.zig`** — POSIX plumbing only. No shell policy.
+- **`src/exec.zig`** — POSIX plumbing only. No shell policy. The only
+  place that calls `fork`, `execve`, `waitpid`, `pipe`, `dup2`,
+  `setpgid`, `_exit`. Hosts both the job-spawning `SpawnRequest` path
+  and the one-shot `spawnAndCapture` helper for synchronous helper
+  subprocesses (consumed by `carapace.zig`).
 - **`src/notice.zig`** — pre-prompt status notices (`slash: exit N
  (SIGNAME)`) and live job-state announcements (`[N] Stopped …`,
  `[N] Continued …`). Dim-on-tty, signal-name aware, gated on
  interactive sessions.
 - **`src/job.zig`** — `Job` / `JobTable`, monotonic state graph, wait
   service.
+- **`src/carapace.zig`** — completion delegation to
+  [carapace-bin](https://github.com/carapace-sh/carapace-bin) for the
+  long tail of CLIs (git branches, docker flags, kubectl resources,
+  …). Lazy detection on `$PATH`; nushell JSON output; 250 ms timeout;
+  process-group teardown of any grandchildren on overrun. Empty stdout
+  = unknown command (fall through); `[]` = authoritative empty.
 - **`src/builtins.zig`** — builtin registry and implementations.
 - **`src/session.zig`** — long-lived shell state.
 - **`src/history.zig`** — slash-side persistent command-history index

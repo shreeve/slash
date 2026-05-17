@@ -338,6 +338,7 @@ test {
     _ = @import("keybinding.zig");
     _ = @import("keyboards.zig");
     _ = @import("stat.zig");
+    _ = @import("carapace.zig");
 }
 
 fn printUsage() void {

@@ -319,6 +319,173 @@ pub fn _exit(code: u8) noreturn {
     std.c._exit(@intCast(code));
 }
 
+// =============================================================================
+// One-shot helper subprocess (POSIX plumbing only — no shell semantics)
+// =============================================================================
+
+pub const CaptureError = error{
+    SpawnFailed,
+    PipeFailed,
+    TimedOut,
+    OutputCap,
+    ChildFailed,
+    OutOfMemory,
+};
+
+/// Capture stdout from a short-lived helper subprocess. Used by callers
+/// that need to consult an external tool synchronously and parse a small
+/// reply (e.g. `carapace` for completion delegation, version probes).
+/// NOT for jobs — jobs go through `spawn(req: SpawnRequest)` above.
+///
+/// Discipline:
+///   - The child runs in its own process group so a SIGKILL on timeout
+///     or output-cap overrun reaches grandchildren too (carapace may
+///     shell out to git/docker/etc. to compute candidates).
+///   - stdin is redirected from /dev/null; stderr is discarded.
+///   - stdout is read until EOF, exit, `max_bytes`, or `timeout_ms`.
+///
+/// Returns the captured bytes on success (caller frees). A non-zero
+/// child exit collapses to `ChildFailed` — callers that want the
+/// partial output of failing helpers must adapt the contract.
+pub fn spawnAndCapture(
+    allocator: std.mem.Allocator,
+    argv: [*:null]const ?[*:0]const u8,
+    envp: [*:null]const ?[*:0]const u8,
+    max_bytes: usize,
+    timeout_ms: u32,
+) CaptureError![]u8 {
+    var pipe_fds: [2]Fd = undefined;
+    if (std.c.pipe(&pipe_fds) != 0) return CaptureError.PipeFailed;
+    const r_fd = pipe_fds[0];
+    const w_fd = pipe_fds[1];
+
+    const rc = std.c.fork();
+    if (rc < 0) {
+        _ = std.c.close(r_fd);
+        _ = std.c.close(w_fd);
+        return CaptureError.SpawnFailed;
+    }
+
+    if (rc == 0) {
+        // Child path. Errors here must _exit; do not throw or return.
+        _ = std.c.setpgid(0, 0);
+        _ = std.c.close(r_fd);
+
+        const devnull_path: [*:0]const u8 = "/dev/null";
+        const devnull = std.c.open(devnull_path, .{ .ACCMODE = .RDWR }, @as(std.c.mode_t, 0));
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, 0);
+            _ = std.c.dup2(devnull, 2);
+            _ = std.c.close(devnull);
+        }
+        _ = std.c.dup2(w_fd, 1);
+        _ = std.c.close(w_fd);
+
+        resetSignalDefaults();
+
+        _ = std.c.execve(argv[0].?, argv, envp);
+        _exit(127);
+    }
+
+    // Parent path.
+    const child_pid: Pid = @intCast(rc);
+    // Close the fork race on the child's pgrp (idempotent if child won).
+    _ = std.c.setpgid(child_pid, child_pid);
+    _ = std.c.close(w_fd);
+
+    var out = std.ArrayList(u8).empty;
+    var failure: ?CaptureError = null;
+
+    const start_ms = monotonicMs();
+    const deadline_ms = start_ms + @as(i64, @intCast(timeout_ms));
+
+    poll_loop: while (true) {
+        const now_ms = monotonicMs();
+        const remaining = deadline_ms - now_ms;
+        if (remaining <= 0) {
+            failure = CaptureError.TimedOut;
+            break :poll_loop;
+        }
+
+        var pfd: std.c.pollfd = .{ .fd = r_fd, .events = std.c.POLL.IN, .revents = 0 };
+        const pr = std.c.poll(@ptrCast(&pfd), 1, @intCast(remaining));
+        if (pr < 0) {
+            const e = std.c.errno(@as(c_int, -1));
+            if (e == .INTR) continue;
+            failure = CaptureError.SpawnFailed;
+            break :poll_loop;
+        }
+        if (pr == 0) {
+            failure = CaptureError.TimedOut;
+            break :poll_loop;
+        }
+
+        if ((pfd.revents & std.c.POLL.IN) != 0) {
+            const room = if (max_bytes > out.items.len) max_bytes - out.items.len else 0;
+            if (room == 0) {
+                failure = CaptureError.OutputCap;
+                break :poll_loop;
+            }
+            const want = @min(room, @as(usize, 4096));
+            const old = out.items.len;
+            out.resize(allocator, old + want) catch {
+                failure = CaptureError.OutOfMemory;
+                break :poll_loop;
+            };
+            const n_rc = std.c.read(r_fd, out.items.ptr + old, want);
+            if (n_rc < 0) {
+                const e = std.c.errno(@as(c_int, -1));
+                out.shrinkRetainingCapacity(old);
+                if (e == .INTR) continue;
+                failure = CaptureError.SpawnFailed;
+                break :poll_loop;
+            }
+            const n: usize = @intCast(n_rc);
+            out.shrinkRetainingCapacity(old + n);
+            if (n == 0) break :poll_loop; // EOF
+        } else {
+            // POLLHUP / POLLERR with no readable bytes — child closed.
+            break :poll_loop;
+        }
+    }
+
+    _ = std.c.close(r_fd);
+
+    if (failure) |_| {
+        // Kill the whole pgrp so grandchildren are reaped too.
+        _ = std.c.kill(-child_pid, std.c.SIG.KILL);
+    }
+
+    // Reap the child unconditionally so it doesn't zombify.
+    var status: c_int = 0;
+    while (true) {
+        const wr = std.c.waitpid(child_pid, &status, 0);
+        if (wr >= 0) break;
+        const e = std.c.errno(@as(c_int, -1));
+        if (e == .INTR) continue;
+        break;
+    }
+
+    if (failure) |err| {
+        out.deinit(allocator);
+        return err;
+    }
+
+    const ux: u32 = @bitCast(status);
+    if (!std.c.W.IFEXITED(ux) or std.c.W.EXITSTATUS(ux) != 0) {
+        out.deinit(allocator);
+        return CaptureError.ChildFailed;
+    }
+
+    return out.toOwnedSlice(allocator) catch CaptureError.OutOfMemory;
+}
+
+fn monotonicMs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(std.posix.CLOCK.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
 test "Result types compile and link" {
     // smoke
     _ = makePipe;

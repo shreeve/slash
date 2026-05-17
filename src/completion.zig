@@ -10,6 +10,7 @@ const session_mod = @import("session.zig");
 const slash = @import("slash.zig");
 const zigline = @import("zigline");
 const stat = @import("stat.zig");
+const carapace = @import("carapace.zig");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -260,7 +261,190 @@ fn gatherArgumentCandidates(
     if (std.mem.eql(u8, command_name, "for") or std.mem.eql(u8, command_name, "match")) {
         return;
     }
+
+    // Carapace fallback: delegate to carapace-bin for the long tail of
+    // CLIs (git checkout branches, docker images, kubectl resources, ...).
+    // `null` = carapace unavailable / unknown command — fall through to
+    // path completion. `[]` = carapace authoritatively reports no matches
+    // — DO NOT fall through, since "git zzzzzz<Tab>" returning filenames
+    // would be a worse menu than no menu.
+    if (try maybeCarapace(allocator, command_name, buffer, ctx, out)) return;
+
     try gatherPathCandidates(allocator, ctx, out, .any);
+}
+
+/// Delegate to carapace if available. Returns:
+///   - true  if carapace responded authoritatively (any candidates, even
+///           zero, have been appended to `out` already and the caller
+///           should NOT fall through).
+///   - false if carapace is unavailable or doesn't know `command_name`;
+///           the caller should fall through to its next completion path.
+fn maybeCarapace(
+    allocator: Allocator,
+    command_name: []const u8,
+    buffer: []const u8,
+    ctx: WordContext,
+    out: *CandidateList,
+) !bool {
+    var argv = std.ArrayListUnmanaged([]const u8).empty;
+    defer {
+        for (argv.items) |a| allocator.free(a);
+        argv.deinit(allocator);
+    }
+    try extractArgvForCarapace(allocator, buffer, ctx, &argv);
+    if (argv.items.len == 0) return false;
+
+    const completer = carapace.basenameOf(command_name);
+    const reply = carapace.complete(allocator, completer, argv.items) orelse return false;
+    defer carapace.freeResult(allocator, reply);
+
+    for (reply) |c| {
+        // Carapace's `value` already includes any trailing space that
+        // semantically "completes" the argument; honor it as-is instead
+        // of stacking an `append` byte on top.
+        try out.append(allocator, .{
+            .insert = try allocator.dupe(u8, c.value),
+            .display = if (c.display.len > 0) try allocator.dupe(u8, c.display) else null,
+            .description = if (c.description) |d| try allocator.dupe(u8, d) else null,
+            .kind = .plain,
+            .append = null,
+        });
+    }
+
+    return true;
+}
+
+/// Build the argv vector that carapace expects: argv[0] is the command
+/// itself, intermediate slots are completed arguments (dequoted), and
+/// argv[N] is the partial word under the cursor (possibly empty when the
+/// cursor sits on whitespace between arguments).
+///
+/// Uses Slash's own lexer for word boundaries — completion respects the
+/// same syntax the parser does. The "one grammar" claim depends on it.
+fn extractArgvForCarapace(
+    allocator: Allocator,
+    buffer: []const u8,
+    ctx: WordContext,
+    argv: *std.ArrayListUnmanaged([]const u8),
+) !void {
+    // Find the start of the current command on the line: walk backwards
+    // from `ctx.replacement_start` to the most recent command-starter
+    // token boundary (or buffer start).
+    const command_start = findCurrentCommandStart(buffer, ctx.replacement_start);
+
+    var lex = parser.BaseLexer.init(buffer);
+    var seen_command_token = false;
+    while (true) {
+        const tok = lex.next();
+        if (tok.cat == .eof) break;
+        const start: usize = @intCast(tok.pos);
+        if (start >= ctx.replacement_start) break;
+        if (start < command_start) continue;
+        if (!isWordToken(tok.cat)) continue;
+
+        const end_unclamped = start + @as(usize, @intCast(tok.len));
+        const end = @min(buffer.len, end_unclamped);
+        const text = buffer[start..end];
+
+        if (!seen_command_token) {
+            // The argv[0] slot: use the command's source text directly
+            // (basename-stripping happens later for the carapace completer
+            // name, but argv[0] is what the program would see).
+            seen_command_token = true;
+        }
+        const dequoted = try dequoteWord(allocator, text, tok.cat);
+        try argv.append(allocator, dequoted);
+    }
+
+    if (!seen_command_token) return; // no command yet, give up
+
+    // Append the partial word under the cursor. This may be empty (cursor
+    // sits on a space after the last completed argument) — carapace needs
+    // it to know whether the user is completing a new argument vs. still
+    // inside the previous one. The `prefix` slice already represents
+    // exactly the bytes the WordContext considers part of the partial.
+    const partial = try allocator.dupe(u8, ctx.prefix);
+    try argv.append(allocator, partial);
+}
+
+fn findCurrentCommandStart(buffer: []const u8, cursor_byte: usize) usize {
+    var lex = parser.BaseLexer.init(buffer);
+    var command_start: usize = 0;
+    var prev_was_starter = true;
+    while (true) {
+        const tok = lex.next();
+        if (tok.cat == .eof) break;
+        const start: usize = @intCast(tok.pos);
+        if (start >= cursor_byte) break;
+
+        if (isCommandStarter(tok.cat) or tok.cat == .name_eq) {
+            // NAME_EQ in env-prefix position keeps the same command; pure
+            // command-starters reset to the byte after the token.
+            const end_unclamped = start + @as(usize, @intCast(tok.len));
+            const end = @min(buffer.len, end_unclamped);
+            if (isCommandStarter(tok.cat)) {
+                command_start = end;
+            }
+            prev_was_starter = true;
+            continue;
+        }
+
+        if (isWordToken(tok.cat) and prev_was_starter) {
+            command_start = start;
+            prev_was_starter = false;
+        }
+    }
+    return command_start;
+}
+
+fn dequoteWord(allocator: Allocator, text: []const u8, cat: parser.TokenCat) ![]u8 {
+    return switch (cat) {
+        .string_sq => dequoteSingle(allocator, text),
+        .string_dq => dequoteDouble(allocator, text),
+        else => allocator.dupe(u8, text),
+    };
+}
+
+fn dequoteSingle(allocator: Allocator, text: []const u8) ![]u8 {
+    // Single-quoted: strip surrounding `'` if present; no escape processing.
+    var body = text;
+    if (body.len >= 2 and body[0] == '\'' and body[body.len - 1] == '\'') {
+        body = body[1 .. body.len - 1];
+    } else if (body.len >= 1 and body[0] == '\'') {
+        body = body[1..]; // unterminated; take what we have
+    }
+    return allocator.dupe(u8, body);
+}
+
+fn dequoteDouble(allocator: Allocator, text: []const u8) ![]u8 {
+    var body = text;
+    if (body.len >= 2 and body[0] == '"' and body[body.len - 1] == '"') {
+        body = body[1 .. body.len - 1];
+    } else if (body.len >= 1 and body[0] == '"') {
+        body = body[1..];
+    }
+    // Process backslash-escapes: `\"`, `\\`, `\$`, `\``, `\n`. The shell's
+    // full set is broader, but completion just needs a usable argv — we do
+    // NOT expand variables, command substitutions, globs, or braces.
+    var out = try std.ArrayList(u8).initCapacity(allocator, body.len);
+    defer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < body.len) : (i += 1) {
+        const c = body[i];
+        if (c == '\\' and i + 1 < body.len) {
+            const next = body[i + 1];
+            switch (next) {
+                '\\', '"', '$', '`', '\n' => {
+                    try out.append(allocator, next);
+                    i += 1;
+                },
+                else => try out.append(allocator, c),
+            }
+        } else {
+            try out.append(allocator, c);
+        }
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 fn previousWhitespaceWord(buffer: []const u8, cursor_byte_raw: usize) ?[]const u8 {

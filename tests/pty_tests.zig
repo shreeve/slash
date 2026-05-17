@@ -1759,6 +1759,62 @@ test "slash pty: completion str erase completes defined names" {
     try std.testing.expect(std.mem.indexOf(u8, after, "str 'zzz'") == null);
 }
 
+fn carapaceInstalled() bool {
+    const path_env_z = std.c.getenv("PATH") orelse return false;
+    const path_env = std.mem.span(path_env_z);
+    var it = std.mem.splitScalar(u8, path_env, ':');
+    while (it.next()) |seg_raw| {
+        const seg = if (seg_raw.len == 0) "." else seg_raw;
+        var buf: [4096]u8 = undefined;
+        const total = seg.len + 1 + "carapace".len;
+        if (total + 1 > buf.len) continue;
+        @memcpy(buf[0..seg.len], seg);
+        buf[seg.len] = '/';
+        @memcpy(buf[seg.len + 1 ..][0.."carapace".len], "carapace");
+        buf[total] = 0;
+        const ptr: [*:0]const u8 = @ptrCast(&buf);
+        if (std.c.access(ptr, std.c.X_OK) == 0) return true;
+    }
+    return false;
+}
+
+test "slash pty: carapace flag completion fills in for docker run" {
+    if (!ptySupported()) return error.SkipZigTest;
+    if (!carapaceInstalled()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "docker run -\t", .settle_ms = 800, .wait_for = "--help" },
+        .{ .send = "\x03", .settle_ms = 100 },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    // Carapace's docker spec includes hundreds of flags; --help is one
+    // of the most stable entries, present in every recent docker CLI.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "--help") != null);
+}
+
+test "slash pty: carapace unknown command falls through to filename completion" {
+    if (!ptySupported()) return error.SkipZigTest;
+    if (!carapaceInstalled()) return error.SkipZigTest;
+
+    const alloc = std.testing.allocator;
+    // `slash_carapace_no_such_command_xyz` is almost certainly not a
+    // command carapace has a spec for. The completion should silently
+    // fall through to filename completion. Use a unique prefix that
+    // does match a real repo file (`README.md`) to assert the
+    // fallthrough produced a useful menu rather than an empty one.
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "slash_carapace_no_such_command_xyz REA\t", .settle_ms = 500, .wait_for = "README" },
+        .{ .send = "\x03", .settle_ms = 100 },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "README") != null);
+}
+
 test "slash pty: completion fg percent inserts current job spec" {
     if (!ptySupported()) return error.SkipZigTest;
 
