@@ -68,10 +68,9 @@ source  →  Shape  →  Program  →  Job
 - **`src/history.zig`** — slash-side persistent command-history index
   with cwd / ts / status / duration metadata, JSONL persistence under
   XDG, and a frecency + cwd-boost + recency ranking API. Substrate
-  for the `history` builtin and smart prefix-aware Up/Down navigation
-  (both shipped); also the ranking source for the ROADMAP autosuggestion
-  and Ctrl-R search-UI items. PLAN §12: editor-time only, no shell
-  expansion.
+  for the `history` builtin, smart prefix-aware Up/Down navigation,
+  history autosuggestions (dim ghost-text), and Ctrl-R reverse-i-search.
+  PLAN §12: editor-time only, no shell expansion.
 - **`src/vars.zig`** — `VarStore`: scalar and list variables, exported
   flag.
 - **`src/runtime.zig`** — `Result`, `Signal`, status-byte conversion.
@@ -87,8 +86,12 @@ source  →  Shape  →  Program  →  Job
   `src/main.zig` and `tests/headless_tests.zig`. No production code.
 - **`src/main.zig`** — CLI entry point.
 - **`PLAN.md`** — design constitution.
-- **`ROADMAP.md`** — concrete remaining work; items disappear as they
-  ship.
+- **`CHECKLIST.md`** — POSIX/APUE/CS61 operational audit; the rubric
+  for "does this behave like a correct Unix shell?"
+- **`CHANGELOG.md`** — per-release highlight reel (curated; not a
+  commit log).
+- **`VALIDATION.md`** — append-only log of `scripts/validate-interactive.sh`
+  runs against real interactive programs (vim, less, ssh, REPLs).
 
 ## Critical invariants
 
@@ -127,10 +130,11 @@ is wrong.
   "TODO add this", or "for now we just" in source comments or in
   `PLAN.md` / `AGENTS.md` / `README.md` / `CHECKLIST.md`. Code
   describes what *is*. Features that haven't shipped yet simply
-  aren't referenced. Future work belongs in `ROADMAP.md`; empirical
- history belongs in `VALIDATION.md`; per-release highlights
- belong in `CHANGELOG.md`. Those three are the legitimate homes
- for "what's next" / "what was" / "what shipped".
+  aren't referenced. Empirical history belongs in `VALIDATION.md`;
+  per-release highlights belong in `CHANGELOG.md`. If a future
+  release accumulates enough planned work to need an explicit
+  staging file, recreate `ROADMAP.md` and shrink it to empty before
+  tagging — that's how every Slash release has shipped so far.
 - **Comments explain non-obvious intent, trade-offs, or constraints.**
   Don't narrate what the code does line-by-line.
 - **Public-API names are real English words a Unix engineer
@@ -162,17 +166,24 @@ After grammar changes:
 zig build test
 ```
 
-## Working on items from the ROADMAP
+## Working on a new feature
 
-When you ship an item from `ROADMAP.md`, **delete it from that file** in
-the same commit. The ROADMAP shrinks until empty; that's how 1.0 ships.
+There is no standing list of planned work — `CHANGELOG.md` shows
+what shipped, and the absence of `ROADMAP.md` means nothing is
+queued. Before starting anything new:
 
-For each item:
-1. Read the item's description.
-2. Verify it still passes the §14 test. (It should, but always re-check
-   against the rule above.)
-3. Look at related PLAN.md sections.
-4. Implement, test, update ROADMAP.
+1. Write down what the feature is in one sentence.
+2. Verify it passes the §14 test (must improve `Command` clarity,
+   `Pipeline` correctness, `Program` composability, or `Job` control).
+   If it doesn't, stop — it's not a Slash feature.
+3. Look at related `PLAN.md` sections so the feature fits the
+   existing model rather than adding a parallel one.
+4. Implement, test, document in `CHANGELOG.md` under the next
+   version's unreleased section.
+
+If multiple items pile up before the next release, recreate
+`ROADMAP.md`, list them, and delete entries as they ship — empty
+the file before tagging.
 
 ## When in doubt
 

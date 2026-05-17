@@ -105,7 +105,7 @@ What ships today:
 - live job-state announcements (`[N] Stopped`, `[N] Continued`, `[N] Done`; mid-prompt opt-in via `$SLASH_NOTIFY=immediate`)
 - user-configurable key bindings via the `key` builtin (`key Alt-L "ls -la\n"` for a literal; `key Esc-P history-prev-prefix` for a named action; `key "¬" "..."` to bind directly to UTF-8 chars when your terminal swallows Option keys; `key --probe` to see what your terminal actually sends; `key --actions` to list every registered action). See `.slashrc.example` for the full set of patterns.
 
-See [`ROADMAP.md`](./ROADMAP.md) for remaining release work.
+See [`CHANGELOG.md`](./CHANGELOG.md) for per-release highlights.
 
 ```sh
 # `str` — editor-only literal-text rewrites. Strict literal bytes →
