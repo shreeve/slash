@@ -33,16 +33,14 @@ files=[README.md PLAN.md CHECKLIST.md]
 grep -l zig $files | sort -u > hits.txt || echo no matches
 
 # control flow
-if test -d /tmp {
+if test -d /tmp
   echo found
-} else {
+else
   echo missing
-}
 
 # user-defined commands
-cmd greet {
+cmd greet
   echo "hello, $1"
-}
 
 # jobs
 sleep 60 &
@@ -50,8 +48,9 @@ jobs
 fg %1
 ```
 
-Brace blocks and indent blocks have the same semantics. Pick the one
-that fits the line.
+Indent and brace blocks have the same semantics. The sample above is
+indent-style; `{ … }` form is handy for one-liners, e.g.
+`if test -d /tmp { echo found }`.
 
 ## What makes Slash different
 
