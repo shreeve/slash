@@ -1204,7 +1204,19 @@ fn editInEditor(
         content = try allocator.realloc(content, content.len - 1);
     }
 
-    return .{ .replace_buffer = content };
+    // bash `edit-and-execute-command` semantics: after the editor
+    // exits, the edited line is RUN (not just dropped back into the
+    // buffer for the user to tweak + press Enter). Matches what
+    // users expect from `Ctrl-X,Ctrl-E` and removes the "I have to
+    // press Ctrl-C now to get out of this line" pain reported when
+    // `.replace_buffer` was used and the buffer reappeared on the
+    // same prompt row after the editor returned.
+    //
+    // If the user wants the "load into buffer for tweaking" flow
+    // instead, that's a different action surface that we can wire
+    // later (`edit-in-buffer` returning `.replace_buffer`); the
+    // common case wants execute.
+    return .{ .replace_buffer_and_accept = content };
 }
 
 /// Fork + execvp `$VISUAL`/`$EDITOR`/`vi` to edit `tmp_path`, wait
