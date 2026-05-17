@@ -9,7 +9,7 @@ const parser = @import("parser.zig");
 const session_mod = @import("session.zig");
 const slash = @import("slash.zig");
 const zigline = @import("zigline");
-const portable_stat = @import("portable_stat.zig");
+const stat = @import("stat.zig");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -397,7 +397,7 @@ fn enumerateDir(
         const full = std.fmt.bufPrint(&full_buf, "{s}/{s}\x00", .{ dir_path, name }) catch continue;
         const full_z: [*:0]const u8 = @ptrCast(full.ptr);
         // Portable kind check; statx on Linux + fstatat on macOS.
-        const info_opt = portable_stat.statPath(full_z);
+        const info_opt = stat.statPath(full_z);
         const is_dir = if (info_opt) |info| info.kind == .directory else false;
 
         if (mode == .directories and !is_dir) continue;

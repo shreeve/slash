@@ -8,7 +8,7 @@ const vars = @import("vars.zig");
 const program_mod = @import("program.zig");
 const history_mod = @import("history.zig");
 const keybinding = @import("keybinding.zig");
-const keyboard_layouts = @import("keyboard_layouts.zig");
+const keyboards = @import("keyboards.zig");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -377,7 +377,7 @@ pub const Session = struct {
     /// `composeToOptionLetter` to derive the Alt-letter chord
     /// the user actually meant. Default: US-QWERTY; future
     /// non-US layouts plug in via `$SLASH_KEYBOARD`.
-    keyboard_layout: *const keyboard_layouts.Layout = &keyboard_layouts.us_qwerty,
+    keyboard_layout: *const keyboards.Layout = &keyboards.us_qwerty,
     /// PATH lookup memoization. Keys and values are owned by `alloc`.
     /// `path_cache_signature` is a dup'd snapshot of `$PATH` at the time
     /// the cache was last validated; on mismatch the cache is dropped

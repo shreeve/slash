@@ -353,7 +353,7 @@ macOS-only development had hidden:
 - **F5: `std.c.fstatat` macOS-only.** Zig 0.16's `std.c.Stat` is
   `void` on Linux — the stdlib steers callers toward `statx(2)`
   and drops the per-glibc `struct stat` shape. **FIXED**: added
-  `src/portable_stat.zig` with a narrow `Info { kind, size }`
+  `src/stat.zig` with a narrow `Info { kind, size }`
   surface that routes through `statx` on Linux and `fstatat` on
   macOS. Four call sites in `builtins.zig`, `completion.zig`,
   and `eval.zig` migrated.

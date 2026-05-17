@@ -64,11 +64,11 @@ fn statMac(path_z: [*:0]const u8) ?Info {
     return .{ .kind = kind, .size = @intCast(st.size) };
 }
 
-test "portable_stat: . is a directory" {
+test "stat: . is a directory" {
     const info = statPath(".") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(Kind.directory, info.kind);
 }
 
-test "portable_stat: missing path returns null" {
+test "stat: missing path returns null" {
     try std.testing.expect(statPath("/this/path/should/not/exist/slash/stat") == null);
 }

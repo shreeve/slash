@@ -29,7 +29,7 @@ const job = @import("job.zig");
 const builtins = @import("builtins.zig");
 const session_mod = @import("session.zig");
 const vars_mod = @import("vars.zig");
-const portable_stat = @import("portable_stat.zig");
+const stat = @import("stat.zig");
 
 pub const Allocator = std.mem.Allocator;
 pub const Result = runtime.Result;
@@ -2614,7 +2614,7 @@ fn pathExists(path: []const u8) bool {
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
     const path_z: [*:0]const u8 = @ptrCast(&buf);
-    return portable_stat.statPath(path_z) != null;
+    return stat.statPath(path_z) != null;
 }
 
 fn isDirectory(path: []const u8) bool {
@@ -2623,6 +2623,6 @@ fn isDirectory(path: []const u8) bool {
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
     const path_z: [*:0]const u8 = @ptrCast(&buf);
-    const info = portable_stat.statPath(path_z) orelse return false;
+    const info = stat.statPath(path_z) orelse return false;
     return info.kind == .directory;
 }

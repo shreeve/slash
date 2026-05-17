@@ -24,14 +24,14 @@ const terminal_mod = @import("terminal.zig");
 const shape_mod = @import("shape.zig");
 const program_mod = @import("program.zig");
 const keybinding = @import("keybinding.zig");
-const keyboard_layouts = @import("keyboard_layouts.zig");
+const keyboards = @import("keyboards.zig");
 const zigline_mod = @import("zigline");
 const diag = @import("diagnostics.zig");
 const word_mod = @import("word.zig");
 const parser = @import("parser.zig");
 const slash = @import("slash.zig");
 const history_mod = @import("history.zig");
-const portable_stat = @import("portable_stat.zig");
+const stat = @import("stat.zig");
 const notice = @import("notice.zig");
 
 pub const Allocator = std.mem.Allocator;
@@ -376,8 +376,8 @@ fn runUnaryTest(op: []const u8, arg: []const u8) !Result {
     if (std.mem.eql(u8, op, "-w")) return .{ .exited = if (std.c.access(path_z, std.c.W_OK) == 0) 0 else 1 };
     if (std.mem.eql(u8, op, "-x")) return .{ .exited = if (std.c.access(path_z, std.c.X_OK) == 0) 0 else 1 };
     // Portable kind + size lookup; routes through statx on Linux
-    // and fstatat on macOS (see `src/portable_stat.zig`).
-    const info = portable_stat.statPath(path_z) orelse return .{ .exited = 1 };
+    // and fstatat on macOS (see `src/stat.zig`).
+    const info = stat.statPath(path_z) orelse return .{ .exited = 1 };
     if (std.mem.eql(u8, op, "-e")) return .{ .exited = 0 };
     if (std.mem.eql(u8, op, "-f")) return .{ .exited = if (info.kind == .file) 0 else 1 };
     if (std.mem.eql(u8, op, "-d")) return .{ .exited = if (info.kind == .directory) 0 else 1 };
@@ -2033,7 +2033,7 @@ fn maybeWarnDeadKey(
     if (bk.code != .char) return;
     if (!bk.mods.alt) return;
     if (bk.char > 0x7f) return;
-    if (!keyboard_layouts.isDeadKey(session.keyboard_layout, @intCast(bk.char))) return;
+    if (!keyboards.isDeadKey(session.keyboard_layout, @intCast(bk.char))) return;
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &buf,

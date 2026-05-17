@@ -1,4 +1,4 @@
-//! keyboard_layouts — physical-keyboard → terminal-byte mapping
+//! keyboards — physical-keyboard → terminal-byte mapping
 //! tables, used by `slashKeymapLookup` to reverse-resolve compose
 //! characters back to their Option-letter origin.
 //!

@@ -336,7 +336,8 @@ test {
     _ = @import("repl.zig");
     _ = @import("history.zig");
     _ = @import("keybinding.zig");
-    _ = @import("keyboard_layouts.zig");
+    _ = @import("keyboards.zig");
+    _ = @import("stat.zig");
 }
 
 fn printUsage() void {

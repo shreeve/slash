@@ -109,7 +109,7 @@ genuinely natural on macOS.
 - **Linux validation live.** GitHub Actions matrix added for
   `ubuntu-latest` alongside `macos-latest`. Both run the full
   166-test suite on every push.
-- **Portable file stat** — new `src/portable_stat.zig` shim
+- **Portable file stat** — new `src/stat.zig` shim
   uses `statx(2)` on Linux and `fstatat(2)` on macOS,
   replacing the previous `std.c.Stat` calls that compiled to
   `void` on Linux in Zig 0.16.
