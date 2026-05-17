@@ -260,29 +260,20 @@ fn gatherArgumentCandidates(
         return;
     }
 
-    // Tool-specific completion: carapace is the primary path because it
-    // has dramatically richer coverage (flag completion, branch names,
-    // image names, ...) than our hardcoded specs. Earlier this routed
-    // `git`/`ssh` to static lists first; that intercepted `git log -`
-    // before carapace could offer flag completions.
+    // Tool-specific completion: carapace is the only path for
+    // non-builtin commands. Slash does not maintain hardcoded specs
+    // for external tools — that's carapace's job. When carapace is
+    // installed it owns git, docker, kubectl, cargo, gh, terraform,
+    // etc.; when it's not, external commands fall through to generic
+    // path completion. `brew install carapace` (or `apt install
+    // carapace-bin`) for the long-tail coverage.
     //
-    // `null` = carapace unavailable or doesn't know this command — fall
-    // through to the hardcoded fallback (if any), then path completion.
-    // `[]` = carapace knows the command and reports no matches — that's
+    // `null` = carapace unavailable or doesn't know this command —
+    // fall through to path completion.
+    // `[]` = carapace knows the command and reports no matches —
     // authoritative; do NOT fall through (a `git zzzzz<Tab>` showing
     // filenames would be a worse menu than no menu).
     if (try maybeCarapace(allocator, command_name, buffer, ctx, out)) return;
-
-    // Hardcoded fallbacks for systems without carapace installed. Kept
-    // narrow on purpose — these are "starter" specs, not a parallel
-    // completion ecosystem. For coverage beyond this, `brew install
-    // carapace` (or `apt install carapace-bin`).
-    if (std.mem.eql(u8, command_name, "git")) {
-        return gatherStatic(allocator, ctx, out, &git_subcommands, .plain, ' ');
-    }
-    if (std.mem.eql(u8, command_name, "ssh")) {
-        return gatherStatic(allocator, ctx, out, &ssh_starters, .plain, ' ');
-    }
 
     try gatherPathCandidates(allocator, ctx, out, .any);
 }
@@ -474,33 +465,14 @@ fn isAsciiSpace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n';
 }
 
-const git_subcommands = [_][]const u8{
-    "add",    "bisect", "branch", "checkout", "clone", "commit",
-    "diff",   "fetch",  "grep",   "init",     "log",   "merge",
-    "pull",   "push",   "rebase", "remote",   "reset", "restore",
-    "status", "switch", "tag",
-};
-
-const ssh_starters = [_][]const u8{
-    "-4", "-6", "-A", "-a", "-C", "-f", "-i", "-l", "-N", "-p", "-T", "-v",
-};
-
+// Used by the `kill -<signal>` completion path. Slash owns this list
+// because signals are POSIX, stable, and bounded — there's no external
+// tool that would catalog them better.
 const signal_names = [_][]const u8{
     "HUP",  "INT",  "QUIT", "ILL",  "TRAP", "ABRT", "BUS",
     "FPE",  "KILL", "USR1", "SEGV", "USR2", "PIPE", "ALRM",
     "TERM", "CONT", "STOP", "TSTP", "TTIN", "TTOU", "CHLD",
 };
-
-fn gatherStatic(
-    allocator: Allocator,
-    ctx: WordContext,
-    out: *CandidateList,
-    values: []const []const u8,
-    kind: zigline.CandidateKind,
-    append: ?u8,
-) !void {
-    for (values) |v| try appendIfMatch(allocator, out, ctx, .{ .insert = v, .kind = kind, .append = append });
-}
 
 fn gatherSignals(allocator: Allocator, ctx: WordContext, out: *CandidateList) !void {
     for (signal_names) |name| {
@@ -790,18 +762,6 @@ test "completion: newline restores command position" {
     const ctx = identifyContext("echo hi\nec", "echo hi\nec".len);
     try std.testing.expect(ctx.command_position);
     try std.testing.expectEqualStrings("ec", ctx.prefix);
-}
-
-test "completion: git subcommands are static candidates" {
-    var s = try session_mod.Session.init(std.testing.allocator, @ptrCast(@alignCast(std.c.environ)), false);
-    defer s.deinit();
-    const r = try complete(std.testing.allocator, .{
-        .session = &s,
-        .buffer = "git ch",
-        .cursor_byte = "git ch".len,
-    });
-    defer freeCandidates(std.testing.allocator, r.candidates);
-    try expectCandidate(r.candidates, "checkout");
 }
 
 test "completion: cd candidates are directories only" {

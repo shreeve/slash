@@ -72,10 +72,10 @@ indent-style; `{ … }` form is handy for one-liners, e.g.
 
 Slash ships fish-class interactive UX: syntax highlighting, history
 autosuggestions, Ctrl-R search, prefix-aware Up/Down, and Tab
-completion (paths, `$PATH` commands, builtin specs for `cd` / `git` /
-`ssh` / `kill` / `fg` / `bg`). Key bindings are configurable via the
-`key` builtin, `$PROMPT` accepts zsh-style prompt strings, and
-job-state changes can be surfaced inline.
+completion (paths, `$PATH` commands, builtin specs for `cd` / `kill`
+/ `fg` / `bg`). Key bindings are configurable via the `key` builtin,
+`$PROMPT` accepts zsh-style prompt strings, and job-state changes
+can be surfaced inline.
 
 Four built-in syntax highlighting themes ship: `github-dark`,
 `github-light`, `vscode-dark`, `vscode-light` — colors lifted directly

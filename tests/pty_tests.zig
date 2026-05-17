@@ -1712,8 +1712,9 @@ test "slash pty: completion cd tab completes directories only" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "/src") != null);
 }
 
-test "slash pty: completion git tab lists static subcommands" {
+test "slash pty: completion git tab lists subcommands via carapace" {
     if (!ptySupported()) return error.SkipZigTest;
+    if (!carapaceInstalled()) return error.SkipZigTest;
 
     const alloc = std.testing.allocator;
     const r = try runScript(alloc, &.{"--norc"}, &.{
