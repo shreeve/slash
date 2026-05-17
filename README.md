@@ -77,6 +77,13 @@ completion (paths, `$PATH` commands, builtin specs for `cd` / `git` /
 `key` builtin, `$PROMPT` accepts zsh-style prompt strings, and
 job-state changes can be surfaced inline.
 
+Four built-in syntax highlighting themes ship: `github-dark`,
+`github-light`, `vscode-dark`, `vscode-light` — colors lifted directly
+from GitHub's Primer design system and VS Code's `Dark+` / `Light+`
+defaults. Set `$SLASH_THEME=github-light` (or any of the four) in
+`~/.slashrc`. With `$SLASH_THEME` unset, Slash auto-detects the
+terminal background via `$COLORFGBG` and picks the GitHub variant.
+
 For rich completions across ~1100 modern CLIs (`git checkout` branches,
 `docker run --flags`, `kubectl get` resources, `cargo`, `gh`,
 `terraform`, ...), `brew install carapace` (or `apt install carapace-bin`).

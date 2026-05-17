@@ -74,6 +74,12 @@ source  →  Shape  →  Program  →  Job
   process-group teardown of any grandchildren on overrun. Empty stdout
   = unknown command (fall through); `[]` = authoritative empty.
 - **`src/builtins.zig`** — builtin registry and implementations.
+- **`src/repl.zig`** — interactive REPL + zigline hook adapters.
+  Hosts the syntax-highlighter palette tables (four built-in
+  themes: `github-dark`, `github-light`, `vscode-dark`,
+  `vscode-light`). Theme selection via `$SLASH_THEME`
+  (legacy `$THEME` honored); auto-detected from `$COLORFGBG` when
+  unset.
 - **`src/session.zig`** — long-lived shell state.
 - **`src/history.zig`** — slash-side persistent command-history index
   with cwd / ts / status / duration metadata, JSONL persistence under

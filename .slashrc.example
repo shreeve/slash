@@ -34,6 +34,29 @@
 
 
 # -----------------------------------------------------------------------------
+# Syntax highlighting theme
+# -----------------------------------------------------------------------------
+#
+# `$SLASH_THEME` picks one of four built-in palettes. Colors come
+# directly from the canonical sources (GitHub Primer / VS Code defaults).
+#
+#   github-dark    Default for dark terminals (the prettylights palette
+#                  used by github.com itself and the GitHub VS Code theme)
+#   github-light   Matched pair, designed for white backgrounds
+#   vscode-dark    VS Code Dark+ (Microsoft's default since 2015)
+#   vscode-light   VS Code Light+
+#
+# Convenience aliases: `github` and `vscode` auto-pick the dark/light
+# variant from your terminal background. `dark` / `light` alias the
+# GitHub variants.
+#
+# When unset, Slash auto-detects via `$COLORFGBG` and defaults to the
+# GitHub family.
+
+# export SLASH_THEME=github-dark
+
+
+# -----------------------------------------------------------------------------
 # Notifications
 # -----------------------------------------------------------------------------
 #

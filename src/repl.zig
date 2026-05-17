@@ -1698,15 +1698,28 @@ fn isCloseBracketByte(b: u8) bool {
 // the iTerm2 / Terminal.app / etc. profile defines, which can be
 // anything from teal-instead-of-cyan to a near-invisible muddy gold.)
 //
-// Two palettes ship: `palette_dark` (Tokyonight-inspired, designed
-// for dark terminal backgrounds) and `palette_light` (Solarized Light-
-// inspired, designed for light backgrounds). Selection is via the
-// `THEME` shell variable: `THEME=light` picks the light palette;
-// anything else (including unset) picks dark.
+// Four palettes ship, sourced from the canonical color tables of two
+// well-known editor themes:
 //
-// To customize, copy the constant body and tweak the RGB values, or
-// set `THEME=light` in `~/.slashrc`. Per-token color customization
-// (a hash from token category → color) is a slash 1.2 candidate.
+//   - `palette_github_dark` and `palette_github_light` — the matched
+//     pair from GitHub's Primer design system (the same colors VS
+//     Code's `GitHub Dark Default` / `GitHub Light Default` extensions
+//     and github.com's own code views use).
+//
+//   - `palette_vscode_dark` and `palette_vscode_light` — VS Code's
+//     built-in `Dark+` and `Light+` defaults, extracted directly from
+//     `dark_vs.json` / `light_vs.json` in the VS Code source tree.
+//
+// Selection is via `$SLASH_THEME` (legacy: `$THEME`):
+//
+//   github-dark | github-light    explicit GitHub variant
+//   vscode-dark | vscode-light    explicit VS Code variant
+//   github | vscode               family — auto-pick variant by background
+//   dark | light                  back-compat aliases for the GitHub variant
+//
+// If `$SLASH_THEME` is unset, Slash auto-detects the terminal background
+// via `$COLORFGBG` and picks `palette_github_dark` or `palette_github_light`.
+// Unset background → dark.
 
 const Palette = struct {
     keyword: zigline.Color,
@@ -1746,57 +1759,143 @@ fn rgb(r: u8, g: u8, b: u8) zigline.Color {
     return .{ .rgb = .{ .r = r, .g = g, .b = b } };
 }
 
-/// Tokyonight-inspired dark palette. Designed against terminal
-/// backgrounds in the `#1a1b26 .. #2c2e3e` range. Foreground accents
-/// stay legible on near-black without being blinding.
-const palette_dark: Palette = .{
-    .keyword = rgb(0xbb, 0x9a, 0xf7), //  soft purple
-    .command = rgb(0x73, 0xda, 0xca), //  teal — distinct from keyword/string/operator
-    .argument = rgb(0x9a, 0xa5, 0xce), //  muted blue-gray — readable but recedes
-    .integer = rgb(0xff, 0x9e, 0x64), //  warm orange
-    .string_literal = rgb(0x9e, 0xce, 0x6a), //  green
-    .variable = rgb(0xe0, 0xaf, 0x68), //  amber
-    .cmd_subst = rgb(0xc7, 0x92, 0xea), //  lavender — calls out `$(...)` against `$var`
-    .heredoc_body = rgb(0x9e, 0xce, 0x6a), //  same as string
-    .redirect = rgb(0x82, 0xaa, 0xff), //  saturated blue, distinct from operator cyan
-    .glob = rgb(0xff, 0xc7, 0x77), //  saffron — warmer than integer orange
-    .operator = rgb(0x89, 0xdd, 0xff), //  cyan-blue (legible against dark)
-    .comment = rgb(0x56, 0x5f, 0x89), //  muted slate
-    .err = rgb(0xf7, 0x76, 0x8e), //  rose
-    .bracket_match = rgb(0xe0, 0xaf, 0x68), //  amber, same as variable
+/// GitHub Dark Default. Values match `prettylights.syntax.*` from
+/// the Primer design system; identical to what `github.com` and the
+/// `GitHub Dark Default` VS Code extension render. Optimized against
+/// backgrounds in the `#0d1117 .. #161b22` range (near-black).
+const palette_github_dark: Palette = .{
+    .keyword = rgb(0xFF, 0x7B, 0x72), //  red — keyword
+    .command = rgb(0xD2, 0xA8, 0xFF), //  purple — entity (function name)
+    .argument = rgb(0xE6, 0xED, 0xF3), //  off-white — foreground default
+    .integer = rgb(0x79, 0xC0, 0xFF), //  sky-blue — constant
+    .string_literal = rgb(0xA5, 0xD6, 0xFF), //  pale blue — string
+    .variable = rgb(0xFF, 0xA6, 0x57), //  orange — variable
+    .cmd_subst = rgb(0xD2, 0xA8, 0xFF), //  purple — `$(...)` is a call, same family as command
+    .heredoc_body = rgb(0xA5, 0xD6, 0xFF), //  pale blue — same as string
+    .redirect = rgb(0x7E, 0xE7, 0x87), //  green — entity.name.tag (I/O routing reads as "wiring")
+    .glob = rgb(0xF2, 0xCC, 0x60), //  yellow — markup-list (wildcards stand out)
+    .operator = rgb(0xFF, 0x7B, 0x72), //  red — same as keyword (bold separates them)
+    .comment = rgb(0x8B, 0x94, 0x9E), //  gray — comment
+    .err = rgb(0xF8, 0x51, 0x49), //  danger red — invalid.illegal
+    .bracket_match = rgb(0xFF, 0xA6, 0x57), //  orange — same as variable
 };
 
-/// Solarized Light-inspired palette. Designed against backgrounds in
-/// the `#fdf6e3 .. #eee8d5` range (cream / paper). Accents pick the
-/// darker Solarized hues so they read as text-with-emphasis, not as
-/// neon overlays.
-const palette_light: Palette = .{
-    .keyword = rgb(0x26, 0x8b, 0xd2), //  blue
-    .command = rgb(0x2a, 0xa1, 0x98), //  Solarized cyan — distinct from blue
-    .argument = rgb(0x65, 0x7b, 0x83), //  base00 — slightly darker than slate
-    .integer = rgb(0xcb, 0x4b, 0x16), //  orange
-    .string_literal = rgb(0x85, 0x99, 0x00), //  green
-    .variable = rgb(0xb5, 0x89, 0x00), //  yellow / dark gold
-    .cmd_subst = rgb(0x6c, 0x71, 0xc4), //  Solarized violet — distinct from blue/cyan
-    .heredoc_body = rgb(0x85, 0x99, 0x00), //  green
-    .redirect = rgb(0xd3, 0x36, 0x82), //  Solarized magenta — distinct from operator slate
-    .glob = rgb(0xcb, 0x4b, 0x16), //  same orange as integer; rare overlap is fine
-    .operator = rgb(0x58, 0x6e, 0x75), //  base01 — slate
-    .comment = rgb(0x93, 0xa1, 0xa1), //  base1 — pale gray
-    .err = rgb(0xdc, 0x32, 0x2f), //  red
-    .bracket_match = rgb(0xb5, 0x89, 0x00), //  yellow, same as variable
+/// GitHub Light Default. Matched pair with `palette_github_dark`;
+/// designed against `#ffffff` paper backgrounds.
+const palette_github_light: Palette = .{
+    .keyword = rgb(0xCF, 0x22, 0x2E), //  red
+    .command = rgb(0x82, 0x50, 0xDF), //  purple
+    .argument = rgb(0x1F, 0x23, 0x28), //  near-black foreground
+    .integer = rgb(0x05, 0x50, 0xAE), //  blue
+    .string_literal = rgb(0x0A, 0x30, 0x69), //  deep blue
+    .variable = rgb(0x95, 0x38, 0x00), //  brown
+    .cmd_subst = rgb(0x82, 0x50, 0xDF), //  purple — same as command
+    .heredoc_body = rgb(0x0A, 0x30, 0x69), //  deep blue
+    .redirect = rgb(0x11, 0x63, 0x29), //  dark green
+    .glob = rgb(0x9A, 0x67, 0x00), //  dark yellow
+    .operator = rgb(0xCF, 0x22, 0x2E), //  red
+    .comment = rgb(0x6E, 0x77, 0x81), //  gray
+    .err = rgb(0x82, 0x07, 0x1E), //  dark red — danger.emphasis
+    .bracket_match = rgb(0x95, 0x38, 0x00), //  brown
 };
 
-/// Look up `THEME` from the session and return the matching palette.
-/// Unknown / unset values fall back to dark.
+/// VS Code Dark+ (the canonical Microsoft default since 2015).
+/// Values extracted from `extensions/theme-defaults/themes/dark_vs.json`
+/// in the VS Code source tree. Optimized for `#1e1e1e` backgrounds.
+const palette_vscode_dark: Palette = .{
+    .keyword = rgb(0x56, 0x9C, 0xD6), //  blue — keyword.control
+    .command = rgb(0xDC, 0xDC, 0xAA), //  tan — function declaration
+    .argument = rgb(0xD4, 0xD4, 0xD4), //  off-white — foreground
+    .integer = rgb(0xB5, 0xCE, 0xA8), //  sage — constant.numeric
+    .string_literal = rgb(0xCE, 0x91, 0x78), //  peach — string
+    .variable = rgb(0x9C, 0xDC, 0xFE), //  sky-blue — variable
+    .cmd_subst = rgb(0xDC, 0xDC, 0xAA), //  tan — same as command (it IS a call)
+    .heredoc_body = rgb(0xCE, 0x91, 0x78), //  peach — same as string
+    .redirect = rgb(0xD7, 0xBA, 0x7D), //  tan-yellow — constant.character.escape
+    .glob = rgb(0xD1, 0x69, 0x69), //  muted red — string.regexp
+    .operator = rgb(0xC5, 0x86, 0xC0), //  magenta — control flow
+    .comment = rgb(0x6A, 0x99, 0x55), //  green — comment
+    .err = rgb(0xF4, 0x47, 0x47), //  red — invalid
+    .bracket_match = rgb(0xDC, 0xDC, 0xAA), //  tan
+};
+
+/// VS Code Light+ (the canonical Microsoft light default). Values
+/// extracted from `light_vs.json`. Optimized for `#ffffff` backgrounds.
+/// VS Code Light+ leans heavily on saturated primary colors — it has
+/// a deliberately early-2000s feel that some users find nostalgic.
+const palette_vscode_light: Palette = .{
+    .keyword = rgb(0x00, 0x00, 0xFF), //  electric blue
+    .command = rgb(0x79, 0x5E, 0x26), //  brown — function
+    .argument = rgb(0x00, 0x00, 0x00), //  black — foreground
+    .integer = rgb(0x09, 0x86, 0x58), //  dark green
+    .string_literal = rgb(0xA3, 0x15, 0x15), //  dark red
+    .variable = rgb(0x00, 0x10, 0x80), //  navy
+    .cmd_subst = rgb(0x79, 0x5E, 0x26), //  brown — same as command
+    .heredoc_body = rgb(0xA3, 0x15, 0x15), //  dark red
+    .redirect = rgb(0x26, 0x7F, 0x99), //  teal — type-ish
+    .glob = rgb(0x81, 0x1F, 0x3F), //  dark crimson — regexp
+    .operator = rgb(0xAF, 0x00, 0xDB), //  magenta — control flow accent
+    .comment = rgb(0x00, 0x80, 0x00), //  green
+    .err = rgb(0xCD, 0x31, 0x31), //  red
+    .bracket_match = rgb(0x79, 0x5E, 0x26), //  brown
+};
+
+/// Read `$COLORFGBG` (the de-facto convention set by xterm, rxvt,
+/// iTerm2, Konsole, gnome-terminal, etc.) and decide whether the
+/// terminal background is dark. Format is `<fg>;<bg>` or
+/// `<fg>;<default>;<bg>`; values are ANSI palette indices 0–15.
+///
+/// Convention (mirrors `fzf`, `bat`, `vim`): a background index of
+/// 0–6 is "dark," 7–15 is "light." Returns `true` (dark) when the
+/// variable is unset or unparseable.
+fn terminalBackgroundIsDark() bool {
+    const env_z = std.c.getenv("COLORFGBG") orelse return true;
+    const s = std.mem.span(env_z);
+    var last_sep_after: usize = 0;
+    for (s, 0..) |c, i| {
+        if (c == ';') last_sep_after = i + 1;
+    }
+    const bg_str = if (last_sep_after < s.len) s[last_sep_after..] else return true;
+    const bg = std.fmt.parseInt(u8, bg_str, 10) catch return true;
+    return bg <= 6;
+}
+
+/// Look up `$SLASH_THEME` (or `$THEME` for back-compat) from the
+/// session and return the matching palette. Unknown names fall back
+/// to `palette_github_dark`; unset names trigger `$COLORFGBG`
+/// auto-detection between `palette_github_dark` and
+/// `palette_github_light`.
 fn pickPalette(session: *const session_mod.Session) Palette {
-    if (session.vars.get("THEME")) |v| switch (v.value) {
-        .scalar => |s| {
-            if (std.mem.eql(u8, s, "light")) return palette_light;
-        },
+    const name_opt = readThemeName(session);
+    if (name_opt) |s| {
+        if (std.mem.eql(u8, s, "github-dark")) return palette_github_dark;
+        if (std.mem.eql(u8, s, "github-light")) return palette_github_light;
+        if (std.mem.eql(u8, s, "vscode-dark")) return palette_vscode_dark;
+        if (std.mem.eql(u8, s, "vscode-light")) return palette_vscode_light;
+        // Family aliases — auto-pick variant from terminal background.
+        if (std.mem.eql(u8, s, "github")) {
+            return if (terminalBackgroundIsDark()) palette_github_dark else palette_github_light;
+        }
+        if (std.mem.eql(u8, s, "vscode")) {
+            return if (terminalBackgroundIsDark()) palette_vscode_dark else palette_vscode_light;
+        }
+        // Generic light/dark aliases default to the GitHub family.
+        if (std.mem.eql(u8, s, "dark")) return palette_github_dark;
+        if (std.mem.eql(u8, s, "light")) return palette_github_light;
+    }
+    return if (terminalBackgroundIsDark()) palette_github_dark else palette_github_light;
+}
+
+fn readThemeName(session: *const session_mod.Session) ?[]const u8 {
+    if (session.vars.get("SLASH_THEME")) |v| switch (v.value) {
+        .scalar => |s| return s,
         .list => {},
     };
-    return palette_dark;
+    if (session.vars.get("THEME")) |v| switch (v.value) {
+        .scalar => |s| return s,
+        .list => {},
+    };
+    return null;
 }
 
 fn styleFor(tok: parser.Token, span_bytes: []const u8, p: Palette) ?zigline.Style {
@@ -2926,11 +3025,11 @@ fn sourceRcFile(session: *session_mod.Session, alloc: Allocator) !void {
 /// tests that exercise cursor-sensitive features (bracket matching), use
 /// `highlightHookAt` directly with an explicit cursor byte.
 fn highlightHookEnd(alloc: Allocator, buffer: []const u8) anyerror![]zigline.HighlightSpan {
-    return highlightBuffer(alloc, buffer, buffer.len, palette_dark);
+    return highlightBuffer(alloc, buffer, buffer.len, palette_github_dark);
 }
 
 fn highlightHookAt(alloc: Allocator, buffer: []const u8, cursor_byte: usize) anyerror![]zigline.HighlightSpan {
-    return highlightBuffer(alloc, buffer, cursor_byte, palette_dark);
+    return highlightBuffer(alloc, buffer, cursor_byte, palette_github_dark);
 }
 
 test "highlight: keywords get keyword-color + bold span" {
@@ -2947,13 +3046,13 @@ test "highlight: keywords get keyword-color + bold span" {
     for (spans) |s| {
         if (s.style.bold) {
             if (s.style.fg) |fg| {
-                if (fg == .rgb and fg.rgb.r == palette_dark.keyword.rgb.r and
-                    fg.rgb.g == palette_dark.keyword.rgb.g and
-                    fg.rgb.b == palette_dark.keyword.rgb.b) saw_keyword_bold = true;
+                if (fg == .rgb and fg.rgb.r == palette_github_dark.keyword.rgb.r and
+                    fg.rgb.g == palette_github_dark.keyword.rgb.g and
+                    fg.rgb.b == palette_github_dark.keyword.rgb.b) saw_keyword_bold = true;
             }
         }
         if (s.style.fg) |fg| {
-            if (fg == .rgb and fg.rgb.r == palette_dark.operator.rgb.r) saw_operator = true;
+            if (fg == .rgb and fg.rgb.r == palette_github_dark.operator.rgb.r) saw_operator = true;
         }
     }
     try std.testing.expect(saw_keyword_bold);
@@ -2970,12 +3069,12 @@ test "highlight: dq with embedded $var emits string + variable colors" {
     for (spans) |s| {
         if (s.style.fg) |fg| {
             if (fg == .rgb) {
-                if (fg.rgb.r == palette_dark.string_literal.rgb.r and
-                    fg.rgb.g == palette_dark.string_literal.rgb.g and
-                    fg.rgb.b == palette_dark.string_literal.rgb.b) has_string = true;
-                if (fg.rgb.r == palette_dark.variable.rgb.r and
-                    fg.rgb.g == palette_dark.variable.rgb.g and
-                    fg.rgb.b == palette_dark.variable.rgb.b) has_variable = true;
+                if (fg.rgb.r == palette_github_dark.string_literal.rgb.r and
+                    fg.rgb.g == palette_github_dark.string_literal.rgb.g and
+                    fg.rgb.b == palette_github_dark.string_literal.rgb.b) has_string = true;
+                if (fg.rgb.r == palette_github_dark.variable.rgb.r and
+                    fg.rgb.g == palette_github_dark.variable.rgb.g and
+                    fg.rgb.b == palette_github_dark.variable.rgb.b) has_variable = true;
             }
         }
     }
@@ -2990,7 +3089,7 @@ test "highlight: comment is italicized with comment-color" {
     var saw_comment = false;
     for (spans) |s| if (s.style.italic) {
         if (s.style.fg) |fg| {
-            if (fg == .rgb and fg.rgb.r == palette_dark.comment.rgb.r) saw_comment = true;
+            if (fg == .rgb and fg.rgb.r == palette_github_dark.comment.rgb.r) saw_comment = true;
         }
     };
     try std.testing.expect(saw_comment);
@@ -3013,9 +3112,9 @@ test "highlight: command substitution uses cmd_subst color, not variable" {
     const spans = try highlightHookEnd(alloc, "echo $(date)");
     defer alloc.free(spans);
 
-    const cmd = spanWithColor(spans, palette_dark.cmd_subst);
+    const cmd = spanWithColor(spans, palette_github_dark.cmd_subst);
     try std.testing.expect(cmd != null);
-    try std.testing.expect(spanWithColor(spans, palette_dark.variable) == null);
+    try std.testing.expect(spanWithColor(spans, palette_github_dark.variable) == null);
 }
 
 test "highlight: $var keeps variable color when sibling $(...) uses cmd_subst" {
@@ -3023,8 +3122,8 @@ test "highlight: $var keeps variable color when sibling $(...) uses cmd_subst" {
     const spans = try highlightHookEnd(alloc, "echo $name $(date)");
     defer alloc.free(spans);
 
-    try std.testing.expect(spanWithColor(spans, palette_dark.variable) != null);
-    try std.testing.expect(spanWithColor(spans, palette_dark.cmd_subst) != null);
+    try std.testing.expect(spanWithColor(spans, palette_github_dark.variable) != null);
+    try std.testing.expect(spanWithColor(spans, palette_github_dark.cmd_subst) != null);
 }
 
 test "highlight: redirect operators use redirect color, not operator" {
@@ -3032,14 +3131,14 @@ test "highlight: redirect operators use redirect color, not operator" {
     const spans = try highlightHookEnd(alloc, "cmd > out 2>&1 | tee log");
     defer alloc.free(spans);
 
-    try std.testing.expect(spanWithColor(spans, palette_dark.redirect) != null);
+    try std.testing.expect(spanWithColor(spans, palette_github_dark.redirect) != null);
     // The pipe MUST stay in the operator class; it is control flow,
     // not I/O routing. Its span is exactly one byte at the `|` offset.
     var saw_pipe_as_operator = false;
     for (spans) |s| {
         if (s.start == "cmd > out 2>&1 ".len and s.end == s.start + 1) {
             if (s.style.fg) |fg| {
-                if (paletteColorsEqual(fg, palette_dark.operator)) saw_pipe_as_operator = true;
+                if (paletteColorsEqual(fg, palette_github_dark.operator)) saw_pipe_as_operator = true;
             }
         }
     }
@@ -3050,7 +3149,7 @@ test "highlight: heredoc open uses redirect color" {
     const alloc = std.testing.allocator;
     const spans = try highlightHookEnd(alloc, "cat <<EOF\nhello\nEOF");
     defer alloc.free(spans);
-    try std.testing.expect(spanWithColor(spans, palette_dark.redirect) != null);
+    try std.testing.expect(spanWithColor(spans, palette_github_dark.redirect) != null);
 }
 
 test "highlight: glob `*` inside an ident gets a sub-span with glob color" {
@@ -3065,12 +3164,12 @@ test "highlight: glob `*` inside an ident gets a sub-span with glob color" {
     for (spans) |s| {
         if (s.start == 3 and s.end == 4) {
             if (s.style.fg) |fg| {
-                if (paletteColorsEqual(fg, palette_dark.glob)) saw_glob = true;
+                if (paletteColorsEqual(fg, palette_github_dark.glob)) saw_glob = true;
             }
         }
         if (s.start == 4 and s.end == 8) {
             if (s.style.fg) |fg| {
-                if (paletteColorsEqual(fg, palette_dark.argument)) saw_arg_after = true;
+                if (paletteColorsEqual(fg, palette_github_dark.argument)) saw_arg_after = true;
             }
         }
     }
@@ -3088,7 +3187,7 @@ test "highlight: NAME= assignment uses variable color on the ident" {
     for (spans) |s| {
         if (s.start == 0 and s.end == 3) {
             if (s.style.fg) |fg| {
-                if (paletteColorsEqual(fg, palette_dark.variable)) saw_assign = true;
+                if (paletteColorsEqual(fg, palette_github_dark.variable)) saw_assign = true;
             }
         }
     }
@@ -3106,7 +3205,7 @@ test "highlight: bare `==` does NOT promote a leading ident to variable color" {
     for (spans) |s| {
         if (s.start == 5 and s.end == 8) {
             if (s.style.fg) |fg| {
-                try std.testing.expect(!paletteColorsEqual(fg, palette_dark.variable));
+                try std.testing.expect(!paletteColorsEqual(fg, palette_github_dark.variable));
             }
         }
     }

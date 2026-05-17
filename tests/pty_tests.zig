@@ -723,10 +723,10 @@ test "slash pty: highlighter inside dq with $var emits string + variable colors"
     // color span for $name), zigline's renderer would drop the inner
     // overlap and the user would see string-color-only output.
     //
-    // Slash uses 24-bit truecolor since v1.1, so we check for the
-    // specific RGB triplets from `palette_dark` (the default theme):
-    // string is `#9ece6a` (green) → "38;2;158;206;106", variable is
-    // `#e0af68` (amber) → "38;2;224;175;104".
+    // Slash uses 24-bit truecolor, so we check for the specific RGB
+    // triplets from `palette_github_dark` (the default theme): string
+    // is `#A5D6FF` (pale blue) → "38;2;165;214;255", variable is
+    // `#FFA657` (orange) → "38;2;255;166;87".
     const r = try runScript(alloc, &.{"--norc"}, &.{
         .{ .send = "echo \"hi $USER there\"\n" },
         .{ .send = "exit 0\n" },
@@ -736,8 +736,8 @@ test "slash pty: highlighter inside dq with $var emits string + variable colors"
 
     // Both string color and variable color must appear in the rendered
     // output. The renderer emits SGR around each span.
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[38;2;158;206;106m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[38;2;224;175;104m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[38;2;165;214;255m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "\x1b[38;2;255;166;87m") != null);
 }
 
 // =============================================================================
