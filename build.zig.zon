@@ -13,12 +13,10 @@
         // release tarball so a fresh clone of slash can build with
         // a single `zig build` (no sibling-repo checkout needed).
         // Bump both `url` and `hash` together when upgrading; `zig
-        // fetch` prints the new hash. zigline's own internal
-        // `version` field hasn't been bumped from 0.3.1 in recent
-        // releases — slash pins the actual tag through the URL.
+        // fetch --save=zigline <url>` rewrites both fields here.
         .zigline = .{
-            .url = "https://github.com/shreeve/zigline/archive/refs/tags/v0.7.2.tar.gz",
-            .hash = "zigline-0.7.2-GM63REG7CQAO4A7VWQUodeXBrB3DPX28Fgwrl0v28TvA",
+            .url = "https://github.com/shreeve/zigline/archive/refs/tags/v0.7.3.tar.gz",
+            .hash = "zigline-0.7.3-GM63RG3ECQD3rzLp3uPRMIz-QRYnMhZWmwlymIuH4SRd",
         },
     },
 

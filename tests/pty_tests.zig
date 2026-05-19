@@ -2093,14 +2093,14 @@ test "slash pty: backgrounded job finish surfaces `[N] Done` notice at next prom
 // both notification paths share. Between-prompts timing stays
 // covered by `backgrounded job finish surfaces a [N] Done` above.
 
-test "slash pty: default Alt-P binding is seeded on interactive startup" {
+test "slash pty: default Esc-P binding is seeded on interactive startup" {
     if (!ptySupported()) return error.SkipZigTest;
 
     // The interactive bootstrap seeds a small set of default
-    // keybindings (currently Alt-P / Alt-N for emacs-convention
-    // history-prev/next-with-prefix). `key` (no args) at session
-    // start should list them; this catches the "we forgot to call
-    // seedDefaultBindings" regression.
+    // keybindings (currently Esc-P / Esc-N — i.e. the meta-prefixed
+    // p/n, emacs-convention history-prev/next-with-prefix). `key`
+    // (no args) at session start should list them; this catches the
+    // "we forgot to call seedDefaultBindings" regression.
     const alloc = std.testing.allocator;
     const r = try runScript(alloc, &.{"--norc"}, &.{
         .{ .send = "key\n", .settle_ms = 500, .wait_for = "history-prev-prefix" },
@@ -2108,9 +2108,9 @@ test "slash pty: default Alt-P binding is seeded on interactive startup" {
     });
     defer alloc.free(r.out);
     try std.testing.expectEqual(@as(u8, 0), r.status);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "Alt-p") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "Esc-p") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "history-prev-prefix") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out, "Alt-n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "Esc-n") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out, "history-next-prefix") != null);
 }
 
@@ -2127,7 +2127,7 @@ test "slash pty: builtin multi-line output is OPOST-cooked (no staircase)" {
     // previous row ended.
     //
     // We use `key` (no args) because it reliably emits exactly two
-    // rows on a fresh `--norc` session (the seeded `Alt-P` / `Alt-N`
+    // rows on a fresh `--norc` session (the seeded `Esc-P` / `Esc-N`
     // defaults).
     const alloc = std.testing.allocator;
     const r = try runScript(alloc, &.{"--norc"}, &.{

@@ -16,7 +16,6 @@ const zigline = @import("zigline");
 /// below `MULTI_CHORD_LITERAL_ID_BASE` → named action, at-or-above
 /// → look up literal bytes in `Session.multi_chord_literals`.
 pub const MULTI_CHORD_LITERAL_ID_BASE: u32 = 1000;
-const keyboards = @import("keyboards.zig");
 
 pub const Allocator = std.mem.Allocator;
 
@@ -388,6 +387,18 @@ pub const Session = struct {
     /// `slash: exit N` line appears immediately after a failure but
     /// not on every subsequent prompt while `$?` remains non-zero.
     status_pending: bool = false,
+    /// True when the last failure was already surfaced to the user
+    /// with a specific stderr message — e.g. the `command not found`
+    /// path emits `slash: command not found: NAME` itself, so the
+    /// generic `slash: exit 127` pre-prompt notice would just be
+    /// noise. Cleared each time the notice helper runs.
+    last_status_explained: bool = false,
+    /// Re-entry guard for the `command_not_found` rescue hook. When
+    /// the hook itself invokes a missing command, we suppress the
+    /// hook on that inner call so the standard `slash: command not
+    /// found: NAME` message surfaces — preventing infinite recursion
+    /// and matching zsh / bash semantics.
+    handling_not_found: bool = false,
     /// PID of the most recently launched background job (for `$!`).
     /// `null` until at least one bg job has started in the session.
     last_bg_pid: ?std.c.pid_t = null,
@@ -436,14 +447,6 @@ pub const Session = struct {
     /// is borrowed from the binding's `BindingTarget.literal`;
     /// never freed via this pointer.
     user_literal_pending: ?[]const u8 = null,
-    /// Active keyboard layout for the macOS-Option-key reverse-
-    /// resolution path in `slashKeymapLookup`. When a multi-byte
-    /// compose char arrives (e.g. `¬` from Option+L without
-    /// "Use Option as Meta"), the lookup consults this layout's
-    /// `composeToOptionLetter` to derive the Alt-letter chord
-    /// the user actually meant. Default: US-QWERTY; future
-    /// non-US layouts plug in via `$SLASH_KEYBOARD`.
-    keyboard_layout: *const keyboards.Layout = &keyboards.us_qwerty,
     /// Multi-chord key bindings (e.g. `key Ctrl-X,Ctrl-E …`). Lives
     /// on Session (not Editor) because slash creates a fresh editor
     /// per `readLine` while bindings are shell-config state that

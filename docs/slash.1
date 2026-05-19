@@ -156,11 +156,54 @@ ships with the standard POSIX builtins plus structured additions. See each built
 .B str
 (literal-text abbreviations),
 .B key
-(user-configurable key bindings).
+(user-configurable key bindings),
+.B cmd
+(list/query/erase user-defined commands; the
+.B cmd NAME { body }
+keyword form defines).
 .PP
 .B Behavioral wrappers:
 .B time
 (reports wall + user + sys CPU for a wrapped pipeline or block).
+
+.SH COMMAND NOT FOUND
+When the shell can't resolve a command name (no builtin, no
+.B cmd
+definition, no executable on
+.B $PATH ),
+slash emits
+.B "slash: command not found: NAME"
+to stderr and the command's exit status is
+.B 127 .
+The pre-prompt
+.B slash: exit N
+notice is suppressed for this case so the user sees one specific
+message instead of two redundant lines.
+.PP
+A user-defined
+.B cmd command_not_found
+intercepts this path. When defined, it is invoked with
+.BR $0 = command_not_found ,
+.BR $1 = "the original command name,"
+.BR $2..$N = "the original arguments."
+The handler's exit status becomes the failed command's exit
+status, so a handler that successfully recovers can
+.B return 0
+to make the original invocation appear to have succeeded. Re-entry
+is guarded \(em a missing command from inside the handler does NOT
+re-invoke the handler; the standard message surfaces instead.
+.PP
+Example:
+.RS
+.PP
+.B cmd command_not_found {
+.PP
+.B "  echo \(dqno such command: $1; did you mean ${1}_v2?\(dq"
+.PP
+.B "  return 127"
+.PP
+.B }
+.RE
 
 .SH KEY BINDINGS
 The
@@ -172,7 +215,7 @@ builtin configures user keystroke shortcuts. Two forms:
 Examples:
 .RS
 .PP
-.B key Alt-P history-prev-prefix
+.B key Esc-P history-prev-prefix
 .PP
 .B key Ctrl-X edit-in-editor
 .RE
@@ -185,26 +228,31 @@ accepts.
 Examples:
 .RS
 .PP
-.B key Alt-L "ls -la\\n"
+.B key Esc-L "ls -la\\n"
 .PP
-.B key Alt-G "git status\\n"
+.B key Esc-G "git status\\n"
 .RE
 .PP
 KEYSPEC grammar:
 .IP \(bu 2
 Modifiers joined with hyphens:
 .BR Ctrl-X ,
-.BR Alt-Left ,
-.BR Ctrl-Alt-Right ,
+.BR Esc-Left ,
+.BR Ctrl-Esc-Right ,
 .BR Shift-F7 .
 .IP \(bu 2
-.BR Alt- ,
-.BR Meta- ,
 .BR Esc- ,
+.BR Meta- ,
+.BR Alt- ,
 .BR Option- ,
 and
 .BR Opt-
-are five synonyms for the Meta modifier.
+are five synonyms for the meta modifier (terminals emit identical
+.B \\e
+byte prefixes for all of them). Slash prints the canonical form as
+.B Esc-
+in listings \(em wire-honest and accurate on every platform (Macs
+don't have an Alt key).
 .IP \(bu 2
 Function keys
 .BR F1 .. F12 .
@@ -226,36 +274,72 @@ Named keys:
 .BR Space ,
 .BR Insert .
 .IP \(bu 2
-UTF-8 keyspecs: bind directly to a Unicode codepoint your terminal emits, e.g.
-.B key "¬" "ls -la\\n"
-(on macOS US-QWERTY with Option-as-compose-char mode,
-.B ¬
-is the byte sequence pressed Option+L emits).
+UTF-8 keyspecs: bind directly to a Unicode codepoint your terminal
+emits, e.g.
+.B key "π" some-action
+(on Macs in default compose mode, Option+P emits the
+.B π
+codepoint \(em this lets you bind to one-keystroke chords your
+terminal happens to send, even when slash has no symbolic name for
+the chord).
 .PP
-On macOS US-QWERTY,
-.B key Option-L "ls -la\\n"
-fires on Option+L regardless of whether
+.B macOS:
+to fire
+.B Esc-X
+chords with one keystroke (Option+X), enable
 .B "Use Option as Meta key"
-is enabled in Terminal.app or iTerm2 \(em
-.B slash
-reverse-resolves compose-char codepoints via its keyboard-layout table.
+in your terminal preferences. Terminal.app calls it
+.B "Use Option as Meta key" ;
+iTerm2 calls it
+.B "Esc+"
+on the Option key. With the toggle off (the default), Option+letter
+emits a Unicode compose character (e.g. Option+L \(rA
+.B ¬ )
+which slash receives as a literal codepoint, not a meta chord. The
+.B Esc-X
+form (press Escape, then X within the meta-timeout) works
+identically with or without the toggle.
 .PP
 Management:
 .IP \(bu 2
 .B key
+(or
+.B key -l
+/
+.B --list )
 \(em list all installed bindings in canonical form.
 .IP \(bu 2
 .B key --actions
 \(em list every registered editor action.
 .IP \(bu 2
-.B key -d KEYSPEC
+.B key -e KEYSPEC
+(or
+.B --erase )
 \(em remove a binding.
 .IP \(bu 2
-.B key --reset
+.B key -r
+(or
+.B --reset )
 \(em clear all user bindings.
 .IP \(bu 2
 .B key --probe
 \(em interactive diagnostic: press any key, slash names it and shows the raw bytes.
+.PP
+.B key ,
+.B str ,
+and
+.B cmd
+share one fixed flag set:
+.B -l
+/
+.B --list ,
+.B -e
+/
+.B --erase ,
+.B -r
+/
+.B --reset .
+There are no other spellings.
 
 .SH ENVIRONMENT
 .TP

@@ -24,7 +24,6 @@ const terminal_mod = @import("terminal.zig");
 const shape_mod = @import("shape.zig");
 const program_mod = @import("program.zig");
 const keybinding = @import("keybinding.zig");
-const keyboards = @import("keyboards.zig");
 const zigline_mod = @import("zigline");
 const diag = @import("diagnostics.zig");
 const word_mod = @import("word.zig");
@@ -2211,7 +2210,6 @@ fn keyBind(
         try session.keybindings.putChord(seq[0], target);
         // resolved_literal ownership transferred into the table.
         resolved_literal = null;
-        maybeWarnDeadKey(session, io, seq[0], spec);
         return .{ .exited = 0 };
     }
 
@@ -2287,25 +2285,6 @@ fn keyBind(
     };
 
     return .{ .exited = 0 };
-}
-
-fn maybeWarnDeadKey(
-    session: *session_mod.Session,
-    io: BuiltinIo,
-    bk: keybinding.BindingKey,
-    spec: []const u8,
-) void {
-    if (bk.code != .char) return;
-    if (!bk.mods.alt) return;
-    if (bk.char > 0x7f) return;
-    if (!keyboards.isDeadKey(session.keyboard_layout, @intCast(bk.char))) return;
-    var buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(
-        &buf,
-        "key: note: '{s}' is an Option-letter dead key on {s}; pressing Option+{c} in compose-char mode emits no standalone byte, so this binding will only fire if your terminal has \"Use Option as Meta key\" enabled.\n",
-        .{ spec, session.keyboard_layout.name, @as(u8, @intCast(bk.char)) },
-    ) catch return;
-    _ = writeAllToFd(io.stderr, msg);
 }
 
 fn keyDelete(
@@ -2555,12 +2534,15 @@ fn snakeToKebab(s: []const u8, buf: []u8) ![]u8 {
 // =============================================================================
 //
 // Reads one keystroke at a time from stdin in raw mode and pretty-
-// prints what slash sees: the canonical chord name (`Alt-L`,
+// prints what slash sees: the canonical chord name (`Esc-L`,
 // `Ctrl-X`, `Up`, ...), the raw bytes the terminal emitted, and
-// — critically — a diagnostic when the bytes look like a macOS
-// "Option as compose character" sequence (`Option-L` → `¬`),
-// which is the most common reason Meta bindings fail to fire on
-// default-config macOS terminals.
+// — when applicable — a hint about how to bind to multi-byte
+// Unicode codepoints (e.g. macOS Option-key compose chars: Option+L
+// → `¬`). Two paths to bind those:
+//
+//   - `key "¬" some-action` — bind to the codepoint directly.
+//   - Enable "Use Option as Meta key" in your terminal preferences
+//     so Option+L sends `\e l` and `key Esc-L some-action` works.
 //
 // Exit on:
 //   - Two bare-Escape presses in a row (the canonical "I want out"
@@ -2888,7 +2870,7 @@ fn printProbeEvent(fd: i32, ev: ProbeEvent) void {
         .alt => {
             const c = ev.ch;
             const safe: u8 = if (c >= 0x20 and c < 0x7f) c else '?';
-            printOneLine(fd, "  Alt-{c}                 ", .{safe}, ev.raw, "   binds with `key Alt-{c} some-action` (Option-{c} on Mac)\n", .{ safe, safe });
+            printOneLine(fd, "  Esc-{c}                 ", .{safe}, ev.raw, "   binds with `key Esc-{c} some-action`\n", .{safe});
         },
         .csi, .ss3 => {
             if (ev.named.len > 0) {
@@ -2922,8 +2904,7 @@ fn printProbeEvent(fd: i32, ev: ProbeEvent) void {
             _ = writeAllToFd(fd, "        key \"");
             _ = writeAllToFd(fd, ev.raw[0..len]);
             _ = writeAllToFd(fd, "\" some-action\n");
-            _ = writeAllToFd(fd, "      OR (only if you want `Alt-X` / `Option-X` spellings to work everywhere)\n");
-            _ = writeAllToFd(fd, "      enable Meta in your terminal preferences:\n");
+            _ = writeAllToFd(fd, "      OR — to use `Esc-X` / `Alt-X` spellings instead, enable Meta in your terminal:\n");
             _ = writeAllToFd(fd, "        Terminal.app: Profile → Keyboard → \"Use Option as Meta key\"\n");
             _ = writeAllToFd(fd, "        iTerm2:       Profile → Keys → \"Left Option Key\" → Esc+\n");
         },

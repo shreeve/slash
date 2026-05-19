@@ -15,14 +15,18 @@
 //! KEYSPEC syntax:
 //!
 //!     Chord        modifier-joined-with-hyphen + key, e.g. Ctrl-X,
-//!                  Alt-Left, Ctrl-Alt-Right, Shift-F7. Modifier order
-//!                  doesn't matter; `Ctrl-Alt-X` == `Alt-Ctrl-X`.
+//!                  Esc-Left, Ctrl-Esc-Right, Shift-F7. Modifier order
+//!                  doesn't matter; `Ctrl-Esc-X` == `Esc-Ctrl-X`.
 //!
-//!     Synonyms     Esc-X, Meta-X, and Alt-X all canonicalize to the
-//!                  same Meta-modified chord. Terminals emit identical
-//!                  bytes (`\e X`) for all three, and zigline collapses
-//!                  to one `KeyEvent` with `mods.alt = true`. Slash
-//!                  prints canonical form as `Alt-X` in listings.
+//!     Synonyms     Esc-X, Meta-X, Alt-X, Option-X, Opt-X all
+//!                  canonicalize to the same meta-modified chord.
+//!                  Terminals emit identical bytes (`\e X`) for all
+//!                  five spellings, and zigline collapses them to
+//!                  one `KeyEvent` with `mods.alt = true`. Slash
+//!                  prints canonical form as `Esc-X` in listings —
+//!                  honest about the wire reality (the byte prefix
+//!                  is literally `\e`, the Escape byte) and accurate
+//!                  on every platform (Macs don't have an Alt key).
 //!
 //!     Multi-chord  Reserved syntax: `Ctrl-X,Ctrl-E` (comma between
 //!                  chords). Parse-time diagnostic in v1; needs
@@ -31,7 +35,7 @@
 //!     Named keys   Up, Down, Left, Right, Home, End, PageUp,
 //!                  PageDown, Tab, Enter, Backspace, Delete, Escape,
 //!                  Space, F1..F12. Modifier-prefixed too:
-//!                  `Alt-Left`, `Ctrl-F7`, etc.
+//!                  `Esc-Left`, `Ctrl-F7`, etc.
 //!
 //! Conflict resolution: last `key` call wins. Listing prints in
 //! canonical form regardless of how the user spelled it.
@@ -595,11 +599,24 @@ fn eqIgnoreCase(a: []const u8, b: []const u8) bool {
 // =============================================================================
 
 /// Format a `BindingKey` back into its canonical text form. Writes
-/// `Ctrl-X`, `Alt-Left`, `Shift-F7`, etc. Output never includes
-/// `Esc-` / `Meta-` synonyms (those collapse to `Alt-`).
+/// `Ctrl-X`, `Esc-Left`, `Shift-F7`, etc.
+///
+/// `Esc-` is the wire-honest spelling for what bash and zsh call
+/// `Alt-` / `Meta-`: terminals encode the modifier as a literal
+/// `\e` (Escape) byte prefix on the next keystroke, regardless of
+/// whether the user pressed a physical Alt key, a Mac Option key
+/// in "Use Option as Meta" mode, or actually pressed Escape and
+/// then the next key (within the meta-timeout window).
+///
+/// Naming the chord `Esc-X` instead of `Alt-X` is more accurate on
+/// every platform — Macs don't have an Alt key, modern Linux / BSD
+/// users often use Caps-as-Esc, and the wire byte sequence is
+/// identical in all cases. Input still accepts every alias
+/// (`Alt-`, `Meta-`, `Esc-`, `Option-`, `Opt-`); only the canonical
+/// display changed.
 pub fn formatKey(k: BindingKey, w: anytype) !void {
     if (k.mods.ctrl) try w.writeAll("Ctrl-");
-    if (k.mods.alt) try w.writeAll("Alt-");
+    if (k.mods.alt) try w.writeAll("Esc-");
     if (k.mods.shift) try w.writeAll("Shift-");
     switch (k.code) {
         .char => {
@@ -814,16 +831,17 @@ test "parseKeySpec: rejects unknown key" {
     try std.testing.expectError(error.UnknownKey, parseKeySpec("Ctrl-Banana"));
 }
 
-test "formatKey: canonical Alt- not Esc-, and Alt-letter case-folded" {
-    // `Esc-P` canonicalizes to `Alt-p` — `Alt-` is the canonical
-    // modifier name; the letter case-folds to lowercase because
-    // Alt-letter chords don't distinguish case (see
+test "formatKey: canonical Esc- not Alt-, and case-folded" {
+    // `Alt-P` (or `Meta-P`, or `Option-P`) canonicalizes to `Esc-p`.
+    // `Esc-` is the wire-honest spelling for the meta-prefix byte
+    // sequence terminals send; the letter case-folds to lowercase
+    // because meta-letter chords don't distinguish case (see
     // `normalizeForLookup`).
-    const k = try parseKeySpec("Esc-P");
+    const k = try parseKeySpec("Alt-P");
     var buf: [64]u8 = undefined;
     var stream = std.Io.Writer.fixed(&buf);
     try formatKey(k, &stream);
-    try std.testing.expectEqualStrings("Alt-p", stream.buffered());
+    try std.testing.expectEqualStrings("Esc-p", stream.buffered());
 }
 
 test "formatKey: non-ASCII codepoint encodes as UTF-8 (renders correctly)" {
@@ -843,10 +861,10 @@ test "formatKey: multi-modifier formatting is stable" {
     var buf: [64]u8 = undefined;
     var stream = std.Io.Writer.fixed(&buf);
     try formatKey(k, &stream);
-    // Modifiers always emit in Ctrl/Alt/Shift order regardless of
+    // Modifiers always emit in Ctrl/Esc/Shift order regardless of
     // how the user spelled them — this lets `key` listing be sorted
     // deterministically.
-    try std.testing.expectEqualStrings("Ctrl-Alt-Right", stream.buffered());
+    try std.testing.expectEqualStrings("Ctrl-Esc-Right", stream.buffered());
 }
 
 test "BindingKey.fromKeyEvent: char roundtrips" {

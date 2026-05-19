@@ -204,6 +204,14 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
             .ctx = @ptrCast(&hooks),
             .onWakeFn = onWakeHook,
         },
+        // Wider escape-state window than zigline's 50ms default so
+        // human "Esc, then letter" chord entry (the wire-honest
+        // path for `Esc-X` bindings on macOS in default-config
+        // terminals) feels natural. 500ms matches GNU readline's
+        // `keyseq-timeout` and bash / zsh behavior; the only
+        // visible cost is that bare-Escape commits take half a
+        // second on its own — fine for a shell.
+        .meta_timeout_ms = 500,
     });
     defer editor.deinit();
 
@@ -347,29 +355,17 @@ fn slashKeymapLookup(key: zigline.KeyEvent) ?zigline.Action {
     if (builtins.currentSession()) |session| {
         if (keybinding.BindingKey.fromKeyEvent(key)) |bk| {
             if (dispatchUserBinding(session, bk)) |action| return action;
-
-            // macOS Option-key fallback: if the event is a single
-            // multi-byte codepoint with no modifiers (the shape
-            // macOS Terminal / iTerm2 emit when Option+letter is
-            // pressed in compose mode — `Option-L` → `¬` =
-            // 0x00AC), consult the active keyboard layout to
-            // reverse-derive the originating Option-letter, then
-            // retry the lookup against `Alt-<letter>`. Result:
-            // `key Option-L "ls -la\n"` fires on Option+L
-            // regardless of whether the terminal has "Use Option
-            // as Meta key" enabled.
-            if (bk.code == .char and bk.char >= 0x80 and
-                !bk.mods.ctrl and !bk.mods.alt and !bk.mods.shift)
-            {
-                if (session.keyboard_layout.composeToOptionLetter(bk.char)) |letter| {
-                    const synth = keybinding.normalizeForLookup(.{
-                        .code = .char,
-                        .char = @as(u21, letter),
-                        .mods = .{ .alt = true },
-                    });
-                    if (dispatchUserBinding(session, synth)) |action| return action;
-                }
-            }
+            // macOS Option-key compose chars (e.g. Option+L → `¬`,
+            // Option+P → `π`) flow through as plain Unicode events
+            // and aren't intercepted as meta chords. Users who want
+            // one-keystroke Esc-X chords on macOS should enable
+            // "Use Option as Meta key" in their terminal preferences,
+            // which makes Option+X emit the standard `\e X` byte
+            // sequence and fire the `Esc-X` binding directly.
+            // Otherwise compose chars stay as data — which preserves
+            // the user's ability to type `π` literally if they want
+            // to. The `Esc-X` form (Escape, then X within the
+            // meta-timeout) works without any terminal-config change.
         }
     }
 
@@ -2547,12 +2543,16 @@ fn bootstrapInteractive(session: *session_mod.Session) void {
 
 fn seedDefaultBindings(session: *session_mod.Session) void {
     const defaults = [_]struct { spec: []const u8, action: keybinding.SlashCustomAction }{
-        // Emacs convention: Meta-P / Meta-N are history-prev/next-
-        // with-prefix-search. Slash's smart Up/Down arrows already
-        // do this; these are muscle-memory aliases for users
-        // coming from emacs / bash readline / zsh.
-        .{ .spec = "Alt-P", .action = .smart_history_prev },
-        .{ .spec = "Alt-N", .action = .smart_history_next },
+        // Emacs convention: Esc-P / Esc-N (a.k.a. Meta-P / Meta-N)
+        // are history-prev/next-with-prefix-search. Slash's smart
+        // Up/Down arrows already do this; these are muscle-memory
+        // aliases for users coming from emacs / bash readline / zsh.
+        // The chord fires when the terminal emits the `\e p` /
+        // `\e n` byte sequence — pressing Esc then p (within the
+        // meta-timeout window), or Mac Option+P/N if the terminal
+        // is configured for "Use Option as Meta key".
+        .{ .spec = "Esc-P", .action = .smart_history_prev },
+        .{ .spec = "Esc-N", .action = .smart_history_next },
     };
     for (defaults) |d| {
         const parsed = keybinding.parseKeySpec(d.spec) catch continue;

@@ -336,7 +336,6 @@ test {
     _ = @import("repl.zig");
     _ = @import("history.zig");
     _ = @import("keybinding.zig");
-    _ = @import("keyboards.zig");
     _ = @import("stat.zig");
     _ = @import("carapace.zig");
 }

@@ -139,6 +139,14 @@ pub fn pendingDoneJobs(session: *Session) void {
 pub fn pendingExitStatus(session: *Session) void {
     if (!session.status_pending) return;
     defer session.status_pending = false;
+    // `last_status_explained` is set when the failure already produced
+    // a specific user-facing stderr message (e.g. `slash: command not
+    // found: NAME`). Suppress the generic notice in that case to avoid
+    // duplicate noise. Always clear the flag, regardless of whether
+    // we suppressed.
+    const explained = session.last_status_explained;
+    session.last_status_explained = false;
+    if (explained) return;
     if (!session.interactive) return;
     if (session.last_status == 0) return;
 

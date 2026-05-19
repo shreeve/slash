@@ -233,7 +233,86 @@ fn evalCommand(
         }
     }
 
+    // Pre-flight existence check so a miss can route through the
+    // `command_not_found` rescue hook (or emit a clear stderr
+    // message) BEFORE we fork a child whose only job would be to
+    // fail with ENOENT. Two shapes:
+    //
+    //   - Bare name (no `/`): consult `$PATH` — only a miss across
+    //     the whole search counts as not-found.
+    //   - Path-shaped (contains `/`): skip `$PATH`; check the path
+    //     itself with `access(F_OK)`. Doesn't catch EACCES (file
+    //     exists but isn't executable) — that still surfaces as
+    //     exit 126 from the child, matching POSIX. We're only
+    //     intercepting the "no such file" case here.
+    if (std.mem.indexOfScalar(u8, exe_text, '/') == null) {
+        if (try lookupOnPath(session, ctx.scratch, exe_text)) |_| {
+            // Hit — the resolution is cached and `runExternalSingle`
+            // will pick it up from the cache.
+        } else {
+            return try handleCommandNotFound(c, argv.items, session, ctx, sink);
+        }
+    } else {
+        const path_z = try ctx.scratch.dupeZ(u8, exe_text);
+        if (std.c.access(path_z.ptr, std.c.F_OK) != 0) {
+            return try handleCommandNotFound(c, argv.items, session, ctx, sink);
+        }
+    }
+
     return try runExternalSingle(c, argv.items, local_env, session, ctx, sink);
+}
+
+/// Dispatch the `command not found` path. Two outcomes:
+///
+///   - User has defined `cmd command_not_found { ... }` AND we're not
+///     already inside a not-found handler invocation: run the handler
+///     with `argv = [\"command_not_found\", original_name, ...args]`.
+///     The handler's exit status becomes the command's exit status.
+///
+///   - Otherwise: emit `slash: command not found: NAME` to stderr,
+///     mark the failure as already explained (so the pre-prompt
+///     notice doesn't print a redundant `slash: exit 127` line),
+///     and return a failed outcome with status 127.
+///
+/// Re-entry guard: `session.handling_not_found` is set while the
+/// handler runs, so a missing command invoked from inside the
+/// handler falls through to the standard message instead of
+/// re-invoking the handler. Matches zsh / bash semantics.
+fn handleCommandNotFound(
+    c: *const Command,
+    argv: []const []const u8,
+    session: *Session,
+    ctx: EvalContext,
+    sink: ?Sink,
+) !EvalOutcome {
+    const orig_name = argv[0];
+
+    if (!session.handling_not_found) {
+        if (session.defs.lookup("command_not_found")) |handler_body| {
+            session.handling_not_found = true;
+            defer session.handling_not_found = false;
+
+            // Synthesize the handler's argv: $0 = "command_not_found",
+            // $1 = original command name, $2..$N = original args.
+            var handler_argv = std.ArrayListUnmanaged([]const u8).empty;
+            defer handler_argv.deinit(ctx.scratch);
+            try handler_argv.append(ctx.scratch, "command_not_found");
+            for (argv) |a| try handler_argv.append(ctx.scratch, a);
+
+            return try runUserDefinedCommand(c, handler_body, handler_argv.items, session, ctx, sink);
+        }
+    }
+
+    var msg_buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &msg_buf,
+        "slash: command not found: {s}\n",
+        .{orig_name},
+    ) catch "slash: command not found\n";
+    _ = std.c.write(2, msg.ptr, msg.len);
+
+    session.last_status_explained = true;
+    return makeFailedOutcome(session, orig_name, .{ .exited = 127 });
 }
 
 fn runShellContextBuiltin(
@@ -1934,6 +2013,26 @@ fn buildArgvZ(scratch: Allocator, argv: []const []const u8) ![*:null]const ?[*:0
 /// `scratch` so it always has the lifetime callers expect, even on a
 /// cache hit.
 fn resolvePath(session: *Session, scratch: Allocator, exe: []const u8) ![*:0]const u8 {
+    if (try lookupOnPath(session, scratch, exe)) |hit| return hit;
+    // Lookup miss — fall back to the original name so the eventual
+    // `execve` is the source of truth for the failure. This path is
+    // hit only by callers that don't pre-flight a not-found check
+    // themselves (e.g. `exec` builtin); the regular external-command
+    // path goes through `runExternalSingle`, which detects the miss
+    // before fork and routes through `command_not_found` if present.
+    const z = try scratch.dupeZ(u8, exe);
+    return z.ptr;
+}
+
+/// Resolve `exe` against `$PATH`. Returns the resolved (NUL-terminated,
+/// `scratch`-owned) absolute path on hit, `null` on miss.
+///
+/// Names containing `/` (`./script`, `/usr/bin/env`) are returned
+/// verbatim — caller is responsible for any further checks. An empty
+/// or unset `$PATH` also returns the name verbatim — POSIX-shaped
+/// behavior, since that case isn't really a "miss" in the lookup
+/// sense, just an absence of search dirs.
+fn lookupOnPath(session: *Session, scratch: Allocator, exe: []const u8) !?[*:0]const u8 {
     if (std.mem.indexOfScalar(u8, exe, '/') != null) {
         const z = try scratch.dupeZ(u8, exe);
         return z.ptr;
@@ -1965,8 +2064,7 @@ fn resolvePath(session: *Session, scratch: Allocator, exe: []const u8) ![*:0]con
         }
     }
 
-    const z = try scratch.dupeZ(u8, exe);
-    return z.ptr;
+    return null;
 }
 
 fn cachePathHit(session: *Session, name: []const u8, candidate: [:0]const u8) void {

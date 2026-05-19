@@ -401,11 +401,12 @@ const cases: []const Case = &.{
     },
     .{
         .name = "key: empty `key` lists installed bindings (canonical form)",
-        // `Esc-P` canonicalizes to `Alt-p` on listing — `Alt-` is
-        // the canonical modifier name, and Alt-letter case-folds
-        // to lowercase (matches the byte sequence Option+P emits).
-        .source = "key Esc-P history-prev-prefix; key",
-        .expect = .{ .exit_code = 0, .stdout = "Alt-p", .stdout_contains = true },
+        // `Alt-P` (or `Meta-P`, or `Option-P`) canonicalizes to `Esc-p`
+        // on listing — `Esc-` is the wire-honest modifier name, and
+        // meta-letter case-folds to lowercase (matches the byte
+        // sequence the terminal emits).
+        .source = "key Alt-P history-prev-prefix; key",
+        .expect = .{ .exit_code = 0, .stdout = "Esc-p", .stdout_contains = true },
     },
     .{
         .name = "key: listing shows literal-text bindings re-encoded",
@@ -483,7 +484,7 @@ const cases: []const Case = &.{
     .{
         .name = "key: -l lists bindings (alias for bare `key`)",
         .source = "key Alt-A history-prev-prefix; key -l",
-        .expect = .{ .exit_code = 0, .stdout = "Alt-a", .stdout_contains = true },
+        .expect = .{ .exit_code = 0, .stdout = "Esc-a", .stdout_contains = true },
     },
     .{
         .name = "key: -r short form for --reset",
@@ -508,7 +509,7 @@ const cases: []const Case = &.{
         .source = "key Alt-Z history-prev-prefix; key Alt-Z \"echo X\\n\"; key",
         .expect = .{
             .exit_code = 0,
-            .stdout = "Alt-z \t\"echo X\\n\"\n",
+            .stdout = "Esc-z \t\"echo X\\n\"\n",
             .stdout_contains = true,
         },
     },
@@ -1326,6 +1327,91 @@ const cases: []const Case = &.{
         .name = "str: -r short form for --reset",
         .source = "str a 1\nstr b 2\nstr -r\nstr",
         .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+
+    // ---- command not found: specific message + rescue hook --------------
+
+    .{
+        .name = "command not found: stderr message names the missing command",
+        .source = "asdfghjkl-not-a-real-command",
+        .expect = .{
+            .exit_code = 127,
+            .stderr = "slash: command not found: asdfghjkl-not-a-real-command\n",
+        },
+    },
+    .{
+        // The next command on the same line still runs; the failure
+        // is local to the one bad command.
+        .name = "command not found: subsequent commands still run",
+        .source = "nope; echo after",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "after\n",
+            .stderr = "slash: command not found: nope\n",
+        },
+    },
+    .{
+        // `command_not_found` cmd, when defined, intercepts the
+        // not-found path and runs with `$0=command_not_found`,
+        // `$1=original-name`, `$2..$N=original args`.
+        .name = "command not found: rescue hook fires with name + args",
+        .source =
+        \\cmd command_not_found
+        \\  echo handler:$0:$1:$2:$3:count=$#
+        \\  return 0
+        \\foo bar baz
+        ,
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "handler:command_not_found:foo:bar:baz:count=3\n",
+        },
+    },
+    .{
+        // The handler's exit status becomes the missing command's exit status.
+        .name = "command not found: rescue hook return propagates as $?",
+        .source =
+        \\cmd command_not_found { return 42 }
+        \\nope
+        \\echo got=$?
+        ,
+        .expect = .{ .exit_code = 0, .stdout = "got=42\n" },
+    },
+    .{
+        // Re-entry guard: when the handler itself runs a missing
+        // command, we do NOT re-invoke the handler — the standard
+        // `command not found` message is emitted instead.
+        .name = "command not found: handler is not re-entered for inner misses",
+        .source =
+        \\cmd command_not_found { also_missing arg; return 99 }
+        \\foo
+        \\echo end=$?
+        ,
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "end=99\n",
+            .stderr = "slash: command not found: also_missing\n",
+        },
+    },
+    .{
+        // Without a handler defined, the standard message + 127.
+        .name = "command not found: no handler => 127 with bare message",
+        .source = "nope-cmd-here",
+        .expect = .{
+            .exit_code = 127,
+            .stderr = "slash: command not found: nope-cmd-here\n",
+        },
+    },
+    .{
+        // Path-shaped names (containing `/`) skip the PATH search and
+        // surface the underlying exec failure; the message still
+        // names the path so the user can fix their typo.
+        .name = "command not found: path with `/` still emits a message",
+        .source = "./no-such-script",
+        .expect = .{
+            .exit_code = 127,
+            .stderr_contains = true,
+            .stderr = "command not found: ./no-such-script",
+        },
     },
 
     // ---- jobs / wait builtins (PLAN §19) --------------------------------

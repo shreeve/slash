@@ -94,51 +94,55 @@
 #   key KEYSPEC bare-ident       # bind to a named editor action
 #   key KEYSPEC "literal text"   # type bytes; trailing \n = also accept
 #
-# KEYSPEC: Ctrl-X / Alt-X / Option-X (Mac alias) / Meta-X / Esc-X
-# (all four of the latter mean the same modifier), Ctrl-Alt-Right,
-# Shift-F7, etc.  `key --actions` lists every registered action.
-# `key --probe` opens an interactive diagnostic — press any key
-# and slash names it + shows the raw bytes, with a hint when the
-# bytes look like macOS Option-as-compose-char.
+# KEYSPEC: Ctrl-X / Esc-X (or Alt-X / Meta-X / Option-X / Opt-X —
+# all five spell the same meta-modified chord), Ctrl-Esc-Right,
+# Shift-F7, etc. Slash prints the canonical form as `Esc-X` because
+# that's wire-honest: terminals emit a literal `\e` (Escape) byte
+# prefix on the next keystroke, regardless of platform or which
+# physical modifier the user pressed.
 #
-# macOS Option-key bindings: `key Option-L "ls -la\n"` works on
-# any Mac out of the box, regardless of terminal preferences.
-# Slash internally handles both wire formats:
+# `key --actions` lists every registered action. `key --probe` opens
+# an interactive diagnostic — press any key and slash names it +
+# shows the raw bytes.
 #
-#   - Terminal config flipped to "Use Option as Meta key" → terminal
-#     sends `\e L` bytes → slash hits the Alt-L binding slot directly.
-#   - Terminal config in default compose mode → terminal sends `¬`
-#     (U+00AC, 2 UTF-8 bytes) → slash's keyboard-layout table
-#     reverse-resolves the codepoint to `Option-L` and fires the
-#     same binding.
+# macOS:
 #
-# Default layout is US-QWERTY. Non-US layouts can use `key --probe`
-# to discover what their terminal emits and bind to that codepoint
-# directly with `key "char" ...`. A pluggable layout API is
-# scaffolded for future en_GB / de_DE / dvorak / etc. support.
+#   - To fire `Esc-X` chords with one keystroke (Option+X), enable
+#     "Use Option as Meta key" in Terminal.app Preferences → Profiles
+#     → Keyboard, or in iTerm2 set the Left/Right Option key to
+#     "Esc+". With this setting, Option+L sends `\e L` bytes → fires
+#     `key Esc-L "..."`.
 #
-# Dead-key positions on US-QWERTY (`Option-E`/`Option-I`/`Option-N`/
-# `Option-U` emit combining diacritics, not standalone chars) only
-# fire via the Meta-key path; slash warns at bind time.
+#   - With the toggle OFF (the default), Option+letter emits a
+#     Unicode compose character (Option+L → `¬`, Option+P → `π`,
+#     etc.) which slash receives as a literal codepoint, NOT a
+#     meta chord. You can bind directly to those codepoints if you
+#     want to: `key "¬" "ls -la\n"`. But the cleaner mental model
+#     is to keep the compose chars as data (so you can type π if
+#     you want to type π) and use `Esc-X` for chords.
+#
+#   - The two-keystroke `Esc-X` form (press Escape, then X within
+#     ~500ms) works identically on every terminal regardless of
+#     preferences. This is the recommended path if you don't want
+#     to change terminal settings.
 
 # History navigation (these are seeded as defaults — listed here
 # so you know they exist):
-# key Alt-P history-prev-prefix       # match history backward by prefix
-# key Alt-N history-next-prefix       # match history forward by prefix
+# key Esc-P history-prev-prefix       # match history backward by prefix
+# key Esc-N history-next-prefix       # match history forward by prefix
 
-# Universal shortcuts (uncomment any you'd actually use). These
-# work on US-QWERTY macOS without any terminal-preference changes.
-# key Option-L "ls -la\n"             # list current dir
-# key Option-G "git status\n"         # git status
-# key Option-D "cd ~/Code\n"          # jump to your code dir
-# key Option-H "cd ~\n"               # go home
+# Universal shortcuts (uncomment any you'd actually use):
+# key Esc-L "ls -la\n"                # list current dir
+# key Esc-G "git status\n"            # git status
+# key Esc-D "cd ~/Code\n"             # jump to your code dir
+# key Esc-H "cd ~\n"                  # go home
 
 # Pipe whatever's on the prompt into less:
-# key Option-\\ " | less\n"
+# key Esc-\\ " | less\n"
 
 # A "comment this line, save for later" pattern (push current line
 # into history with a # in front, so it's recallable with Up + edit):
-# key Alt-# "#\n"
+# key Esc-# "#\n"
 
 
 # -----------------------------------------------------------------------------
@@ -148,3 +152,30 @@
 # `trap 'cmd' EXIT` runs the command when the shell exits.
 
 # trap 'echo "see ya"' EXIT
+
+
+# -----------------------------------------------------------------------------
+# Command-not-found rescue hook
+# -----------------------------------------------------------------------------
+#
+# If you define `cmd command_not_found { ... }`, slash invokes it
+# whenever a typed command can't be resolved (no builtin, no `cmd`
+# definition, no executable on $PATH). The handler sees:
+#
+#   $0  = "command_not_found"
+#   $1  = the original (missing) command name
+#   $2..$N = the original arguments
+#
+# The handler's exit status becomes the failed command's exit
+# status — so `return 0` makes the original invocation look like a
+# success, while `return 127` (or any non-zero) preserves the
+# original semantics.
+#
+# Re-entry is guarded: a missing command invoked from inside the
+# handler will NOT re-invoke the handler. Slash falls back to the
+# standard `slash: command not found: NAME` message in that case.
+# Matches zsh's `command_not_found_handler` convention.
+
+# cmd command_not_found
+#   echo "slash: '$1' not installed; try `brew install $1` or `apt install $1`"
+#   return 127
