@@ -52,6 +52,7 @@ pub const TokenCat = enum(u8) {
     @"heredoc_body",
     @"str_open",
     @"str_body",
+    @"cmd_open",
     @"assign",
     @"name_eq",
     @"indent",
@@ -718,7 +719,7 @@ pub const BaseParser = struct {
             89 => pass[1],
             90 => .nil,
             91 => self.sexp(.@"match_arm", &.{pass[0], pass[1]}),
-            92 => self.sexp(.@"cmd_def", &.{pass[1], pass[2]}),
+            92 => self.sexp(.@"cmd_def", &.{pass[0], pass[1], pass[2]}),
             93 => self.sexp(.@"str_def", &.{pass[1], pass[2]}),
             94 => self.spreadList(pass[0], pass[1]),
             95 => self.sexpSpread(.@"words", pass[0]),
@@ -766,6 +767,7 @@ pub const BaseParser = struct {
             .@"assign" => 70,
             .@"indent" => 73,
             .@"outdent" => 74,
+            .@"cmd_open" => 80,
             .@"str_open" => 81,
             .@"str_body" => 82,
             .@"lt" => 84,
@@ -878,7 +880,7 @@ const keywordToSymbol = blk: {
     if (@hasField(slash.KeywordId, "FOR")) arr[@intFromEnum(slash.KeywordId.FOR)] = 76;
     if (@hasField(slash.KeywordId, "IN")) arr[@intFromEnum(slash.KeywordId.IN)] = 77;
     if (@hasField(slash.KeywordId, "MATCH")) arr[@intFromEnum(slash.KeywordId.MATCH)] = 78;
-    if (@hasField(slash.KeywordId, "CMD")) arr[@intFromEnum(slash.KeywordId.CMD)] = 80;
+    if (@hasField(slash.KeywordId, "CMD_OPEN")) arr[@intFromEnum(slash.KeywordId.CMD_OPEN)] = 80;
     if (@hasField(slash.KeywordId, "STR_OPEN")) arr[@intFromEnum(slash.KeywordId.STR_OPEN)] = 81;
     if (@hasField(slash.KeywordId, "STR_BODY")) arr[@intFromEnum(slash.KeywordId.STR_BODY)] = 82;
     if (@hasField(slash.KeywordId, "LT")) arr[@intFromEnum(slash.KeywordId.LT)] = 84;

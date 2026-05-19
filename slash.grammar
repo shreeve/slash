@@ -81,6 +81,17 @@ tokens
     str_open            # the literal "str" keyword in str_def context
     str_body            # raw bytes between { and matching }
 
+    # `cmd NAME { body }` / `cmd NAME\n  body` definition form. The
+    # lexer wrapper emits `cmd_open` only when it sees a definition
+    # opener — `cmd IDENT {` (brace) or `cmd IDENT NEWLINE INDENT`
+    # (indent block) — at a command-starter position. Anywhere else,
+    # the literal `cmd` lexes as a regular IDENT and routes through
+    # `simple_command` to the `cmd` builtin, which exposes the same
+    # listing / query / delete / reset surface as `key` and `str`.
+    # Body parses normally (unlike `str_body`, which is raw bytes);
+    # `cmd_open` is purely a contextual disambiguation marker.
+    cmd_open            # the literal "cmd" keyword in cmd_def context
+
     # Assignment
     assign          # =       (loose form, e.g. inside ${var = default})
     name_eq         # NAME=   (tight form, fused by lexer wrapper)
@@ -364,12 +375,19 @@ match_arm       = word_atoms block_form                → (match_arm 1 2)
 # User-defined commands
 # ------------------------------------------------------------------------------
 #
-# `cmd name { body }` defines a positional-only command body. Resolution
-# order at call-time is builtins → defs → PATH. The body sees `$1..$N`,
-# `$@`, and `$#` bound from the call's argv; on `return N` (a control-
-# flow builtin) the call frame catches and propagates `N` as exit status.
+# `cmd name { body }` (or `cmd name` + indent block) defines a
+# positional-only command body. Resolution order at call-time is
+# builtins → defs → PATH. The body sees `$1..$N`, `$@`, and `$#`
+# bound from the call's argv; on `return N` (a control-flow builtin)
+# the call frame catches and propagates `N` as exit status.
+#
+# `CMD_OPEN` is a wrapper-emitted token that only appears when the
+# definition shape is actually present in the source. Plain `cmd` in
+# any other context stays a regular IDENT (`simple_command`'s
+# leading word), so the `cmd` builtin's bare-args / list / query /
+# delete / reset surfaces work in line-at-a-time REPL input.
 
-cmd_def         = CMD IDENT block_form                  → (cmd_def 2 3)
+cmd_def         = CMD_OPEN IDENT block_form             → (cmd_def 1 2 3)
 
 # ------------------------------------------------------------------------------
 # Editor-only literal-text rewrites

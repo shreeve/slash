@@ -1262,7 +1262,15 @@ fn evalDefine(
     var arena = std.heap.ArenaAllocator.init(session.alloc);
     errdefer arena.deinit();
     const cloned = try program_mod.clone(d.body, arena.allocator());
-    try session.defs.install(d.name, arena, cloned);
+    // Dupe the source text into the same arena so DefStore owns it.
+    // The caller's parse arena (which currently holds `d.source_text`
+    // via `clone`'s alloc.dupe) is independent of `arena` — but
+    // since we're cloning into `arena` here, we need to dupe the
+    // bytes one more time so the DefStore can drop the parse arena
+    // safely. Using the cloned program's own allocator (the same
+    // `arena`) keeps the lifetime invariant clean.
+    const src_dup = try arena.allocator().dupe(u8, d.source_text);
+    try session.defs.install(d.name, arena, cloned, src_dup);
 
     const j = try session.jobs.create(true, false, d.name);
     session.jobs.completeZeroChild(j, .{ .exited = 0 });

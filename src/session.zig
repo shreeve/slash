@@ -158,6 +158,10 @@ pub const DefStore = struct {
     pub const Entry = struct {
         arena: std.heap.ArenaAllocator,
         program: *const program_mod.Program,
+        /// Original source covering the `cmd NAME ...` definition,
+        /// allocated inside `arena`. Used by the `cmd NAME` query
+        /// path to reprint a round-trippable definition.
+        source_text: []const u8,
     };
 
     pub fn init(alloc: Allocator) DefStore {
@@ -179,22 +183,32 @@ pub const DefStore = struct {
         return null;
     }
 
+    /// Source text the definition was installed with. `null` when
+    /// no entry exists; an empty slice if installed without source
+    /// (defensive — never happens in the normal path).
+    pub fn source(self: *const DefStore, name: []const u8) ?[]const u8 {
+        if (self.table.get(name)) |entry| return entry.source_text;
+        return null;
+    }
+
     /// Install a definition. The caller passes a freshly initialized
-    /// arena and the lowered Program allocated from it. Ownership of
-    /// the arena transfers to the store; on key replacement the old
-    /// entry's arena is destroyed.
+    /// arena, the lowered Program allocated from it, and the
+    /// definition's source text (also allocated from `arena`).
+    /// Ownership of the arena transfers to the store; on key
+    /// replacement the old entry's arena is destroyed.
     pub fn install(
         self: *DefStore,
         name: []const u8,
         arena: std.heap.ArenaAllocator,
         program: *const program_mod.Program,
+        source_text: []const u8,
     ) !void {
         const key = try self.alloc.dupe(u8, name);
         errdefer self.alloc.free(key);
 
         const entry = try self.alloc.create(Entry);
         errdefer self.alloc.destroy(entry);
-        entry.* = .{ .arena = arena, .program = program };
+        entry.* = .{ .arena = arena, .program = program, .source_text = source_text };
 
         const gop = try self.table.getOrPut(self.alloc, key);
         if (gop.found_existing) {
@@ -203,6 +217,50 @@ pub const DefStore = struct {
             self.alloc.destroy(gop.value_ptr.*);
         }
         gop.value_ptr.* = entry;
+    }
+
+    /// Remove a definition by name. Returns true iff something was
+    /// removed. Idempotent for callers that pass a missing name.
+    pub fn unset(self: *DefStore, name: []const u8) bool {
+        const kv = self.table.fetchRemove(name) orelse return false;
+        self.alloc.free(kv.key);
+        kv.value.arena.deinit();
+        self.alloc.destroy(kv.value);
+        return true;
+    }
+
+    /// Drop every entry. Used by `cmd --reset`.
+    pub fn clearAll(self: *DefStore) void {
+        var it = self.table.iterator();
+        while (it.next()) |e| {
+            self.alloc.free(e.key_ptr.*);
+            e.value_ptr.*.arena.deinit();
+            self.alloc.destroy(e.value_ptr.*);
+        }
+        self.table.clearRetainingCapacity();
+    }
+
+    pub fn count(self: *const DefStore) usize {
+        return self.table.count();
+    }
+
+    /// Allocate and return name pointers in lexicographic order,
+    /// borrowed from the table (caller must not free entries; caller
+    /// frees the slice itself with the supplied allocator). Used for
+    /// deterministic listing in the `cmd` builtin and tests.
+    pub fn sortedNames(self: *const DefStore, alloc: Allocator) ![][]const u8 {
+        const n = self.table.count();
+        var names = try alloc.alloc([]const u8, n);
+        errdefer alloc.free(names);
+        var it = self.table.keyIterator();
+        var i: usize = 0;
+        while (it.next()) |k| : (i += 1) names[i] = k.*;
+        std.mem.sort([]const u8, names, {}, lessByName);
+        return names;
+    }
+
+    fn lessByName(_: void, a: []const u8, b: []const u8) bool {
+        return std.mem.order(u8, a, b) == .lt;
     }
 };
 

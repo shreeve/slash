@@ -863,21 +863,36 @@ fn convertCmdDef(
     children: []const parser.Sexp,
     sink: ?Sink,
 ) anyerror!CmdDefShape {
-    if (children.len != 2) {
-        try emitBadShape(source, .nil, sink, "cmd definition requires a name and a body");
+    if (children.len != 3) {
+        try emitBadShape(source, .nil, sink, "cmd definition requires opener, name, and body");
         return error.InvalidShape;
     }
-    const name_span = try expectSrcSpan(children[0], source, sink);
+    // children[0] = `CMD_OPEN` source token (the literal "cmd" word).
+    // Anchoring the span here keeps the round-trippable source slice
+    // honest — `cmd ...` rather than `... { ... }` with the keyword
+    // stripped.
+    const open_span = try expectSrcSpan(children[0], source, sink);
+    const name_span = try expectSrcSpan(children[1], source, sink);
     const name = source.text[name_span.start..name_span.end];
 
-    const body = try convertBody(alloc, source, children[1], sink);
+    const body = try convertBody(alloc, source, children[2], sink);
     const body_ptr = try alloc.create(Shape);
     body_ptr.* = body;
+
+    // The body Shape's span ends at the inner sequence's last token,
+    // not at the closing `}` (brace form) or the OUTDENT (indent
+    // form). Walk forward through trailing whitespace; if a `}` is
+    // there, include it. The indent form's body span already ends
+    // after the last statement, which is the right end-of-def.
+    var end: u32 = body.span().end;
+    var p: u32 = end;
+    while (p < source.text.len and (source.text[p] == ' ' or source.text[p] == '\t' or source.text[p] == '\n' or source.text[p] == '\r')) : (p += 1) {}
+    if (p < source.text.len and source.text[p] == '}') end = p + 1;
 
     return .{
         .name = name,
         .body = body_ptr,
-        .span = .{ .start = name_span.start, .end = body.span().end },
+        .span = .{ .start = open_span.start, .end = end },
     };
 }
 

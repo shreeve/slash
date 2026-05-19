@@ -106,18 +106,22 @@ pub const KeywordId = enum(u16) {
     WHILE,
     FOR,
     IN,
-    CMD,
     MATCH,
     TIME,
 };
 
+// `cmd` is deliberately NOT in this map. Like `str`, the literal word
+// `cmd` is contextually promoted by the lexer wrapper only when a
+// definition opener (`cmd IDENT {` or `cmd IDENT NEWLINE INDENT`)
+// is present at a command-starter position; otherwise it lexes as a
+// regular IDENT and routes through `simple_command` to the `cmd`
+// builtin. See `tryFuseCmdDef`.
 const keyword_map = std.StaticStringMap(KeywordId).initComptime(.{
     .{ "if", .IF },
     .{ "else", .ELSE },
     .{ "while", .WHILE },
     .{ "for", .FOR },
     .{ "in", .IN },
-    .{ "cmd", .CMD },
     .{ "match", .MATCH },
     .{ "time", .TIME },
 });
@@ -165,6 +169,15 @@ pub const Lexer = struct {
     queued_str_name: ?Token = null,
     queued_str_body: ?Token = null,
 
+    // `cmd NAME { body }` / `cmd NAME` + indent block lookahead. When
+    // the wrapper detects a definition opener at a command-starter
+    // position, it emits a `cmd_open` token covering "cmd" and queues
+    // an IDENT (the name); the body parses normally as either a
+    // brace block or an INDENT/OUTDENT-bracketed sequence. Anywhere
+    // else, plain `cmd` lexes as a regular IDENT and routes through
+    // `simple_command` to the `cmd` builtin.
+    queued_cmd_name: ?Token = null,
+
     pub fn init(source: []const u8) Lexer {
         return .{ .base = BaseLexer.init(source) };
     }
@@ -184,6 +197,7 @@ pub const Lexer = struct {
         self.heredoc_resume_pos = 0;
         self.queued_str_name = null;
         self.queued_str_body = null;
+        self.queued_cmd_name = null;
     }
 
     pub fn next(self: *Lexer) Token {
@@ -224,6 +238,15 @@ pub const Lexer = struct {
             self.queued_str_body = null;
             self.last_cat = body.cat;
             return body;
+        }
+
+        // Drain a queued `cmd_def` name. After emitting CMD_OPEN, the
+        // parser expects IDENT next; the body (brace or indent block)
+        // comes from the regular tokenization stream.
+        if (self.queued_cmd_name) |name| {
+            self.queued_cmd_name = null;
+            self.last_cat = name.cat;
+            return name;
         }
 
         while (true) {
@@ -345,6 +368,24 @@ pub const Lexer = struct {
                 identTextEquals(self.base.source, working, "str"))
             {
                 if (self.tryFuseStrDef(working)) |open_tok| {
+                    self.last_cat = open_tok.cat;
+                    return open_tok;
+                }
+            }
+
+            // `cmd NAME { body }` / `cmd NAME\n  body` definition form.
+            // Same command-starter context as `str`. The wrapper only
+            // promotes `cmd` to `cmd_open` when an actual definition
+            // opener is present in the source — a brace `{` or a
+            // newline followed by deeper indentation. Anywhere else
+            // (`cmd`, `cmd -l`, `cmd NAME`, `cmd NAME VALUE`, `cmd -d
+            // NAME`, etc.), `cmd` falls through as a regular IDENT
+            // and the `cmd` builtin handles it via `simple_command`.
+            if (working.cat == .ident and
+                isStrDefStartCat(self.last_cat) and
+                identTextEquals(self.base.source, working, "cmd"))
+            {
+                if (self.tryFuseCmdDef(working)) |open_tok| {
                     self.last_cat = open_tok.cat;
                     return open_tok;
                 }
@@ -633,6 +674,82 @@ pub const Lexer = struct {
         };
     }
 
+    /// Detect a `cmd NAME { body }` (brace) or `cmd NAME\n  body`
+    /// (indent) definition opener. Returns a `cmd_open` token (and
+    /// queues the `IDENT` name for the next `next()` call) when the
+    /// pattern matches; returns null otherwise so the caller falls
+    /// through to emitting `working` as a regular IDENT and the
+    /// `cmd` builtin handles invocation forms.
+    ///
+    /// The lookahead is purely syntactic and bounded by the current
+    /// source buffer — no blocking, no waiting for further input.
+    /// In a line-at-a-time REPL, `cmd NAME<Enter>` arrives as a
+    /// complete chunk with no following body, so the indent check
+    /// fails and `cmd` lexes as an IDENT, committing immediately as
+    /// a builtin query. In a multi-line chunk (paste, file, brace
+    /// continuation, or editor-spawned multi-line buffer), the
+    /// indent-form check succeeds and the parser sees the
+    /// `CMD_OPEN IDENT block_form` shape.
+    ///
+    /// Unlike `str_def`, `cmd_def` bodies parse normally — `cmd_open`
+    /// is purely a contextual disambiguation marker. The body
+    /// (brace block or indented block) is consumed by the regular
+    /// tokenization stream; this function only consumes through the
+    /// IDENT name.
+    fn tryFuseCmdDef(self: *Lexer, cmd_tok: Token) ?Token {
+        const src = self.base.source;
+        const cmd_end = cmd_tok.pos + cmd_tok.len;
+
+        // Need horizontal whitespace between `cmd` and the name.
+        var p: u32 = cmd_end;
+        while (p < src.len and (src[p] == ' ' or src[p] == '\t')) : (p += 1) {}
+        if (p == cmd_end) return null;
+
+        // Expect an IDENT-shaped name.
+        const name_pos = p;
+        if (p >= src.len or !isBareWordStart(src[p])) return null;
+        p += 1;
+        while (p < src.len and isBareWordContinueOrUtf8(src[p])) : (p += 1) {}
+        const name_end = p;
+
+        // Skip horizontal whitespace after the name (no newline yet).
+        while (p < src.len and (src[p] == ' ' or src[p] == '\t')) : (p += 1) {}
+
+        // Decide if a definition opener follows.
+        const is_def = blk: {
+            if (p >= src.len) break :blk false;
+            // Brace form — definitive.
+            if (src[p] == '{') break :blk true;
+            // Indent form — the next non-blank, non-comment line must
+            // start at a column strictly deeper than the current
+            // indent level.
+            if (src[p] == '\n' or src[p] == '\r') {
+                break :blk peekIndentDeeper(src, p, self.indent_level);
+            }
+            break :blk false;
+        };
+        if (!is_def) return null;
+
+        // Commit. Advance past the IDENT name (NOT past the `{` or
+        // newline) so the regular tokenizer picks up the body opener
+        // — `lbrace` or the SEMI/INDENT pair from `handleNewline`.
+        self.base.pos = name_end;
+
+        self.queued_cmd_name = Token{
+            .cat = .ident,
+            .pre = 0,
+            .pos = name_pos,
+            .len = @intCast(name_end - name_pos),
+        };
+
+        return Token{
+            .cat = .cmd_open,
+            .pre = cmd_tok.pre,
+            .pos = cmd_tok.pos,
+            .len = cmd_tok.len,
+        };
+    }
+
     /// Process a newline token. Returns:
     ///   - the original semi token (level unchanged)
     ///   - an INDENT token (level increased)
@@ -866,6 +983,49 @@ fn isVarNameUtf8Cont(c: u8) bool {
         (c >= 'a' and c <= 'z') or
         (c >= '0' and c <= '9') or
         c == '_';
+}
+
+/// Peek forward from a newline at `start` and return whether the next
+/// non-blank, non-comment-only line begins at a column strictly
+/// deeper than `current_level`. Returns false if no content line
+/// exists in the remaining source — important for line-at-a-time
+/// REPL input where `cmd NAME<Enter>` arrives as a complete chunk
+/// with no following body.
+///
+/// "Comment-only" matches `handleNewline`: a line whose first
+/// non-whitespace byte is `#`. Tabs in indentation count as one
+/// column (the wrapper rejects them later in `handleNewline`; here
+/// we just don't want to mis-classify their presence as zero-width).
+fn peekIndentDeeper(source: []const u8, start: u32, current_level: u32) bool {
+    var p: u32 = start;
+    while (p < source.len) {
+        // Skip the newline byte(s) themselves.
+        while (p < source.len and (source[p] == '\n' or source[p] == '\r')) : (p += 1) {}
+        if (p >= source.len) return false;
+
+        // Count leading spaces / tabs as a column count (one each).
+        var ws: u32 = 0;
+        while (p + ws < source.len and (source[p + ws] == ' ' or source[p + ws] == '\t')) : (ws += 1) {}
+
+        if (p + ws >= source.len) return false;
+        const ch = source[p + ws];
+        if (ch == '\n' or ch == '\r') {
+            // Blank line — keep looking.
+            p = p + ws;
+            continue;
+        }
+        if (ch == '#') {
+            // Comment-only line — skip past it.
+            var q = p + ws;
+            while (q < source.len and source[q] != '\n') : (q += 1) {}
+            p = q;
+            continue;
+        }
+
+        // Real content line.
+        return ws > current_level;
+    }
+    return false;
 }
 
 /// True if `source[pos..]` begins with the keyword `else` followed by a

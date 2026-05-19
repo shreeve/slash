@@ -109,6 +109,7 @@ pub fn init(alloc: Allocator) !BuiltinSet {
     try set.table.put(alloc, "str", .{ .name = "str", .run = strFn });
     try set.table.put(alloc, "history", .{ .name = "history", .run = historyFn });
     try set.table.put(alloc, "key", .{ .name = "key", .run = keyFn });
+    try set.table.put(alloc, "cmd", .{ .name = "cmd", .run = cmdFn });
     return set;
 }
 
@@ -129,6 +130,29 @@ fn writeAllToFd(fd: i32, bytes: []const u8) bool {
         off += @intCast(rc);
     }
     return true;
+}
+
+/// `-e` / `--erase` — the only spelling. Shared by `key`, `str`,
+/// and `cmd`. Matches fish's convention across `abbr`/`bind`/
+/// `functions`. No `-d`/`--delete` alias; the trio is strictly
+/// uniform.
+fn isEraseFlag(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "-e") or
+        std.mem.eql(u8, arg, "--erase");
+}
+
+/// `-r` / `--reset` — clear all entries for this builtin's namespace.
+/// Shared by `key`, `str`, and `cmd`.
+fn isResetFlag(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "-r") or
+        std.mem.eql(u8, arg, "--reset");
+}
+
+/// `-l` / `--list` — list all entries. Same as bare invocation;
+/// kept as an explicit flag for symmetry across the trio.
+fn isListFlag(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "-l") or
+        std.mem.eql(u8, arg, "--list");
 }
 
 // =============================================================================
@@ -1528,9 +1552,21 @@ fn strFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!
 
     if (args.len == 0) return listStrs(session, io);
 
-    if (std.mem.eql(u8, args[0], "-e")) {
+    if (isListFlag(args[0])) return listStrs(session, io);
+
+    if (isResetFlag(args[0])) {
+        // Drop every str. Iterating with fetchRemove is awkward
+        // for a hashmap; use the existing `unset` per name from a
+        // snapshot of names, then we know the table is empty.
+        const names = try session.strs.sortedNames(session.alloc);
+        defer session.alloc.free(names);
+        for (names) |n| _ = session.strs.unset(n);
+        return .{ .exited = 0 };
+    }
+
+    if (isEraseFlag(args[0])) {
         if (args.len < 2) {
-            _ = writeAllToFd(io.stderr, "str: -e: usage: str -e NAME [NAME...]\n");
+            _ = writeAllToFd(io.stderr, "str: usage: str -e NAME [NAME...]\n");
             return .{ .exited = 2 };
         }
         return eraseStrs(session, args[1..]);
@@ -1863,17 +1899,146 @@ fn writeJsonStringSimple(
 }
 
 // =============================================================================
+// `cmd` builtin — list / query / erase user-defined commands
+// =============================================================================
+//
+// Forms (companion to the `cmd NAME { body }` keyword form, which is
+// disambiguated by the lexer wrapper based on whether a definition
+// opener — `{` or NEWLINE+INDENT — actually follows):
+//
+//   cmd                       List all defined commands, one per line.
+//   cmd -l    / --list        Same.
+//   cmd NAME                  Print the round-trippable definition for NAME,
+//                             or exit non-zero if no such cmd exists.
+//   cmd -e NAME / --erase     Remove a definition. Multi-name supported.
+//   cmd -r    / --reset       Drop every definition.
+//
+// `-e`/`--erase` and `-r`/`--reset` are shared with `key` and `str`
+// — the trio uses one fixed flag set, with no aliases. The
+// convention matches fish's `abbr`/`bind`/`functions --erase`
+// surface.
+//
+// Defining is exclusively the keyword form: `cmd NAME { body }` or
+// the indent form
+//
+//   cmd NAME
+//     body
+//
+// The builtin deliberately does not support a `cmd NAME body` setter
+// shape — `cmd` definitions need a real Slash body, not a list of
+// argv-style strings, and the keyword path is the one that lowers
+// the body into a `Program`.
+
+fn cmdFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!Result {
+    const session = switch (ctx) {
+        .shell => |s| s,
+        // Forked pipeline stage — no session pointer to introspect.
+        // Match `cd`/`key`/`str`'s convention: no-op success.
+        .child => return .{ .exited = 0 },
+    };
+
+    const args = argv[1..];
+
+    if (args.len == 0) return cmdList(session, io);
+
+    if (isListFlag(args[0])) return cmdList(session, io);
+
+    if (isResetFlag(args[0])) {
+        session.defs.clearAll();
+        return .{ .exited = 0 };
+    }
+
+    if (isEraseFlag(args[0])) {
+        if (args.len < 2) {
+            _ = writeAllToFd(io.stderr, "cmd: usage: cmd -e NAME [NAME...]\n");
+            return .{ .exited = 2 };
+        }
+        return cmdDelete(session, args[1..]);
+    }
+
+    // Reject unknown flags up-front. Anything starting with `-` and
+    // not matching a known flag is a usage error — preferring an
+    // explicit "unknown option" over silently treating `-foo` as a
+    // name to query.
+    if (args[0].len > 0 and args[0][0] == '-') {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "cmd: unknown option '{s}' (try `cmd`, `cmd -l`, `cmd NAME`, `cmd -e NAME`, `cmd -r`)\n",
+            .{args[0]},
+        ) catch "cmd: unknown option\n";
+        _ = writeAllToFd(io.stderr, msg);
+        return .{ .exited = 2 };
+    }
+
+    // Single-arg → query. Multi-arg with a leading name is a hint
+    // that the user meant the keyword form (`cmd NAME { body }`).
+    if (args.len == 1) return cmdQuery(session, io, args[0]);
+
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "cmd: too many arguments for query; to define use `cmd {s} {{ body }}` or the indent-block form\n",
+        .{args[0]},
+    ) catch "cmd: too many arguments\n";
+    _ = writeAllToFd(io.stderr, msg);
+    return .{ .exited = 2 };
+}
+
+fn cmdList(session: *session_mod.Session, io: BuiltinIo) anyerror!Result {
+    const names = try session.defs.sortedNames(session.alloc);
+    defer session.alloc.free(names);
+    for (names) |name| {
+        const src = session.defs.source(name) orelse continue;
+        if (src.len > 0) {
+            _ = writeAllToFd(io.stdout, src);
+            // Source spans usually omit the trailing newline; ensure
+            // each definition starts on a fresh row.
+            if (src[src.len - 1] != '\n') _ = writeAllToFd(io.stdout, "\n");
+        } else {
+            // Defensive — a missing source shouldn't happen, but
+            // print at least the name so the user can see the cmd
+            // exists.
+            var buf: [256]u8 = undefined;
+            const line = std.fmt.bufPrint(&buf, "cmd {s} {{ ... }}\n", .{name}) catch "cmd ...\n";
+            _ = writeAllToFd(io.stdout, line);
+        }
+    }
+    return .{ .exited = 0 };
+}
+
+fn cmdQuery(session: *session_mod.Session, io: BuiltinIo, name: []const u8) anyerror!Result {
+    const src = session.defs.source(name) orelse return .{ .exited = 1 };
+    if (src.len > 0) {
+        _ = writeAllToFd(io.stdout, src);
+        if (src[src.len - 1] != '\n') _ = writeAllToFd(io.stdout, "\n");
+    }
+    return .{ .exited = 0 };
+}
+
+fn cmdDelete(session: *session_mod.Session, names: []const []const u8) anyerror!Result {
+    // Idempotent erase semantics matching `str -e` and `key -e`:
+    // missing names are not an error.
+    for (names) |name| _ = session.defs.unset(name);
+    return .{ .exited = 0 };
+}
+
+// =============================================================================
 // `key` builtin — user-configurable key bindings
 // =============================================================================
 //
 // Forms:
 //
 //   key                       List all bindings, canonical form, one per line.
+//   key -l   / --list         Same.
 //   key --actions             List every registered action with kebab-name.
-//   key --reset               Drop every user binding (back to slash defaults).
-//   key -d KEYSPEC            Remove the binding for KEYSPEC.
+//   key -r   / --reset        Drop every user binding (back to slash defaults).
+//   key -e KEYSPEC / --erase  Remove the binding for KEYSPEC.
 //   key KEYSPEC action-name   Bind KEYSPEC to a named editor action.
 //   key KEYSPEC "literal"     Bind KEYSPEC to literal text (\n = accept).
+//
+// `-l`, `-e`, `-r` are shared with `str` and `cmd`. The trio uses
+// one fixed flag set with no aliases (matching fish's convention).
 //
 // Disambiguation rule for the third arg:
 //
@@ -1897,7 +2062,7 @@ fn keyFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!
 
     const session = switch (ctx) {
         .shell => |s| s,
-        // Everything else either mutates session state (bind / -d /
+        // Everything else either mutates session state (bind / -e /
         // --reset) or reads it (list bindings). The forked stage of
         // a pipeline doesn't carry a session reference, so silently
         // no-op success — matches `cd`'s behavior in a pipeline.
@@ -1911,7 +2076,8 @@ fn keyFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!
     }
 
     if (args.len == 0) return keyList(session, io);
-    if (std.mem.eql(u8, args[0], "--reset")) {
+    if (isListFlag(args[0])) return keyList(session, io);
+    if (isResetFlag(args[0])) {
         session.keybindings.clearAll();
         // Drop the multi-chord table too — every literal payload
         // it owned, then the table itself. `ensureBindingTable`
@@ -1926,9 +2092,9 @@ fn keyFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!
         }
         return .{ .exited = 0 };
     }
-    if (std.mem.eql(u8, args[0], "-d") or std.mem.eql(u8, args[0], "--delete")) {
+    if (isEraseFlag(args[0])) {
         if (args.len < 2) {
-            _ = writeAllToFd(io.stderr, "key: -d: usage: key -d KEYSPEC\n");
+            _ = writeAllToFd(io.stderr, "key: usage: key -e KEYSPEC\n");
             return .{ .exited = 2 };
         }
         return keyDelete(session, io, args[1]);
@@ -2060,7 +2226,7 @@ fn keyBind(
         var buf: [256]u8 = undefined;
         const out = std.fmt.bufPrint(
             &buf,
-            "key: first chord of '{s}' is already a single-chord binding; remove it first (key -d <chord>)\n",
+            "key: first chord of '{s}' is already a single-chord binding; remove it first (key -e <chord>)\n",
             .{spec},
         ) catch "key: prefix conflict\n";
         _ = writeAllToFd(io.stderr, out);

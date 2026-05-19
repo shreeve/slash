@@ -127,6 +127,13 @@ pub const For = struct {
 pub const Define = struct {
     name: []const u8,
     body: *const Program,
+    /// A copy of the source text covering the entire `cmd NAME ...`
+    /// definition. Carried alongside the lowered Program so the
+    /// `cmd NAME` builtin can reprint the original (round-trippable)
+    /// source. Owned by the same allocator as the rest of the
+    /// `Define` (parse arena at lower time, session arena after
+    /// `evalDefine` clones).
+    source_text: []const u8,
     span: Span,
 };
 
@@ -397,9 +404,19 @@ fn lowerFor(f: shape_mod.ForShape, ctx: *const LowerContext, sink: ?Sink) anyerr
 
 fn lowerCmdDef(d: shape_mod.CmdDefShape, ctx: *const LowerContext, sink: ?Sink) anyerror!*const Program {
     const body = try lowerShape(d.body.*, ctx, sink);
+    // Capture the original source text covering this `cmd_def` so
+    // the `cmd NAME` builtin can render the definition back to the
+    // user. Bounds-clamp defensively — the Span comes from the
+    // converter and should always be inside `source.text`, but a
+    // wrong span shouldn't blow up the lowerer.
+    const text = ctx.source.text;
+    const lo = @min(d.span.start, @as(u32, @intCast(text.len)));
+    const hi = @min(d.span.end, @as(u32, @intCast(text.len)));
+    const slice: []const u8 = if (lo <= hi) text[lo..hi] else &.{};
     return put(ctx.alloc, .{ .define = .{
         .name = try ctx.alloc.dupe(u8, d.name),
         .body = body,
+        .source_text = try ctx.alloc.dupe(u8, slice),
         .span = d.span,
     } });
 }
@@ -645,6 +662,7 @@ pub fn clone(p: *const Program, alloc: Allocator) anyerror!*const Program {
         .define => |d| .{ .define = .{
             .name = try alloc.dupe(u8, d.name),
             .body = try clone(d.body, alloc),
+            .source_text = try alloc.dupe(u8, d.source_text),
             .span = d.span,
         } },
         .str_def => |d| .{ .str_def = .{

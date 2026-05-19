@@ -460,8 +460,34 @@ const cases: []const Case = &.{
         .expect = .{ .exit_code = 2 },
     },
     .{
-        .name = "key: -d removes a binding (idempotent on missing)",
-        .source = "key Alt-Z history-prev-prefix; key -d Alt-Z; key -d Alt-Z",
+        .name = "key: -e removes a binding (idempotent on missing)",
+        .source = "key Alt-Z history-prev-prefix; key -e Alt-Z; key -e Alt-Z",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "key: --erase long form",
+        .source = "key Alt-Z history-prev-prefix; key --erase Alt-Z; key",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        // No `-d` or `--delete` — slash uses one spelling only.
+        .name = "key: -d is not accepted",
+        .source = "key Alt-Z history-prev-prefix; key -d Alt-Z",
+        .expect = .{ .exit_code = 2 },
+    },
+    .{
+        .name = "key: --delete is not accepted",
+        .source = "key Alt-Z history-prev-prefix; key --delete Alt-Z",
+        .expect = .{ .exit_code = 2 },
+    },
+    .{
+        .name = "key: -l lists bindings (alias for bare `key`)",
+        .source = "key Alt-A history-prev-prefix; key -l",
+        .expect = .{ .exit_code = 0, .stdout = "Alt-a", .stdout_contains = true },
+    },
+    .{
+        .name = "key: -r short form for --reset",
+        .source = "key Alt-A history-prev-prefix; key -r; key",
         .expect = .{ .exit_code = 0, .stdout = "" },
     },
     .{
@@ -478,7 +504,7 @@ const cases: []const Case = &.{
     .{
         .name = "key: rebinding the same chord replaces (no duplicate)",
         // Two binds of `Alt-Z`, then `key` should list it once.
-        // Canonical form lowercases the letter (Alt-letter case-fold).
+        // Canonical form lowercases the letter (meta-letter case-fold).
         .source = "key Alt-Z history-prev-prefix; key Alt-Z \"echo X\\n\"; key",
         .expect = .{
             .exit_code = 0,
@@ -1115,6 +1141,193 @@ const cases: []const Case = &.{
         .expect = .{ .exit_code = 0, .stdout = "overridden\n" },
     },
 
+    // ---- `cmd` builtin (list / query / delete / reset) -------------------
+
+    .{
+        // Empty session: `cmd` with no args lists nothing and exits 0.
+        // Important for the `cmd<Enter>` REPL path.
+        .name = "cmd: bare `cmd` with no defs lists nothing",
+        .source = "cmd",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        // `cmd -l` and `cmd --list` are the same as bare `cmd`.
+        .name = "cmd: -l alias for list",
+        .source = "cmd greet { echo hi }\ncmd -l",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "cmd greet { echo hi }\n",
+        },
+    },
+    .{
+        .name = "cmd: --list alias for list",
+        .source = "cmd greet { echo hi }\ncmd --list",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "cmd greet { echo hi }\n",
+        },
+    },
+    .{
+        // `cmd NAME` queries a single definition. The output is the
+        // round-trippable source — the same bytes the user typed.
+        .name = "cmd: NAME queries the round-trippable source (brace form)",
+        .source = "cmd greet { echo \"hello, $1\" }\ncmd greet",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "cmd greet { echo \"hello, $1\" }\n",
+        },
+    },
+    .{
+        // Same query, indent form. The reprinted definition shows the
+        // exact whitespace the user typed.
+        .name = "cmd: NAME queries the indent-form source verbatim",
+        .source = "cmd greet\n  echo \"hello, $1\"\ncmd greet",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "cmd greet\n  echo \"hello, $1\"\n",
+        },
+    },
+    .{
+        // Querying an undefined name is a non-zero exit with no
+        // stdout — matches `str NAME` for undefined abbreviations.
+        .name = "cmd: query of undefined name exits 1",
+        .source = "cmd missing",
+        .expect = .{ .exit_code = 1, .stdout = "" },
+    },
+    .{
+        .name = "cmd: -e removes a definition",
+        .source = "cmd a { echo A }\ncmd b { echo B }\ncmd -e a\ncmd",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "cmd b { echo B }\n",
+        },
+    },
+    .{
+        .name = "cmd: --erase long form",
+        .source = "cmd a { echo A }\ncmd --erase a\ncmd",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        // No `-d` or `--delete` aliases. The trio uses one spelling.
+        .name = "cmd: -d is not accepted",
+        .source = "cmd a { echo A }\ncmd -d a",
+        .expect = .{ .exit_code = 2 },
+    },
+    .{
+        .name = "cmd: --delete is not accepted",
+        .source = "cmd a { echo A }\ncmd --delete a",
+        .expect = .{ .exit_code = 2 },
+    },
+    .{
+        // Idempotent erase — missing names are not an error. Same
+        // semantics as `str -e` and `key -e`.
+        .name = "cmd: -e on missing name succeeds idempotently",
+        .source = "cmd -e nope",
+        .expect = .{ .exit_code = 0 },
+    },
+    .{
+        .name = "cmd: -e with no names is a usage error",
+        .source = "cmd -e",
+        .expect = .{ .exit_code = 2, .stderr = "cmd: usage: cmd -e NAME [NAME...]\n" },
+    },
+    .{
+        .name = "cmd: --reset clears every definition",
+        .source = "cmd a { echo A }\ncmd b { echo B }\ncmd --reset\ncmd",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "cmd: -r short form for --reset",
+        .source = "cmd a { echo A }\ncmd b { echo B }\ncmd -r\ncmd",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        // Calling an erased cmd falls through to PATH lookup (and
+        // typically errors). Confirms the erase took effect.
+        .name = "cmd: erased cmd is no longer callable",
+        .source = "cmd hello { echo hi }\nhello\ncmd -e hello\nhello",
+        .expect = .{ .exit_code = 127, .stdout = "hi\n", .stdout_contains = true },
+    },
+
+    // ---- `cmd` lexical disambiguation (line-at-a-time REPL behavior) -----
+
+    .{
+        // Line-at-a-time REPL: `cmd<Enter>` with no following body
+        // commits immediately as a builtin call. This is the desired
+        // tradeoff vs the old behavior of entering multi-line
+        // continuation. (See PLAN §14 + the original design discussion
+        // — preserves Command clarity at the keystroke moment.)
+        .name = "cmd: bare `cmd` does not enter multi-line continuation",
+        .source = "cmd",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        // `cmd NAME<Enter>` with no following body is a builtin
+        // query, not an incomplete definition.
+        .name = "cmd: `cmd NAME` with no body is a query, not incomplete",
+        .source = "cmd missing",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        // The grammar still routes to the keyword definition path
+        // when a brace block follows; this regression-tests that the
+        // wrapper's contextual promotion didn't break the existing
+        // definition syntax.
+        .name = "cmd: brace-form definition still works",
+        .source = "cmd hi { echo hi-body }\nhi",
+        .expect = .{ .exit_code = 0, .stdout = "hi-body\n" },
+    },
+    .{
+        // Indent-form definition still works when the deeper-indent
+        // body is present in the same parsed chunk.
+        .name = "cmd: indent-form definition still works",
+        .source = "cmd hi\n  echo indent-body\nhi",
+        .expect = .{ .exit_code = 0, .stdout = "indent-body\n" },
+    },
+
+    // ---- `str` flags: `-l`/`-e`/`-r` (no aliases) ------------------------
+
+    .{
+        .name = "str: --erase long form",
+        .source = "str a foo\nstr --erase a\nstr",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        // No `-d` or `--delete` — slash uses one spelling.
+        .name = "str: -d is not accepted",
+        .source = "str a foo\nstr -d a",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "str: --delete is not accepted",
+        .source = "str a foo\nstr --delete a",
+        .expect = .{ .exit_code = 1 },
+    },
+    .{
+        .name = "str: -e takes multiple names",
+        .source = "str a 1\nstr b 2\nstr -e a b\nstr",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "str: -l lists abbreviations",
+        .source = "str a foo\nstr -l",
+        .expect = .{ .exit_code = 0, .stdout = "str 'a' 'foo'\n" },
+    },
+    .{
+        .name = "str: --list long form",
+        .source = "str a foo\nstr b bar\nstr --list",
+        .expect = .{ .exit_code = 0, .stdout = "str 'a' 'foo'\nstr 'b' 'bar'\n" },
+    },
+    .{
+        .name = "str: --reset clears all",
+        .source = "str a 1\nstr b 2\nstr --reset\nstr",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+    .{
+        .name = "str: -r short form for --reset",
+        .source = "str a 1\nstr b 2\nstr -r\nstr",
+        .expect = .{ .exit_code = 0, .stdout = "" },
+    },
+
     // ---- jobs / wait builtins (PLAN §19) --------------------------------
 
     .{
@@ -1500,7 +1713,7 @@ const cases: []const Case = &.{
     .{
         .name = "str: -e without args is usage error",
         .source = "str -e",
-        .expect = .{ .exit_code = 2, .stderr = "str: -e: usage: str -e NAME [NAME...]\n" },
+        .expect = .{ .exit_code = 2, .stderr = "str: usage: str -e NAME [NAME...]\n" },
     },
     .{
         .name = "str: reject digit-start LHS",
