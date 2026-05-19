@@ -82,6 +82,7 @@ beyond libc and a TTY. Copy it anywhere on your `$PATH`.
 Drop the [`.slashrc.example`](https://github.com/shreeve/slash/blob/main/.slashrc.example)
 template at `~/.slashrc` and uncomment the recipes you want:
 
+{% raw %}
 ```sh
 # Prompt
 export PROMPT='%F{#ecede8}%K{#43669d}%D{%H:%M:%S} %F{#43669d}%K{#81a1c7}%F{#ecede8} %n@%m %F{#81a1c7}%K{}%F{#ecede8}%k %~> %f'
@@ -91,9 +92,10 @@ str ll { ls -la }
 str gst { git status }
 
 # Key bindings
-key Option-L "ls -la\n"
-key Option-G "git status\n"
+key Esc-L "ls -la\n"
+key Esc-G "git status\n"
 ```
+{% endraw %}
 
 ## Documentation
 

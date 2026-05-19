@@ -195,7 +195,16 @@ extern "c" fn grantpt(fd: c_int) c_int;
 extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname(fd: c_int) ?[*:0]u8;
 
-fn openTestSlave() !std.c.fd_t {
+/// Open a PTY pair for tests and return both ends. The caller closes
+/// both. We deliberately keep the master fd open for the lifetime of
+/// the test — closing it before `tcgetattr(slave)` returns EIO on
+/// Linux (the slave's master is gone, so the slave's tty discipline
+/// is hung up). macOS is more permissive about this and accepts
+/// `tcgetattr` on a slave whose master closed, but the portable path
+/// is to keep both fds alive.
+const PtyPair = struct { master: std.c.fd_t, slave: std.c.fd_t };
+
+fn openTestPty() !PtyPair {
     const O_RDWR: c_int = 2;
     const O_NOCTTY: c_int = switch (@import("builtin").target.os.tag) {
         .macos, .ios => 0x20000,
@@ -204,13 +213,13 @@ fn openTestSlave() !std.c.fd_t {
     };
     const master = posix_openpt(O_RDWR | O_NOCTTY);
     if (master < 0) return error.NoPtmx;
+    errdefer _ = std.c.close(master);
     if (grantpt(master) != 0) return error.GrantPtFailed;
     if (unlockpt(master) != 0) return error.UnlockPtFailed;
     const name = ptsname(master) orelse return error.PtsNameFailed;
     const slave = std.c.open(name, .{ .ACCMODE = .RDWR, .NOCTTY = true }, @as(std.c.mode_t, 0));
     if (slave < 0) return error.OpenSlaveFailed;
-    _ = std.c.close(master);
-    return slave;
+    return .{ .master = master, .slave = slave };
 }
 
 fn ttyCapable() bool {
@@ -235,8 +244,10 @@ fn observeProbe(p: *Probe) anyerror!void {
 test "withCookedTty forces OPOST|ONLCR on for the duration and restores after" {
     if (!ttyCapable()) return error.SkipZigTest;
 
-    const slave = openTestSlave() catch return error.SkipZigTest;
-    defer _ = std.c.close(slave);
+    const pty = openTestPty() catch return error.SkipZigTest;
+    defer _ = std.c.close(pty.master);
+    defer _ = std.c.close(pty.slave);
+    const slave = pty.slave;
 
     // Stage the broken state: OPOST off, ONLCR off.
     var t0 = try std.posix.tcgetattr(slave);
