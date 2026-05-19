@@ -2114,6 +2114,46 @@ test "slash pty: default Alt-P binding is seeded on interactive startup" {
     try std.testing.expect(std.mem.indexOf(u8, r.out, "history-next-prefix") != null);
 }
 
+test "slash pty: builtin multi-line output is OPOST-cooked (no staircase)" {
+    if (!ptySupported()) return error.SkipZigTest;
+
+    // Positive correctness check for the staircase-output fix in
+    // `terminal.withCookedTty`. When a shell-context builtin prints
+    // two or more `\n`-terminated rows between `readLine` calls, the
+    // PTY master must see each row body terminated by `\r\n`, never
+    // by a bare `\n`. If OPOST were off (which is what triggered the
+    // user-facing bug), the kernel would skip the translation and
+    // every row past the first would start at the column where the
+    // previous row ended.
+    //
+    // We use `key` (no args) because it reliably emits exactly two
+    // rows on a fresh `--norc` session (the seeded `Alt-P` / `Alt-N`
+    // defaults).
+    const alloc = std.testing.allocator;
+    const r = try runScript(alloc, &.{"--norc"}, &.{
+        .{ .send = "key\n", .settle_ms = 500, .wait_for = "history-prev-prefix" },
+        .{ .send = "exit 0\n", .settle_ms = 100 },
+    });
+    defer alloc.free(r.out);
+    try std.testing.expectEqual(@as(u8, 0), r.status);
+
+    // Positive: each row label appears followed by `\r\n`.
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "history-prev-prefix\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out, "history-next-prefix\r\n") != null);
+
+    // Negative: no occurrence of the row label is immediately
+    // followed by a bare `\n` (the staircase signature).
+    inline for (&[_][]const u8{ "history-prev-prefix", "history-next-prefix" }) |label| {
+        var j: usize = 0;
+        while (std.mem.indexOfPos(u8, r.out, j, label)) |hit| : (j = hit + 1) {
+            const after = hit + label.len;
+            if (after < r.out.len and r.out[after] == '\n') {
+                try std.testing.expect(false);
+            }
+        }
+    }
+}
+
 // `key --probe` PTY tests live below the main suite — they need
 // interactive raw-mode behavior that's awkward to test through the
 // PTY harness without a tighter wait_for protocol. The probe is

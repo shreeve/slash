@@ -147,3 +147,124 @@ pub fn runForeground(session: *Session, j: *Job) !void {
     defer reclaimForShell(session, j);
     try job_mod.service(&session.jobs, .foreground, j);
 }
+
+/// Force the controlling tty's output discipline back to standard
+/// "cooked" mode (OPOST|ONLCR on) for the duration of `func`, then
+/// restore the entering snapshot.
+///
+/// Why this exists: shell-context builtins (`key`, `jobs`, `history`,
+/// `set` listing, etc.) print multi-row output between `readLine`
+/// calls. They emit ordinary `\n`-terminated rows. If anything in
+/// the editor / signal-handler / job-control chain has left OPOST
+/// off, those rows render as a "staircase" — each row starts at the
+/// column where the previous row ended. External foreground jobs
+/// don't see this because `giveToJob` independently forces OPOST|
+/// ONLCR; this bracket is the equivalent guarantee for in-process
+/// builtin output.
+///
+/// `tty_fd == null` (script / pipeline / `-c`, or the rare
+/// no-controlling-tty interactive case) is a no-op. `tcgetattr` /
+/// `tcsetattr` failures are swallowed — the worst case is the pre-
+/// existing staircase, strictly no worse than skipping the bracket.
+/// `func` always runs.
+pub fn withCookedTty(
+    tty_fd: ?std.c.fd_t,
+    ctx: anytype,
+    comptime func: fn (@TypeOf(ctx)) anyerror!void,
+) anyerror!void {
+    const fd = tty_fd orelse return func(ctx);
+
+    const saved = std.posix.tcgetattr(fd) catch return func(ctx);
+    var cooked = saved;
+    cooked.oflag.OPOST = true;
+    cooked.oflag.ONLCR = true;
+    std.posix.tcsetattr(fd, .DRAIN, cooked) catch return func(ctx);
+    defer std.posix.tcsetattr(fd, .DRAIN, saved) catch {};
+
+    return func(ctx);
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+const testing = std.testing;
+
+extern "c" fn posix_openpt(oflag: c_int) c_int;
+extern "c" fn grantpt(fd: c_int) c_int;
+extern "c" fn unlockpt(fd: c_int) c_int;
+extern "c" fn ptsname(fd: c_int) ?[*:0]u8;
+
+fn openTestSlave() !std.c.fd_t {
+    const O_RDWR: c_int = 2;
+    const O_NOCTTY: c_int = switch (@import("builtin").target.os.tag) {
+        .macos, .ios => 0x20000,
+        .linux => 0o400,
+        else => 0,
+    };
+    const master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0) return error.NoPtmx;
+    if (grantpt(master) != 0) return error.GrantPtFailed;
+    if (unlockpt(master) != 0) return error.UnlockPtFailed;
+    const name = ptsname(master) orelse return error.PtsNameFailed;
+    const slave = std.c.open(name, .{ .ACCMODE = .RDWR, .NOCTTY = true }, @as(std.c.mode_t, 0));
+    if (slave < 0) return error.OpenSlaveFailed;
+    _ = std.c.close(master);
+    return slave;
+}
+
+fn ttyCapable() bool {
+    return switch (@import("builtin").target.os.tag) {
+        .linux, .macos, .freebsd, .netbsd, .openbsd, .dragonfly => true,
+        else => false,
+    };
+}
+
+const Probe = struct {
+    fd: std.c.fd_t,
+    saw_opost: bool = false,
+    saw_onlcr: bool = false,
+};
+
+fn observeProbe(p: *Probe) anyerror!void {
+    const t = try std.posix.tcgetattr(p.fd);
+    p.saw_opost = t.oflag.OPOST;
+    p.saw_onlcr = t.oflag.ONLCR;
+}
+
+test "withCookedTty forces OPOST|ONLCR on for the duration and restores after" {
+    if (!ttyCapable()) return error.SkipZigTest;
+
+    const slave = openTestSlave() catch return error.SkipZigTest;
+    defer _ = std.c.close(slave);
+
+    // Stage the broken state: OPOST off, ONLCR off.
+    var t0 = try std.posix.tcgetattr(slave);
+    t0.oflag.OPOST = false;
+    t0.oflag.ONLCR = false;
+    try std.posix.tcsetattr(slave, .NOW, t0);
+
+    var probe = Probe{ .fd = slave };
+    try withCookedTty(slave, &probe, observeProbe);
+
+    // Inside the bracket, both flags must have been on.
+    try testing.expect(probe.saw_opost);
+    try testing.expect(probe.saw_onlcr);
+
+    // After the bracket returns, the previous state is restored.
+    const t1 = try std.posix.tcgetattr(slave);
+    try testing.expect(!t1.oflag.OPOST);
+    try testing.expect(!t1.oflag.ONLCR);
+}
+
+test "withCookedTty no-ops with no controlling tty" {
+    const Bag = struct { ran: bool };
+    var bag = Bag{ .ran = false };
+    const Local = struct {
+        fn run(b: *Bag) anyerror!void {
+            b.ran = true;
+        }
+    };
+    try withCookedTty(null, &bag, Local.run);
+    try testing.expect(bag.ran);
+}

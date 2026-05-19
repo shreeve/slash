@@ -35,6 +35,7 @@ const session_mod = @import("session.zig");
 const eval = @import("eval.zig");
 const builtins = @import("builtins.zig");
 const exec = @import("exec.zig");
+const terminal = @import("terminal.zig");
 const history_mod = @import("history.zig");
 const notice = @import("notice.zig");
 const completion = @import("completion.zig");
@@ -252,7 +253,15 @@ fn runRaw(session: *session_mod.Session, alloc: Allocator) !u8 {
 
                 const before_len = pending.items.len;
                 const start_s: i64 = nowSeconds();
-                _ = try evaluatePending(session, alloc, &pending);
+                // Bracket evaluation in cooked-mode (OPOST|ONLCR on)
+                // so any in-process builtin output that uses ordinary
+                // `\n` line terminators renders aligned at column 0.
+                // External foreground jobs are unaffected — they go
+                // through `giveToJob`, which independently installs
+                // its own user-mode termios. Errors from `func`
+                // propagate; termios is restored either way.
+                var eval_ctx = EvalCtx{ .session = session, .alloc = alloc, .pending = &pending };
+                try terminal.withCookedTty(session.controlling_tty_fd, &eval_ctx, runEvaluatePending);
                 const end_s: i64 = nowSeconds();
                 // Parse incomplete → keep accumulating; show `... ` next.
                 const incomplete = pending.items.len == before_len and pending.items.len > 0;
@@ -2248,6 +2257,19 @@ fn resolveHistoryJsonlPath(allocator: Allocator) !?[]u8 {
 // =============================================================================
 // Shared parse/lower/run helpers
 // =============================================================================
+
+/// Bundle of pointers passed through `terminal.withCookedTty` so the
+/// thunk can call `evaluatePending` without naming closure-captured
+/// state. See the call site in `runRaw`.
+const EvalCtx = struct {
+    session: *session_mod.Session,
+    alloc: Allocator,
+    pending: *std.ArrayListUnmanaged(u8),
+};
+
+fn runEvaluatePending(ctx: *EvalCtx) anyerror!void {
+    _ = try evaluatePending(ctx.session, ctx.alloc, ctx.pending);
+}
 
 /// Parse + lower + run the buffered source. Four outcomes:
 ///   - whitespace-only buffer → no-op, clear and return current status
