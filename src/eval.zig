@@ -233,18 +233,26 @@ fn evalCommand(
         }
     }
 
-    // Pre-flight existence check so a miss can route through the
-    // `command_not_found` rescue hook (or emit a clear stderr
-    // message) BEFORE we fork a child whose only job would be to
-    // fail with ENOENT. Two shapes:
+    // Pre-flight existence + executability check so a miss can route
+    // through the `command_not_found` rescue hook (or emit a clear
+    // stderr message) BEFORE we fork a child whose only job would
+    // be to fail with ENOENT / EACCES / EISDIR. Two shapes:
     //
-    //   - Bare name (no `/`): consult `$PATH` — only a miss across
-    //     the whole search counts as not-found.
-    //   - Path-shaped (contains `/`): skip `$PATH`; check the path
-    //     itself with `access(F_OK)`. Doesn't catch EACCES (file
-    //     exists but isn't executable) — that still surfaces as
-    //     exit 126 from the child, matching POSIX. We're only
-    //     intercepting the "no such file" case here.
+    //   - Bare name (no `/`): consult `$PATH`. A miss across the
+    //     whole search routes through `handleCommandNotFound` —
+    //     gets the rescue hook + zsh-style `command not found`
+    //     message.
+    //
+    //   - Path-shaped (contains `/`): skip `$PATH`; `stat` the path
+    //     directly. Distinguish three failure modes the way bash
+    //     does: ENOENT → `No such file or directory` (exit 127);
+    //     EISDIR → `Is a directory` (exit 126); EACCES (file
+    //     exists but isn't executable) → `Permission denied`
+    //     (exit 126). For path-shaped ENOENT we still call into
+    //     the rescue hook (`command_not_found` cmd, if defined),
+    //     but the bare stderr message says `No such file or
+    //     directory` — more accurate than `command not found:`
+    //     for an explicit path the user typed.
     if (std.mem.indexOfScalar(u8, exe_text, '/') == null) {
         if (try lookupOnPath(session, ctx.scratch, exe_text)) |_| {
             // Hit — the resolution is cached and `runExternalSingle`
@@ -254,12 +262,74 @@ fn evalCommand(
         }
     } else {
         const path_z = try ctx.scratch.dupeZ(u8, exe_text);
-        if (std.c.access(path_z.ptr, std.c.F_OK) != 0) {
-            return try handleCommandNotFound(c, argv.items, session, ctx, sink);
+        if (stat.statPath(path_z.ptr)) |info| {
+            // File exists. Distinguish directory vs not-executable
+            // before letting `runExternalSingle` fork.
+            if (info.kind == .directory) {
+                return try emitPathExecError(session, exe_text, "Is a directory", 126);
+            }
+            if (std.c.access(path_z.ptr, std.c.X_OK) != 0) {
+                return try emitPathExecError(session, exe_text, "Permission denied", 126);
+            }
+            // Otherwise it's accessible and executable — fall
+            // through to the normal external spawn.
+        } else {
+            // stat failed — typically ENOENT, "no such path."
+            // Route through the path-shaped not-found handler so a
+            // user-defined `cmd command_not_found { ... }` still
+            // gets a chance, but the bare-error message says
+            // `No such file or directory` (bash-style) instead of
+            // the PATH-search-shaped `command not found:` message.
+            return try handleCommandNotFoundPath(c, argv.items, session, ctx, sink);
         }
     }
 
     return try runExternalSingle(c, argv.items, local_env, session, ctx, sink);
+}
+
+/// Path-shaped equivalent of `handleCommandNotFound`. Same rescue-
+/// hook dispatch, but the bare-error message is `slash: NAME: No
+/// such file or directory` (bash-style), not `slash: command not
+/// found: NAME`. Same exit code (127) and same `last_status_explained`
+/// flag.
+fn handleCommandNotFoundPath(
+    c: *const Command,
+    argv: []const []const u8,
+    session: *Session,
+    ctx: EvalContext,
+    sink: ?Sink,
+) !EvalOutcome {
+    const orig_name = argv[0];
+
+    if (!session.handling_not_found) {
+        if (session.defs.lookup("command_not_found")) |handler_body| {
+            session.handling_not_found = true;
+            defer session.handling_not_found = false;
+            var handler_argv = std.ArrayListUnmanaged([]const u8).empty;
+            defer handler_argv.deinit(ctx.scratch);
+            try handler_argv.append(ctx.scratch, "command_not_found");
+            for (argv) |a| try handler_argv.append(ctx.scratch, a);
+            return try runUserDefinedCommand(c, handler_body, handler_argv.items, session, ctx, sink);
+        }
+    }
+
+    return try emitPathExecError(session, orig_name, "No such file or directory", 127);
+}
+
+/// Emit `slash: NAME: REASON\n` to stderr, mark the failure as
+/// already explained (so the pre-prompt notice doesn't print a
+/// redundant `slash: exit N` line), and return a failed outcome.
+fn emitPathExecError(
+    session: *Session,
+    name: []const u8,
+    reason: []const u8,
+    exit_code: u8,
+) !EvalOutcome {
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "slash: {s}: {s}\n", .{ name, reason }) catch "slash: cannot execute\n";
+    _ = std.c.write(2, msg.ptr, msg.len);
+    session.last_status_explained = true;
+    return makeFailedOutcome(session, name, .{ .exited = exit_code });
 }
 
 /// Dispatch the `command not found` path. Two outcomes:

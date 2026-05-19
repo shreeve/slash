@@ -105,8 +105,8 @@ abbreviations, and key-binding recipes.
 
 Slash is tested as a Unix shell, not just as a parser.
 
-- **v1.2.0.** Linux + macOS CI is green.
-- **166 / 166 tests** passing: 102 unit + headless, 64 PTY-driven.
+- **v1.3.0.** Linux + macOS CI is green.
+- **180 / 180 tests** passing: 113 unit + headless, 67 PTY-driven.
 - **77 / 77 items** checked in [`CHECKLIST.md`](./CHECKLIST.md), the
   operational-correctness audit drawn from POSIX, APUE, and Harvard CS61.
 - **Interactive validation** in [`VALIDATION.md`](./VALIDATION.md)

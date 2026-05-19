@@ -2030,14 +2030,19 @@ fn cmdDelete(session: *session_mod.Session, names: []const []const u8) anyerror!
 //
 //   key                       List all bindings, canonical form, one per line.
 //   key -l   / --list         Same.
+//   key KEYSPEC               Print the binding for KEYSPEC, or exit
+//                             non-zero with `key: no binding for ...`
+//                             if unbound.
 //   key --actions             List every registered action with kebab-name.
 //   key -r   / --reset        Drop every user binding (back to slash defaults).
 //   key -e KEYSPEC / --erase  Remove the binding for KEYSPEC.
 //   key KEYSPEC action-name   Bind KEYSPEC to a named editor action.
 //   key KEYSPEC "literal"     Bind KEYSPEC to literal text (\n = accept).
 //
-// `-l`, `-e`, `-r` are shared with `str` and `cmd`. The trio uses
-// one fixed flag set with no aliases (matching fish's convention).
+// `-l`, `-e`, `-r` are shared with `str` and `cmd`. So is the
+// single-arg query form (`str NAME` / `cmd NAME` / `key KEYSPEC`).
+// The trio uses one fixed flag set with no aliases (matching fish's
+// convention).
 //
 // Disambiguation rule for the third arg:
 //
@@ -2099,12 +2104,135 @@ fn keyFn(argv: []const []const u8, io: BuiltinIo, ctx: BuiltinContext) anyerror!
         return keyDelete(session, io, args[1]);
     }
 
-    if (args.len < 2) {
-        _ = writeAllToFd(io.stderr, "key: usage: key KEYSPEC ACTION-OR-STRING\n");
-        return .{ .exited = 2 };
-    }
+    // Single-arg form is a query: print the binding (if any) for
+    // the given KEYSPEC, in the same `key spec \ttarget\n` shape
+    // that `keyList` uses for the all-bindings case. Matches the
+    // `str NAME` and `cmd NAME` query forms — completes trio
+    // symmetry. Routes through the same KEYSPEC parser as bind /
+    // erase / list, so an unbound keyspec is "no binding for
+    // <canonical>", not "bad spec" — and an *invalid* keyspec is
+    // still a parse error from `parseKeySpecSequence`.
+    if (args.len == 1) return keyQuery(session, io, args[0]);
 
     return keyBind(session, io, args[0], args[1]);
+}
+
+fn keyQuery(
+    session: *session_mod.Session,
+    io: BuiltinIo,
+    spec: []const u8,
+) anyerror!Result {
+    const seq = keybinding.parseKeySpecSequence(session.alloc, spec) catch |err| {
+        var buf: [256]u8 = undefined;
+        const msg = switch (err) {
+            error.EmptyKeySpec => "key: empty key specification",
+            error.UnknownModifier => "key: unknown modifier in key specification",
+            error.UnknownKey => "key: unknown key name in key specification",
+            error.MultiChordNotSupported => "key: too many chords in sequence (max 8)",
+            error.InvalidEscape => "key: invalid escape in key specification",
+            error.OutOfMemory => "key: out of memory",
+        };
+        const out = std.fmt.bufPrint(&buf, "{s}: '{s}'\n", .{ msg, spec }) catch "key: bad spec\n";
+        _ = writeAllToFd(io.stderr, out);
+        return .{ .exited = 2 };
+    };
+    defer session.alloc.free(seq);
+
+    // Single-chord vs multi-chord lookup mirror `keyDelete`.
+    if (seq.len == 1) {
+        const target = session.keybindings.lookupChord(seq[0]) orelse {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "key: no binding for '{s}'\n", .{spec}) catch "key: no binding\n";
+            _ = writeAllToFd(io.stderr, msg);
+            return .{ .exited = 1 };
+        };
+        try writeKeyRowFromChord(session, io, seq[0], target);
+        return .{ .exited = 0 };
+    }
+
+    // Multi-chord query: walk the binding table looking for an
+    // entry whose `seq` matches.
+    if (session.binding_table) |bt| {
+        var kev_buf: [keybinding.MAX_CHORD_SEQUENCE]zigline_mod.KeyEvent = undefined;
+        for (seq, 0..) |bk, i| kev_buf[i] = bk.toKeyEvent();
+        const kev_seq = kev_buf[0..seq.len];
+        const found = bt.lookup(kev_seq);
+        if (found == .bound) {
+            try writeKeyRowFromMulti(session, io, seq, found.bound);
+            return .{ .exited = 0 };
+        }
+    }
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "key: no binding for '{s}'\n", .{spec}) catch "key: no binding\n";
+    _ = writeAllToFd(io.stderr, msg);
+    return .{ .exited = 1 };
+}
+
+fn writeKeyRowFromChord(
+    session: *session_mod.Session,
+    io: BuiltinIo,
+    chord: keybinding.BindingKey,
+    target: keybinding.BindingTarget,
+) anyerror!void {
+    var spec_buf = std.ArrayListUnmanaged(u8).empty;
+    defer spec_buf.deinit(session.alloc);
+    var sw = std.Io.Writer.Allocating.fromArrayList(session.alloc, &spec_buf);
+    defer spec_buf = sw.toArrayList();
+    keybinding.formatKey(chord, &sw.writer) catch {};
+    var target_buf = std.ArrayListUnmanaged(u8).empty;
+    defer target_buf.deinit(session.alloc);
+    switch (target) {
+        .action => |a| try formatActionForList(session.alloc, &target_buf, a),
+        .literal => |bytes| try formatLiteralForList(session.alloc, &target_buf, bytes),
+    }
+    var line = std.ArrayListUnmanaged(u8).empty;
+    defer line.deinit(session.alloc);
+    try line.appendSlice(session.alloc, sw.written());
+    try line.appendSlice(session.alloc, " \t");
+    try line.appendSlice(session.alloc, target_buf.items);
+    try line.append(session.alloc, '\n');
+    _ = writeAllToFd(io.stdout, line.items);
+}
+
+fn writeKeyRowFromMulti(
+    session: *session_mod.Session,
+    io: BuiltinIo,
+    seq: []const keybinding.BindingKey,
+    action: zigline_mod.Action,
+) anyerror!void {
+    var spec_buf = std.ArrayListUnmanaged(u8).empty;
+    defer spec_buf.deinit(session.alloc);
+    var sw = std.Io.Writer.Allocating.fromArrayList(session.alloc, &spec_buf);
+    defer spec_buf = sw.toArrayList();
+    var first = true;
+    for (seq) |bk| {
+        if (!first) sw.writer.writeAll(",") catch break;
+        keybinding.formatKey(bk, &sw.writer) catch break;
+        first = false;
+    }
+    var target_buf = std.ArrayListUnmanaged(u8).empty;
+    defer target_buf.deinit(session.alloc);
+    switch (action) {
+        .custom => |id| {
+            if (id >= session_mod.MULTI_CHORD_LITERAL_ID_BASE) {
+                if (session.lookupMultiChordLiteral(id)) |bytes| {
+                    try formatLiteralForList(session.alloc, &target_buf, bytes);
+                } else {
+                    try target_buf.appendSlice(session.alloc, "<missing literal>");
+                }
+            } else {
+                try formatActionForList(session.alloc, &target_buf, action);
+            }
+        },
+        else => try formatActionForList(session.alloc, &target_buf, action),
+    }
+    var line = std.ArrayListUnmanaged(u8).empty;
+    defer line.deinit(session.alloc);
+    try line.appendSlice(session.alloc, sw.written());
+    try line.appendSlice(session.alloc, " \t");
+    try line.appendSlice(session.alloc, target_buf.items);
+    try line.append(session.alloc, '\n');
+    _ = writeAllToFd(io.stdout, line.items);
 }
 
 fn keyBind(

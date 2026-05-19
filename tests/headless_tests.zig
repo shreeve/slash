@@ -1402,15 +1402,77 @@ const cases: []const Case = &.{
         },
     },
     .{
-        // Path-shaped names (containing `/`) skip the PATH search and
-        // surface the underlying exec failure; the message still
-        // names the path so the user can fix their typo.
-        .name = "command not found: path with `/` still emits a message",
+        // Path-shaped ENOENT: the bare-error message is the bash-
+        // style `slash: NAME: No such file or directory`, not the
+        // PATH-search-shaped `command not found:` form. Same exit
+        // code (127), same `last_status_explained` suppression of
+        // the redundant pre-prompt notice.
+        .name = "command not found: path with `/` says 'No such file or directory'",
         .source = "./no-such-script",
         .expect = .{
             .exit_code = 127,
-            .stderr_contains = true,
-            .stderr = "command not found: ./no-such-script",
+            .stderr = "slash: ./no-such-script: No such file or directory\n",
+        },
+    },
+
+    // ---- exec failures: EACCES (Permission denied) + EISDIR (Is a directory)
+
+    .{
+        // Path-shaped name that exists but isn't executable. bash-
+        // style stderr message, exit 126. Tested via `/etc/hosts`
+        // which exists on every POSIX-shaped CI runner and isn't
+        // executable. (We can't easily create + chmod a fixture
+        // file from inside the headless test source string.)
+        .name = "exec: existing-but-not-executable path emits 'Permission denied' (exit 126)",
+        .source = "/etc/hosts",
+        .expect = .{
+            .exit_code = 126,
+            .stderr = "slash: /etc/hosts: Permission denied\n",
+        },
+    },
+    .{
+        .name = "exec: directory path emits 'Is a directory' (exit 126)",
+        .source = "/tmp",
+        .expect = .{
+            .exit_code = 126,
+            .stderr = "slash: /tmp: Is a directory\n",
+        },
+    },
+
+    // ---- `key NAME` query (completes the trio with `str NAME` / `cmd NAME`)
+
+    .{
+        .name = "key: query existing binding prints canonical form",
+        .source = "key Esc-Q history-prev-prefix; key Esc-Q",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "Esc-q \thistory-prev-prefix\n",
+            .stdout_contains = true,
+        },
+    },
+    .{
+        .name = "key: query unbound returns 1 with stderr message",
+        .source = "key Esc-Z",
+        .expect = .{
+            .exit_code = 1,
+            .stderr = "key: no binding for 'Esc-Z'\n",
+        },
+    },
+    .{
+        .name = "key: query a literal binding round-trips",
+        .source = "key Esc-Q \"echo hi\\n\"; key Esc-Q",
+        .expect = .{
+            .exit_code = 0,
+            .stdout = "Esc-q \t\"echo hi\\n\"\n",
+            .stdout_contains = true,
+        },
+    },
+    .{
+        .name = "key: query bad spec is a parse error (exit 2)",
+        .source = "key Foo-bar",
+        .expect = .{
+            .exit_code = 2,
+            .stderr = "key: unknown key name in key specification: 'Foo-bar'\n",
         },
     },
 

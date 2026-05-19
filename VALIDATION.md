@@ -430,3 +430,85 @@ Tests: 129/129 (66 in headless + 63 in PTY). Existing
 the 100ms grace window covers wc's read+flush latency.
 
 ---
+
+## Run: 2026-05-19 — v1.3.0 prep
+
+Not a full interactive walkthrough this time — instead, a record of
+the new tested guarantees added between v1.2.0 and v1.3.0. Each item
+below has at least one regression test (headless or PTY).
+
+### Tty / output discipline
+
+- **OPOST/staircase fix.** Multi-row builtin output (`key`, `jobs`,
+  `history`, `set`-style listings) used to render as a staircase —
+  each row past the first started at the column where the previous
+  row ended — when anything in the editor / signal-handler / job-
+  control chain had left OPOST off. New `terminal.withCookedTty`
+  helper brackets `evaluatePending` so the kernel always translates
+  `\n` → `\r\n` for in-process builtin output; external foreground
+  jobs already had this guarantee via `giveToJob`. PTY regression
+  test asserts `\r\n` (not bare `\n`) in `key` output.
+
+### `cmd` / `str` / `key` registry surface
+
+- **`cmd` builtin.** Listing / query / erase / reset surface for
+  user-defined commands, companion to the `cmd NAME { body }`
+  keyword form. Lexer wrapper now contextually promotes `cmd` to a
+  `cmd_open` token only when a definition opener (`{` or NEWLINE+
+  INDENT) actually follows; plain `cmd` lexes as a regular IDENT
+  and routes through `simple_command` to the builtin.
+- **`Define.source_text`** carries a copy of the original
+  `cmd NAME ...` source bytes through lowering, so `cmd NAME`
+  reprints the exact text the user typed (brace OR indent form).
+- **Trio flag uniformity.** `key` / `str` / `cmd` all accept
+  `-l` / `--list` (list all), `-e NAME` / `--erase NAME` (erase),
+  `-r` / `--reset` (clear all). Single-arg `BUILTIN NAME` queries
+  one entry — including `key KEYSPEC`, which previously errored
+  with "usage". No `-d` / `--delete` aliases; the trio uses one
+  spelling.
+
+### Command-not-found path
+
+- **Specific stderr message.** Bare-name PATH miss → `slash:
+  command not found: NAME` (zsh-style); path-shaped ENOENT →
+  `slash: NAME: No such file or directory` (bash-style). Both
+  set `Session.last_status_explained` so the redundant generic
+  `slash: exit 127` notice is suppressed.
+- **`command_not_found` rescue hook.** Defining `cmd
+  command_not_found { ... }` intercepts the not-found path. The
+  handler runs with `$0 = "command_not_found"`, `$1 = original
+  name`, `$2..$N = original args`. Its exit status becomes the
+  failed command's exit status. Re-entry guard via
+  `Session.handling_not_found` prevents infinite recursion when
+  the handler itself runs a missing command.
+- **Exec failure messages.** `slash: NAME: Permission denied`
+  (EACCES, exit 126) for path-shaped names that exist but aren't
+  executable. `slash: NAME: Is a directory` (EISDIR, exit 126)
+  for directory paths invoked as commands. Both bash-shape.
+
+### macOS keyboard handling
+
+- **Canonical `Esc-X` chord display.** Listing prints `Esc-X`
+  instead of `Alt-X` everywhere — wire-honest (terminals emit a
+  literal `\e` byte prefix on the next keystroke regardless of
+  platform) and accurate on Macs that don't have an Alt key. All
+  input aliases (`Alt-`, `Meta-`, `Esc-`, `Option-`, `Opt-`) still
+  parse to the same chord; only the output spelling changed.
+- **Compose-mode reverse-lookup deleted.** The 200-line
+  `keyboards.zig` shim that mapped Mac compose codepoints (`¬`,
+  `π`, `Ω`, …) back to their originating letter is gone. Users
+  who want one-keystroke `Esc-X` chords on macOS enable "Use
+  Option as Meta key" in their terminal preferences (Option+X
+  emits `\e X`); users who don't want to flip the toggle press
+  Esc, then X within the meta-timeout window. Compose chars stay
+  as data, so you can type `π` if you want `π`.
+- **zigline 0.7.3** with new `Options.meta_timeout_ms`. Slash
+  sets it to 500ms (matching GNU readline's `keyseq-timeout` and
+  bash / zsh) so two-keystroke `Esc-X` entry feels natural at
+  the prompt without flipping terminal preferences.
+
+Tests: 180/180 (113 in headless + 67 in PTY). The full suite
+runs in under a minute on a current laptop; CI runs both
+ubuntu-latest and macos-latest matrices.
+
+---
